@@ -1,18 +1,18 @@
 //! The Lab Streaming Layer, for Rust programs.
 //!
 //! This crate is the API that a Rust program uses. It holds no protocol code.
-//! The protocol lives in `lsl-net`, `lsl-proto`, `lsl-wire`, and `lsl-time`, and
+//! The protocol lives in `labstream-net`, `labstream-proto`, `labstream-wire`, and `labstream-time`, and
 //! those crates stay exact to the C++ library at `sccn/liblsl`. A program that
 //! needs a protocol detail can still call them.
 //!
 //! # Read a stream
 //!
 //! ```no_run
-//! use lsl::{Buffer, Chunk, Inlet, Post, Query};
+//! use labstream::{Buffer, Chunk, Inlet, Post, Query};
 //! use std::time::Duration;
 //!
-//! # fn main() -> Result<(), lsl::Error> {
-//! let info = lsl::resolve_first(&Query::stream_type("EEG"), Duration::from_secs(5))?
+//! # fn main() -> Result<(), labstream::Error> {
+//! let info = labstream::resolve_first(&Query::stream_type("EEG"), Duration::from_secs(5))?
 //!     .expect("an EEG stream");
 //! let mut inlet = Inlet::builder(&info)
 //!     .buffer(Buffer::Seconds(8.0))
@@ -37,9 +37,9 @@
 //! # Publish a stream
 //!
 //! ```no_run
-//! use lsl::{Format, Outlet, StreamInfo};
+//! use labstream::{Format, Outlet, StreamInfo};
 //!
-//! # fn main() -> Result<(), lsl::Error> {
+//! # fn main() -> Result<(), labstream::Error> {
 //! let info = StreamInfo::builder("MyDevice", "EEG", Format::Float32)
 //!     .rate(250.0)
 //!     .source_id("device-0001")
@@ -68,7 +68,7 @@ pub use query::Query;
 pub use scalar::{as_f64, as_text, Scalar};
 
 /// The sample format of a stream.
-pub use lsl_wire::Format;
+pub use labstream_wire::Format;
 
 use std::time::Duration;
 
@@ -129,7 +129,7 @@ impl From<std::io::Error> for Error {
 /// This is the call for a browser. It waits the whole time, because a slow host
 /// answers late and a browser must show it.
 pub fn resolve_all(query: &Query, timeout: Duration) -> Result<Vec<StreamInfo>, Error> {
-    let found = lsl_net::resolve(query.as_str(), usize::MAX, timeout)?;
+    let found = labstream_net::resolve(query.as_str(), usize::MAX, timeout)?;
     Ok(found
         .into_iter()
         .map(|inner| StreamInfo { inner })
@@ -141,7 +141,7 @@ pub fn resolve_all(query: &Query, timeout: Duration) -> Result<Vec<StreamInfo>, 
 /// This is the call for a program that knows the stream it wants. It returns as
 /// soon as that stream answers, so it does not wait the whole time.
 pub fn resolve_first(query: &Query, timeout: Duration) -> Result<Option<StreamInfo>, Error> {
-    let found = lsl_net::resolve(query.as_str(), 1, timeout)?;
+    let found = labstream_net::resolve(query.as_str(), 1, timeout)?;
     Ok(found.into_iter().next().map(|inner| StreamInfo { inner }))
 }
 
@@ -153,7 +153,7 @@ pub fn resolve_at_least(
     count: usize,
     timeout: Duration,
 ) -> Result<Vec<StreamInfo>, Error> {
-    let found = lsl_net::resolve(query.as_str(), count, timeout)?;
+    let found = labstream_net::resolve(query.as_str(), count, timeout)?;
     Ok(found
         .into_iter()
         .map(|inner| StreamInfo { inner })
@@ -165,7 +165,7 @@ pub fn resolve_at_least(
 /// Every timestamp of this library uses this clock. The value counts from an
 /// arbitrary moment, so only a difference of two values has meaning.
 pub fn clock() -> f64 {
-    lsl_net::clock()
+    labstream_net::clock()
 }
 
 /// Watch the network and keep a current list of streams.
@@ -177,7 +177,7 @@ pub fn clock() -> f64 {
 /// The thread stops when the watcher is dropped.
 ///
 /// ```no_run
-/// # use lsl::{Query, Watcher};
+/// # use labstream::{Query, Watcher};
 /// # use std::time::Duration;
 /// let watcher = Watcher::new(&Query::all(), Duration::from_secs(5));
 /// for info in watcher.streams() {
@@ -185,7 +185,7 @@ pub fn clock() -> f64 {
 /// }
 /// ```
 pub struct Watcher {
-    inner: lsl_net::ContinuousResolver,
+    inner: labstream_net::ContinuousResolver,
 }
 
 impl Watcher {
@@ -195,7 +195,10 @@ impl Watcher {
     /// liblsl forgets after 5 seconds by default (`include/lsl_cpp.h:1641`).
     pub fn new(query: &Query, forget_after: Duration) -> Watcher {
         Watcher {
-            inner: lsl_net::ContinuousResolver::new(query.as_str(), forget_after.as_secs_f64()),
+            inner: labstream_net::ContinuousResolver::new(
+                query.as_str(),
+                forget_after.as_secs_f64(),
+            ),
         }
     }
 

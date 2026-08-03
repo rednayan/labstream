@@ -74,11 +74,11 @@ impl Buffer {
 ///
 /// Open one with [`Inlet::builder`].
 pub struct Inlet {
-    inner: lsl_net::Inlet,
+    inner: labstream_net::Inlet,
     info: StreamInfo,
-    /// The block that `lsl-net` fills. It is kept so that a read allocates
+    /// The block that `labstream-net` fills. It is kept so that a read allocates
     /// nothing after the first one.
-    scratch: Vec<lsl_wire::Sample>,
+    scratch: Vec<labstream_wire::Sample>,
 }
 
 /// The builder for [`Inlet`].
@@ -218,9 +218,9 @@ impl<'a> Builder<'a> {
         let samples = self.buffer.samples(self.info.rate());
         let buffered = samples.min(i32::MAX as usize) as i32;
         let mut inner = if self.recover {
-            lsl_net::Inlet::open_recovering(&self.info.inner, timeout, buffered)?
+            labstream_net::Inlet::open_recovering(&self.info.inner, timeout, buffered)?
         } else {
-            lsl_net::Inlet::open_with_buffer(&self.info.inner, timeout, buffered)?
+            labstream_net::Inlet::open_with_buffer(&self.info.inner, timeout, buffered)?
         };
         inner.set_postprocessing(self.post.bits());
         let info = StreamInfo {

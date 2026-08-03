@@ -1,8 +1,8 @@
-//! The whole API, over a real socket, with nothing but the `lsl` crate.
+//! The whole API, over a real socket, with nothing but the `labstream` crate.
 //!
 //! If a program can do this, the API is complete: publish, discover, read the
 //! channels, and read a block of samples.
-use lsl::{Buffer, Channel, Chunk, Format, Inlet, Outlet, Post, Query, StreamInfo};
+use labstream::{Buffer, Channel, Chunk, Format, Inlet, Outlet, Post, Query, StreamInfo};
 use std::time::Duration;
 
 const RATE: f64 = 250.0;
@@ -26,8 +26,8 @@ fn a_program_uses_only_this_crate() {
     let outlet = Outlet::new(info).expect("an outlet");
 
     // ── discover ────────────────────────────────────────────────────────────
-    let found =
-        lsl::resolve_all(&Query::stream_type("EEG"), Duration::from_secs(2)).expect("a resolve");
+    let found = labstream::resolve_all(&Query::stream_type("EEG"), Duration::from_secs(2))
+        .expect("a resolve");
     let mine = found
         .iter()
         .find(|s| s.source_id() == "facade-test-1")
@@ -64,7 +64,7 @@ fn a_program_uses_only_this_crate() {
         .flat_map(|k| (0..CH).map(move |c| (k * 10 + c) as f32))
         .collect();
     outlet
-        .push_chunk(&data, lsl::clock())
+        .push_chunk(&data, labstream::clock())
         .expect("a block write");
 
     let mut chunk = Chunk::<f32>::new(CH, 4096);
@@ -126,7 +126,7 @@ fn a_watcher_finds_a_stream_without_a_wait() {
         .expect("a description");
     let _outlet = Outlet::new(info).expect("an outlet");
 
-    let watcher = lsl::Watcher::new(&Query::stream_type("Watched"), Duration::from_secs(5));
+    let watcher = labstream::Watcher::new(&Query::stream_type("Watched"), Duration::from_secs(5));
     let end = std::time::Instant::now() + Duration::from_secs(10);
     while watcher.is_empty() && std::time::Instant::now() < end {
         std::thread::sleep(Duration::from_millis(100));

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 /// Publish samples for other programs to read.
 pub struct Outlet {
-    inner: lsl_net::Outlet,
+    inner: labstream_net::Outlet,
     info: StreamInfo,
     channels: usize,
 }
@@ -16,7 +16,7 @@ impl Outlet {
     /// The stream is on the network when this call returns.
     pub fn new(info: StreamInfo) -> Result<Outlet, Error> {
         let channels = info.channel_count();
-        let inner = lsl_net::Outlet::new(info.inner.clone())?;
+        let inner = labstream_net::Outlet::new(info.inner.clone())?;
         Ok(Outlet {
             inner,
             info,
@@ -38,7 +38,7 @@ impl Outlet {
     /// liblsl reads past the end of a short buffer instead
     /// (`include/lsl_cpp.h:1094`).
     pub fn push<T: Scalar>(&self, sample: &[T]) -> Result<(), Error> {
-        self.push_at(sample, lsl_net::clock())
+        self.push_at(sample, labstream_net::clock())
     }
 
     /// Write one sample with a timestamp that the caller measured.
@@ -52,7 +52,7 @@ impl Outlet {
                 got: sample.len(),
             });
         }
-        self.inner.push(&lsl_wire::Sample {
+        self.inner.push(&labstream_wire::Sample {
             timestamp,
             values: sample.iter().map(|v| v.into_value()).collect(),
         });
@@ -80,9 +80,9 @@ impl Outlet {
                 got: data.len(),
             });
         }
-        let block: Vec<lsl_wire::Sample> = data
+        let block: Vec<labstream_wire::Sample> = data
             .chunks_exact(self.channels)
-            .map(|row| lsl_wire::Sample {
+            .map(|row| labstream_wire::Sample {
                 timestamp: 0.0, // the block call dates every sample
                 values: row.iter().map(|v| v.into_value()).collect(),
             })
@@ -95,7 +95,7 @@ impl Outlet {
     ///
     /// A marker stream has one channel and the format `String`.
     pub fn push_text(&self, marker: &str) -> Result<(), Error> {
-        self.push_text_at(marker, lsl_net::clock())
+        self.push_text_at(marker, labstream_net::clock())
     }
 
     /// Write one text marker with a timestamp that the caller measured.
@@ -106,9 +106,9 @@ impl Outlet {
                 got: self.channels,
             });
         }
-        self.inner.push(&lsl_wire::Sample {
+        self.inner.push(&labstream_wire::Sample {
             timestamp,
-            values: vec![lsl_wire::Value::Str(marker.as_bytes().to_vec())],
+            values: vec![labstream_wire::Value::Str(marker.as_bytes().to_vec())],
         });
         Ok(())
     }

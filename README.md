@@ -1,20 +1,20 @@
-# lsl-rs
+# labstream
 
 The Lab Streaming Layer, for Rust programs.
 
 This crate is the API that a Rust program calls. It holds no protocol code. The
-protocol lives in [`lsl-rustlang`](../lsl-rustlang), and those crates stay exact
+protocol lives in [`labstream-core`](../labstream-core), and those crates stay exact
 to the C++ library at `sccn/liblsl`.
 
 ```
-        lsl          this crate: the API a Rust program calls
-       /   \
- lsl-capi   lsl-net  the protocol, exact to sccn/liblsl
-             |
-   lsl-proto, lsl-wire, lsl-time
+       labstream            this crate: the API a Rust program calls
+        /      \
+labstream-capi  labstream-net    the protocol, exact to sccn/liblsl
+                     |
+   labstream-proto, labstream-wire, labstream-time
 ```
 
-Two APIs are necessary because one API cannot do both jobs. `lsl-net` answers to
+Two APIs are necessary because one API cannot do both jobs. `labstream-net` answers to
 the C++ source, line by line, and that is what makes the conformance claim true.
 This crate answers to the person who writes the program.
 
@@ -25,10 +25,10 @@ Version 0.1.0. The API can change before version 1.0.
 ## Read a stream
 
 ```rust
-use lsl::{Buffer, Chunk, Inlet, Post, Query};
+use labstream::{Buffer, Chunk, Inlet, Post, Query};
 use std::time::Duration;
 
-let info = lsl::resolve_first(&Query::stream_type("EEG"), Duration::from_secs(5))?
+let info = labstream::resolve_first(&Query::stream_type("EEG"), Duration::from_secs(5))?
     .expect("an EEG stream");
 
 let mut inlet = Inlet::builder(&info)
@@ -53,7 +53,7 @@ loop {
 ## Publish a stream
 
 ```rust
-use lsl::{Channel, Format, Outlet, StreamInfo};
+use labstream::{Channel, Format, Outlet, StreamInfo};
 
 let info = StreamInfo::builder("MyDevice", "EEG", Format::Float32)
     .rate(250.0)
@@ -98,7 +98,7 @@ The tests need no hardware. They publish their own stream and read it back.
 ## Conventions
 
 Documents and code comments follow ASD-STE100 Simplified Technical English, as
-in `lsl-rustlang`. Before a pull request, run:
+in `labstream-core`. Before a pull request, run:
 
 ```sh
 cargo fmt --all

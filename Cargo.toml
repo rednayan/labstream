@@ -1,25 +1,25 @@
 [package]
-name = "lsl"
+name = "labstream"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"
 description = "The Lab Streaming Layer, for Rust programs."
-repository = "https://github.com/rednayan/lsl-rs"
+repository = "https://github.com/rednayan/labstream"
 authors = ["rednayan"]
 keywords = ["lsl", "labstreaminglayer", "eeg", "neuroscience", "streaming"]
 categories = ["network-programming", "science"]
 readme = "README.md"
 
-# The protocol crates of `lsl-rustlang`. This crate holds no protocol code.
+# The protocol crates of `labstream-core`. This crate holds no protocol code.
 #
 # The paths are relative, because the two repositories are developed together.
 # For a build without the checkout, name the git repository instead:
-#   lsl-net = { git = "https://github.com/rednayan/lsl-rustlang" }
+#   labstream-net = { git = "https://github.com/rednayan/labstream-core" }
 [dependencies]
-lsl-net = { path = "../lsl-rustlang/crates/lsl-net" }
-lsl-wire = { path = "../lsl-rustlang/crates/lsl-wire" }
+labstream-net = { path = "../labstream-core/crates/labstream-net" }
+labstream-wire = { path = "../labstream-core/crates/labstream-wire" }
 
 [dev-dependencies]
-# The example that measures the block calls reads the queue of `lsl-net`.
-lsl-time = { path = "../lsl-rustlang/crates/lsl-time" }
+# The example that measures the block calls reads the queue of `labstream-net`.
+labstream-time = { path = "../labstream-core/crates/labstream-time" }

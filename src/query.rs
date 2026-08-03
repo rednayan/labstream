@@ -11,7 +11,7 @@
 /// Build one with a constructor. Join two with [`Query::and`] or [`Query::or`].
 ///
 /// ```no_run
-/// # use lsl::Query;
+/// # use labstream::Query;
 /// let q = Query::stream_type("EEG").and(Query::property("manufacturer", "Mentalab"));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,7 +25,7 @@ impl Query {
     pub fn all() -> Query {
         Query(format!(
             "session_id={}",
-            literal(&lsl_net::config::get().session_id)
+            literal(&labstream_net::config::get().session_id)
         ))
     }
 

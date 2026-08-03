@@ -1,7 +1,7 @@
 //! The description of a stream, and the builder that makes one.
 
 use crate::Error;
-use lsl_wire::Format;
+use labstream_wire::Format;
 
 /// One channel of a stream.
 ///
@@ -42,7 +42,7 @@ impl Channel {
 /// The description of one stream.
 #[derive(Debug, Clone)]
 pub struct StreamInfo {
-    pub(crate) inner: lsl_net::StreamInfo,
+    pub(crate) inner: labstream_net::StreamInfo,
 }
 
 impl StreamInfo {
@@ -150,13 +150,13 @@ impl StreamInfo {
     /// This opens its own short connection. It does not open a feed, so a browser
     /// can read the channels of a stream that it does not read data from.
     pub fn fetch(&self, timeout: std::time::Duration) -> Result<StreamInfo, Error> {
-        let inner = lsl_net::read_fullinfo(&self.inner, timeout)?;
+        let inner = labstream_net::read_fullinfo(&self.inner, timeout)?;
         Ok(StreamInfo { inner })
     }
 
     /// The description tree, for a program that reads a field this type does not
     /// give.
-    pub fn desc(&self) -> &lsl_net::desc::Node {
+    pub fn desc(&self) -> &labstream_net::desc::Node {
         &self.inner.desc
     }
 }
@@ -252,7 +252,7 @@ impl Builder {
             return Err(Error::Invalid("a stream needs at least one channel"));
         }
 
-        let mut inner = lsl_net::StreamInfo::new(
+        let mut inner = labstream_net::StreamInfo::new(
             &self.name,
             &self.stream_type,
             n as u32,

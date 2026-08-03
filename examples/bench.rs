@@ -3,8 +3,8 @@
 //! Each variant runs alone: the queue is built, used, and dropped before the
 //! next variant starts. Each is measured five times and the fastest is kept.
 //! The order alternates, so a warm allocator cannot favour one of them.
-use lsl_net::queue::SampleQueue;
-use lsl_wire::{Sample, Value};
+use labstream_net::queue::SampleQueue;
+use labstream_wire::{Sample, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

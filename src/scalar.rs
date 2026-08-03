@@ -1,6 +1,6 @@
 //! The sample types that a stream can carry.
 
-use lsl_wire::{Format, Value};
+use labstream_wire::{Format, Value};
 
 mod sealed {
     pub trait Sealed {}
