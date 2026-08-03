@@ -1,0 +1,25 @@
+[package]
+name = "lsl"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+description = "The Lab Streaming Layer, for Rust programs."
+repository = "https://github.com/rednayan/lsl-rs"
+authors = ["rednayan"]
+keywords = ["lsl", "labstreaminglayer", "eeg", "neuroscience", "streaming"]
+categories = ["network-programming", "science"]
+readme = "README.md"
+
+# The protocol crates of `lsl-rustlang`. This crate holds no protocol code.
+#
+# The paths are relative, because the two repositories are developed together.
+# For a build without the checkout, name the git repository instead:
+#   lsl-net = { git = "https://github.com/rednayan/lsl-rustlang" }
+[dependencies]
+lsl-net = { path = "../lsl-rustlang/crates/lsl-net" }
+lsl-wire = { path = "../lsl-rustlang/crates/lsl-wire" }
+
+[dev-dependencies]
+# The example that measures the block calls reads the queue of `lsl-net`.
+lsl-time = { path = "../lsl-rustlang/crates/lsl-time" }
