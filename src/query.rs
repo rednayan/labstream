@@ -54,6 +54,19 @@ impl Query {
         Query(format!("{key}={}", literal(value)))
     }
 
+    /// Only the streams of this session.
+    ///
+    /// LSL groups the machines of one experiment with a session id. A stream of
+    /// another session on the same network does not match. The id comes from
+    /// `lab.SessionID` of the configuration file, and it is `default` when no
+    /// file sets it.
+    ///
+    /// This is the query for a browser that lists the streams of the local
+    /// experiment and not every stream on the subnet.
+    pub fn session() -> Query {
+        Query::property("session_id", &labstream_net::config::get().session_id)
+    }
+
     /// A predicate that the caller writes.
     ///
     /// CAUTION: This text goes to the resolver as it is written. Do not build it
@@ -111,6 +124,14 @@ mod tests {
     #[test]
     fn a_value_with_an_apostrophe_uses_quotes() {
         assert_eq!(Query::name("Bob's EEG").as_str(), "name=\"Bob's EEG\"");
+    }
+
+    #[test]
+    fn a_session_query_names_the_session_of_this_machine() {
+        let q = Query::session();
+        let want = &labstream_net::config::get().session_id;
+        assert!(q.as_str().starts_with("session_id="), "{}", q.as_str());
+        assert!(q.as_str().contains(want.as_str()), "{}", q.as_str());
     }
 
     #[test]

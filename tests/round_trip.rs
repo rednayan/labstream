@@ -145,3 +145,45 @@ fn a_watcher_finds_a_stream_without_a_wait() {
         "the read is immediate"
     );
 }
+
+#[test]
+fn a_marker_stream_goes_out_and_comes_back_as_text() {
+    // A marker stream is irregular and carries one string for each event. It is
+    // the one stream shape that `pull` cannot read, because `Scalar` is `Copy`.
+    let info = StreamInfo::builder("FacadeMarkers", "Markers", Format::String)
+        .rate(0.0)
+        .source_id("facade-markers-1")
+        .channel_count(1)
+        .build()
+        .expect("a description");
+    let outlet = Outlet::new(info).expect("an outlet");
+
+    let found = lsl_resolve("source_id='facade-markers-1'");
+    let mut inlet = Inlet::builder(&found)
+        .buffer(Buffer::Samples(100))
+        .open(Duration::from_secs(5))
+        .expect("an inlet");
+
+    let sent = ["trial start", "cue", "response"];
+    for m in sent {
+        outlet.push_text(m).expect("a marker");
+    }
+
+    let mut got = Vec::new();
+    let end = std::time::Instant::now() + Duration::from_secs(5);
+    while got.len() < sent.len() && std::time::Instant::now() < end {
+        if let Some((at, values)) = inlet.pull_text(Duration::from_millis(100)).expect("a pull") {
+            assert_eq!(values.len(), 1, "a marker stream has one channel");
+            assert!(at > 0.0, "the marker carries a timestamp");
+            got.push(values.into_iter().next().unwrap());
+        }
+    }
+    assert_eq!(got, sent, "every marker arrives, in order");
+}
+
+/// Resolve one stream by predicate, or fail the test.
+fn lsl_resolve(pred: &str) -> StreamInfo {
+    labstream::resolve_first(&Query::predicate(pred), Duration::from_secs(5))
+        .expect("a resolve")
+        .expect("the stream")
+}

@@ -123,6 +123,38 @@ impl Inlet {
         }
     }
 
+    /// Read one sample from a stream that carries text.
+    ///
+    /// A marker stream carries text. [`Inlet::pull`] cannot read one, because its
+    /// value type is [`Scalar`] and a `String` is not `Copy`. This call gives the
+    /// text of each channel instead. A marker stream has one channel, so the
+    /// vector holds one string.
+    ///
+    /// A number that arrives on a text stream gives its decimal form, so a stream
+    /// of mixed values still reads.
+    ///
+    /// ```no_run
+    /// # use labstream::{Inlet, Query};
+    /// # use std::time::Duration;
+    /// # fn main() -> Result<(), labstream::Error> {
+    /// # let info = labstream::resolve_first(&Query::stream_type("Markers"), Duration::from_secs(5))?.unwrap();
+    /// # let mut inlet = Inlet::builder(&info).open(Duration::from_secs(5))?;
+    /// while let Some((at, values)) = inlet.pull_text(Duration::from_millis(20))? {
+    ///     println!("{at} {}", values.join(" "));
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn pull_text(&mut self, timeout: Duration) -> Result<Option<(f64, Vec<String>)>, Error> {
+        match self.inner.pull(timeout)? {
+            Some(s) => Ok(Some((
+                s.timestamp,
+                s.values.iter().map(crate::as_text).collect(),
+            ))),
+            None => Ok(None),
+        }
+    }
+
     /// Read every sample that waits, into a buffer that the caller keeps.
     ///
     /// This is the call for a program that reads a fast stream. The buffer holds
