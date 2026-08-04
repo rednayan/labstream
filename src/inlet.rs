@@ -9,7 +9,20 @@ use std::time::Duration;
 /// clamp. A stage that is not selected does not run.
 ///
 /// The constants of liblsl live in a header that a Rust program cannot read
-/// (`include/lsl/common.h:103`). These are the same values, in this crate.
+/// (`include/lsl/common.h:103`). Each stage below holds the value of that
+/// header.
+///
+/// # One flag of liblsl is absent
+///
+/// liblsl holds a fifth flag, `proc_threadsafe`, and its `proc_ALL` includes
+/// it. That flag guards the state of the filter with a lock, because a C
+/// program can read one inlet from two threads. Its own header says that it
+/// "uses somewhat more CPU".
+///
+/// [`Inlet::pull`](crate::Inlet::pull) takes `&mut self`, so two threads
+/// cannot read one inlet here. The lock would guard nothing and cost time, so
+/// this crate does not offer the flag. [`Post::ALL`] is therefore every stage
+/// that changes a timestamp, and it is not the same number as `proc_ALL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Post(u32);
 
@@ -22,7 +35,11 @@ impl Post {
     pub const DEJITTER: Post = Post(2);
     /// Never let a timestamp go backward.
     pub const MONOTONIZE: Post = Post(4);
-    /// Every stage. This is what a viewer of live signals wants.
+    /// Every stage that changes a timestamp. This is what a viewer of live
+    /// signals wants.
+    ///
+    /// This is not the value of `proc_ALL` in liblsl. The note on [`Post`]
+    /// gives the flag that is absent and the reason.
     pub const ALL: Post = Post(1 | 2 | 4);
 
     /// The bits, for a call that needs the raw value.
