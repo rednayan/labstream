@@ -81,7 +81,34 @@ jobs:
       # minutes. crates.io must hold a trusted publisher for this crate.
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
-      - run: cargo publish --token ${{ steps.auth.outputs.token }}
+
+      # `cargo publish` stops when crates.io already holds the version, and a
+      # release that stops here writes no GitHub release. This step asks
+      # crates.io first, so a second run of one release finishes what the first
+      # one began. It publishes nothing twice, because crates.io holds a
+      # version for ever.
+      # crates.io answers 403 to a request that carries no user agent, so this
+      # sends one. Without it every answer looks the same as a missing version.
+      - name: Publish, unless crates.io holds this version
+        run: |
+          version=$(python3 -c \
+            "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['package']['version'])")
+          code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -A "labstream-release-workflow (github.com/rednayan/labstream-rs)" \
+            "https://crates.io/api/v1/crates/labstream/$version")
+          case "$code" in
+            200)
+              echo "crates.io holds labstream $version already. Nothing to publish."
+              exit 0
+              ;;
+            404)
+              cargo publish --token ${{ steps.auth.outputs.token }}
+              ;;
+            *)
+              echo "::error::crates.io answered $code, and this step reads 200 or 404"
+              exit 1
+              ;;
+          esac
 
   release:
     name: Write the GitHub release
