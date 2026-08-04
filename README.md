@@ -3,8 +3,9 @@
 The Lab Streaming Layer, for Rust programs.
 
 This crate is the API that a Rust program calls. It holds no protocol code. The
-protocol lives in [`labstream-core`](../labstream-core), and those crates stay exact
-to the C++ library at `sccn/liblsl`.
+protocol lives in
+[`labstream-core`](https://github.com/rednayan/labstream-core), and those crates
+stay exact to the C++ library at `sccn/liblsl`.
 
 ```
        labstream            this crate: the API a Rust program calls
@@ -21,6 +22,16 @@ This crate answers to the person who writes the program.
 ## Status
 
 Version 0.1.0. The API can change before version 1.0.
+
+## Add the library to a program
+
+```sh
+cargo add labstream
+```
+
+The crate is `labstream`. This repository is `labstream-rs`, because a
+repository of that name says which language it holds, and a crate on crates.io
+holds Rust already.
 
 ## Read a stream
 

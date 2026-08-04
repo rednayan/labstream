@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.75"
 license = "MIT"
 description = "The Lab Streaming Layer, for Rust programs."
-repository = "https://github.com/rednayan/labstream"
+repository = "https://github.com/rednayan/labstream-rs"
 authors = ["rednayan"]
 keywords = ["lsl", "labstreaminglayer", "eeg", "neuroscience", "streaming"]
 categories = ["network-programming", "science"]
@@ -13,13 +13,21 @@ readme = "README.md"
 
 # The protocol crates of `labstream-core`. This crate holds no protocol code.
 #
-# The paths are relative, because the two repositories are developed together.
-# For a build without the checkout, name the git repository instead:
-#   labstream-net = { git = "https://github.com/rednayan/labstream-core" }
+# These came from a path in a sibling checkout. A person who cloned this
+# repository alone had no such path, and `cargo publish` refuses one. They now
+# come from crates.io, so one clone builds.
 [dependencies]
-labstream-net = { path = "../labstream-core/crates/labstream-net" }
-labstream-wire = { path = "../labstream-core/crates/labstream-wire" }
+labstream-net = "0.1.1"
+labstream-wire = "0.1.1"
 
 [dev-dependencies]
 # The example that measures the block calls reads the queue of `labstream-net`.
-labstream-time = { path = "../labstream-core/crates/labstream-time" }
+labstream-time = "0.1.1"
+
+# To build against a checkout of `labstream-core` instead of the release, take
+# the comment off these three lines. Do not commit them without one. A patch
+# holds for this workspace alone, and it never reaches a reader of the crate.
+# [patch.crates-io]
+# labstream-net = { path = "../labstream-core/crates/labstream-net" }
+# labstream-wire = { path = "../labstream-core/crates/labstream-wire" }
+# labstream-time = { path = "../labstream-core/crates/labstream-time" }

@@ -1,0 +1,6 @@
+# Every text file keeps one line ending on every platform.
+#
+# Git on Windows converts a line ending on checkout by default. A test that
+# compares two texts then reads two bytes where one was written, and the test
+# fails on Windows alone. `labstream-core` lost six tests that way.
+* text=auto eol=lf
