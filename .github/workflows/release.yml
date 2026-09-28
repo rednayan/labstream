@@ -9,7 +9,10 @@ name: Release
 #
 # A run from the Actions tab builds the C library and stops. It publishes
 # nothing and it writes no release, so a person can see the three platform
-# builds work before a real release depends on them.
+# builds work before a real release depends on them. This command starts the
+# same run:
+#
+#   gh workflow run release.yml --ref main
 on:
   push:
     tags:
