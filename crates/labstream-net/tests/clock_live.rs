@@ -118,6 +118,10 @@ fn no_stage_leaves_a_timestamp_alone() {
             return;
         }
     };
+    // An outlet sends a sample only to a consumer that is already connected.
+    // `Inlet::open` can return before the outlet registers the consumer, and a
+    // sample pushed in that gap is lost. The pull then waits for nothing.
+    assert!(outlet.wait_for_consumers(Duration::from_secs(5)));
     let sample = Sample {
         timestamp: 1234.5,
         values: vec![Value::F32(1.0), Value::F32(2.0)],

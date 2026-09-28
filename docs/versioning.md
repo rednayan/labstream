@@ -161,7 +161,7 @@ because crates.io keeps a mistake for ever:
 
 `verify` runs the tests on Linux alone. That is the platform which carries a
 measurement against liblsl. `docs/conformance.md` gives what each platform
-does, and it names the open cases on macOS and Windows.
+does, and it names the open case on macOS.
 
 ### What the workflow needs once
 

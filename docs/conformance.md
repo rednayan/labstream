@@ -97,8 +97,8 @@ platforms. The three results are not the same.
 | Platform | Builds | Tests | Compared against liblsl |
 |---|---|---|---|
 | Linux | yes | 232 pass | the full workbench |
-| macOS | yes | 1 open case | no |
-| Windows | yes | 1 open case | one field |
+| macOS | yes | 1 open case, ignored | no |
+| Windows | yes | all pass | one field |
 
 Linux carries the full measurement. Windows carries one measurement of one
 field, which the section below gives. macOS carries none, and runs the tests of
@@ -159,7 +159,9 @@ question. liblsl can hold the same difference, and then the answer is to match
 it and not to correct it.
 
 This question stays open. No maintainer has a Mac, so no measurement can
-answer it now.
+answer it now. Until a measurement answers it, the test is ignored on macOS
+alone. Linux and Windows still run it. On a Mac, `cargo test -- --ignored`
+runs it.
 
 A person with a Mac can answer it. Build liblsl on that machine, and run one
 program that opens two outlets. Then send a multicast query from a second
@@ -178,10 +180,12 @@ Report the count in an issue. That number decides the change.
 `steady_clock` and therefore what liblsl reads (`src/common.cpp:20`). The
 arithmetic has its own tests, and every platform runs them.
 
-`no_stage_leaves_a_timestamp_alone` passes in one run and fails in the next.
-It waits five seconds for one sample over loopback. A run that fails reports no
-sample, and not a wrong one, so the evidence points at the time limit and not
-at the protocol.
+`no_stage_leaves_a_timestamp_alone` passed in one run and failed in the next,
+on Windows and later on Linux. The cause was the test, not the time limit and
+not the protocol. The test pushed its sample before the outlet registered the
+inlet as a consumer. An outlet sends a sample only to a connected consumer, so
+that sample was lost. The test now waits for the consumer first, as every
+other live test does.
 
 One measurement covers Windows, and the section above gives it. It reads one
 field of one outlet. Use Linux for a measured result.

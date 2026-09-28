@@ -188,7 +188,7 @@ The tests need no network hardware, no C++ toolchain, and no submodule. The
 tests of `labstream-net` and `labstream` bind loopback sockets.
 
 Those numbers come from Linux, which is the platform that carries a
-measurement. macOS and Windows each hold one open test.
+measurement. macOS holds one open test, and the test run ignores it there.
 `docs/conformance.md` gives the result for each platform.
 
 ## Protocol 1.00
