@@ -1,0 +1,66 @@
+{
+ "oracle_commit": "e651023ca67996a05a028fd88a28603297120294",
+ "multiconsumer": {
+  "fast": {
+   "received": 400,
+   "sent": 400,
+   "first": 0,
+   "last": 399,
+   "in_order": true,
+   "gap_count": 0,
+   "missing_total": 0,
+   "gaps": []
+  },
+  "slow": {
+   "received": 121,
+   "sent": 400,
+   "first": 0,
+   "last": 399,
+   "in_order": true,
+   "gap_count": 16,
+   "missing_total": 279,
+   "gaps": [
+    {
+     "after": 5,
+     "next": 16,
+     "missing": 10
+    },
+    {
+     "after": 16,
+     "next": 35,
+     "missing": 18
+    },
+    {
+     "after": 35,
+     "next": 55,
+     "missing": 19
+    },
+    {
+     "after": 55,
+     "next": 74,
+     "missing": 18
+    },
+    {
+     "after": 74,
+     "next": 93,
+     "missing": 18
+    },
+    {
+     "after": 93,
+     "next": 113,
+     "missing": 19
+    },
+    {
+     "after": 113,
+     "next": 132,
+     "missing": 18
+    },
+    {
+     "after": 132,
+     "next": 151,
+     "missing": 18
+    }
+   ]
+  }
+ }
+}

@@ -1,0 +1,198 @@
+[
+ {
+  "format": "float32",
+  "cell": "oracle_out__oracle_in",
+  "kind": "control",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "float32",
+  "cell": "oracle_out__iut_in",
+  "kind": "real test",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "float32",
+  "cell": "iut_out__oracle_in",
+  "kind": "real test",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "float32",
+  "cell": "iut_out__iut_in",
+  "kind": "self-consistency",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "double64",
+  "cell": "oracle_out__oracle_in",
+  "kind": "control",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "double64",
+  "cell": "oracle_out__iut_in",
+  "kind": "real test",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "double64",
+  "cell": "iut_out__oracle_in",
+  "kind": "real test",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "double64",
+  "cell": "iut_out__iut_in",
+  "kind": "self-consistency",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "int32",
+  "cell": "oracle_out__oracle_in",
+  "kind": "control",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "int32",
+  "cell": "oracle_out__iut_in",
+  "kind": "real test",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "int32",
+  "cell": "iut_out__oracle_in",
+  "kind": "real test",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "int32",
+  "cell": "iut_out__iut_in",
+  "kind": "self-consistency",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "int16",
+  "cell": "oracle_out__oracle_in",
+  "kind": "control",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "int16",
+  "cell": "oracle_out__iut_in",
+  "kind": "real test",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "int16",
+  "cell": "iut_out__oracle_in",
+  "kind": "real test",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "int16",
+  "cell": "iut_out__iut_in",
+  "kind": "self-consistency",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "int8",
+  "cell": "oracle_out__oracle_in",
+  "kind": "control",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "int8",
+  "cell": "oracle_out__iut_in",
+  "kind": "real test",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "int8",
+  "cell": "iut_out__oracle_in",
+  "kind": "real test",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "int8",
+  "cell": "iut_out__iut_in",
+  "kind": "self-consistency",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "int64",
+  "cell": "oracle_out__oracle_in",
+  "kind": "control",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "int64",
+  "cell": "oracle_out__iut_in",
+  "kind": "real test",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "int64",
+  "cell": "iut_out__oracle_in",
+  "kind": "real test",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "int64",
+  "cell": "iut_out__iut_in",
+  "kind": "self-consistency",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "string",
+  "cell": "oracle_out__oracle_in",
+  "kind": "control",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "string",
+  "cell": "oracle_out__iut_in",
+  "kind": "real test",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "string",
+  "cell": "iut_out__oracle_in",
+  "kind": "real test",
+  "pass": true,
+  "problems": []
+ },
+ {
+  "format": "string",
+  "cell": "iut_out__iut_in",
+  "kind": "self-consistency",
+  "pass": true,
+  "problems": []
+ }
+]

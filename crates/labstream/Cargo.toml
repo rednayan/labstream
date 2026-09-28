@@ -13,16 +13,8 @@ readme = "README.md"
 
 # The protocol crates of `labstream-core`. This crate holds no protocol code.
 #
-# These came from a path in a sibling checkout. A person who cloned this
-# repository alone had no such path, and `cargo publish` refuses one. They now
-# come from crates.io, so one clone builds.
+# The workspace gives each one a path and a version. This workspace builds
+# against the path, and the published crate asks crates.io for the version.
 [dependencies]
-labstream-net = "0.1.1"
-labstream-wire = "0.1.1"
-
-# To build against a checkout of `labstream-core` instead of the release, take
-# the comment off these three lines. Do not commit them without one. A patch
-# holds for this workspace alone, and it never reaches a reader of the crate.
-# [patch.crates-io]
-# labstream-net = { path = "../labstream-core/crates/labstream-net" }
-# labstream-wire = { path = "../labstream-core/crates/labstream-wire" }
+labstream-net.workspace = true
+labstream-wire.workspace = true

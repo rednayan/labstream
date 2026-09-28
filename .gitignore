@@ -13,3 +13,11 @@
 .idea/
 .vscode/
 .claude/
+
+# The conformance workbench. `conformance/oracle/` rebuilds the build tree from
+# the pins in `conformance/oracle/PINS`, and a new run rebuilds the long soak
+# recording, which is 339 MB.
+/conformance/.build
+/conformance/captures/soak.xdf
+__pycache__/
+*.pyc

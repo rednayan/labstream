@@ -1,0 +1,10 @@
+# Keep the build context small. The context is the repository root, because the
+# Dockerfile copies liblsl/ from there.
+#
+# liblsl/.git stays in the context. The image reads it to confirm that the
+# copied tree is the revision named in oracle/PINS.
+.build/
+captures/
+*.html
+node_modules/
+.claude/

@@ -1,0 +1,381 @@
+{
+ "oracle_commit": "e651023ca67996a05a028fd88a28603297120294",
+ "stream": {
+  "name": "XpTest",
+  "type": "EEG",
+  "channel_count": 8,
+  "srate": 100,
+  "source_id": "xp_src",
+  "session_id": "default"
+ },
+ "results": [
+  {
+   "group": "used",
+   "query": "",
+   "purpose": "an empty query matches every stream",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "used",
+   "query": "session_id='default'",
+   "purpose": "the session test that every query carries",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "used",
+   "query": "session_id='default' and name='XpTest'",
+   "purpose": "the shape resolve_stream builds",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "used",
+   "query": "session_id='default' and name='Other'",
+   "purpose": "the same shape, no match",
+   "matched": false,
+   "expected": false,
+   "as_expected": true
+  },
+  {
+   "group": "used",
+   "query": "name='XpTest'",
+   "purpose": "a bare equality",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "used",
+   "query": "type='EEG'",
+   "purpose": "a different field",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "used",
+   "query": "source_id='xp_src'",
+   "purpose": "the source identifier",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "boolean",
+   "query": "name='XpTest' or name='Nothing'",
+   "purpose": "disjunction",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "boolean",
+   "query": "name='Nothing' or name='AlsoNothing'",
+   "purpose": "disjunction, no match",
+   "matched": false,
+   "expected": false,
+   "as_expected": true
+  },
+  {
+   "group": "boolean",
+   "query": "not(name='Nothing')",
+   "purpose": "negation",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "boolean",
+   "query": "not(name='XpTest')",
+   "purpose": "negation, no match",
+   "matched": false,
+   "expected": false,
+   "as_expected": true
+  },
+  {
+   "group": "boolean",
+   "query": "name='XpTest' and type='EEG' and source_id='xp_src'",
+   "purpose": "three terms",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "boolean",
+   "query": "(name='XpTest' or name='X') and type='EEG'",
+   "purpose": "parentheses",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "boolean",
+   "query": "true()",
+   "purpose": "a boolean literal",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "boolean",
+   "query": "false()",
+   "purpose": "a boolean literal, no match",
+   "matched": false,
+   "expected": false,
+   "as_expected": true
+  },
+  {
+   "group": "string",
+   "query": "contains(name,'XpT')",
+   "purpose": "contains",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "string",
+   "query": "contains(name,'zzz')",
+   "purpose": "contains, no match",
+   "matched": false,
+   "expected": false,
+   "as_expected": true
+  },
+  {
+   "group": "string",
+   "query": "starts-with(name,'Xp')",
+   "purpose": "starts-with",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "string",
+   "query": "starts-with(name,'zz')",
+   "purpose": "starts-with, no match",
+   "matched": false,
+   "expected": false,
+   "as_expected": true
+  },
+  {
+   "group": "string",
+   "query": "string-length(name)>3",
+   "purpose": "string-length with a comparison",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "string",
+   "query": "substring(name,1,2)='Xp'",
+   "purpose": "substring",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "string",
+   "query": "translate(name,'X','x')='xpTest'",
+   "purpose": "translate",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "string",
+   "query": "concat(name,type)='XpTestEEG'",
+   "purpose": "concat",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "string",
+   "query": "normalize-space(name)='XpTest'",
+   "purpose": "normalize-space",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "number",
+   "query": "channel_count=8",
+   "purpose": "numeric equality",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "number",
+   "query": "channel_count>4",
+   "purpose": "greater than",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "number",
+   "query": "channel_count<4",
+   "purpose": "less than, no match",
+   "matched": false,
+   "expected": false,
+   "as_expected": true
+  },
+  {
+   "group": "number",
+   "query": "channel_count>=8",
+   "purpose": "greater or equal",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "number",
+   "query": "nominal_srate=100",
+   "purpose": "a real number",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "number",
+   "query": "number(channel_count)+1=9",
+   "purpose": "arithmetic",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "number",
+   "query": "floor(nominal_srate div 3)=33",
+   "purpose": "division and floor",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "path",
+   "query": "info/name='XpTest'",
+   "purpose": "a path below the root",
+   "matched": false,
+   "expected": false,
+   "as_expected": true
+  },
+  {
+   "group": "path",
+   "query": "//name='XpTest'",
+   "purpose": "a descendant path",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "path",
+   "query": "name",
+   "purpose": "a bare node test, which is true when the node exists",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "path",
+   "query": "missing_field",
+   "purpose": "a node that does not exist",
+   "matched": false,
+   "expected": false,
+   "as_expected": true
+  },
+  {
+   "group": "path",
+   "query": "count(//name)=1",
+   "purpose": "count over a path",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "path",
+   "query": "//v4data_port>0",
+   "purpose": "a numeric field deeper in the document",
+   "matched": true,
+   "expected": true,
+   "as_expected": true
+  },
+  {
+   "group": "malformed",
+   "query": "in'va'lid",
+   "purpose": "unbalanced quotes",
+   "matched": false,
+   "expected": false,
+   "as_expected": true
+  },
+  {
+   "group": "malformed",
+   "query": "name=",
+   "purpose": "an incomplete comparison",
+   "matched": false,
+   "expected": false,
+   "as_expected": true
+  },
+  {
+   "group": "malformed",
+   "query": "and and and",
+   "purpose": "keywords only",
+   "matched": false,
+   "expected": false,
+   "as_expected": true
+  },
+  {
+   "group": "malformed",
+   "query": "name='XpTest'))",
+   "purpose": "unbalanced parentheses",
+   "matched": false,
+   "expected": false,
+   "as_expected": true
+  },
+  {
+   "group": "malformed",
+   "query": "!!!",
+   "purpose": "not a query at all",
+   "matched": false,
+   "expected": false,
+   "as_expected": true
+  }
+ ],
+ "groups": {
+  "used": {
+   "total": 7,
+   "matched": 6,
+   "surprises": 0
+  },
+  "boolean": {
+   "total": 8,
+   "matched": 5,
+   "surprises": 0
+  },
+  "string": {
+   "total": 9,
+   "matched": 7,
+   "surprises": 0
+  },
+  "number": {
+   "total": 7,
+   "matched": 6,
+   "surprises": 0
+  },
+  "path": {
+   "total": 6,
+   "matched": 4,
+   "surprises": 0
+  },
+  "malformed": {
+   "total": 5,
+   "matched": 0,
+   "surprises": 0
+  }
+ }
+}

@@ -1,0 +1,23 @@
+{
+ "oracle_commit": "e651023ca67996a05a028fd88a28603297120294",
+ "backpressure": {
+  "received": 101,
+  "sent": 600,
+  "first": 0,
+  "last": 599,
+  "in_order": true,
+  "gap_count": 1,
+  "missing_total": 499,
+  "gaps": [
+   {
+    "after": 0,
+    "next": 500,
+    "missing": 499
+   }
+  ],
+  "buflen_requested": 1,
+  "buffer_samples_expected": 100,
+  "push_seconds": 0.201,
+  "writer_blocked": false
+ }
+}

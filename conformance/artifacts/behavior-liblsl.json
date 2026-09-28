@@ -1,0 +1,164 @@
+{
+ "oracle_commit": "e651023ca67996a05a028fd88a28603297120294",
+ "backpressure": {
+  "received": 101,
+  "sent": 600,
+  "first": 0,
+  "last": 599,
+  "in_order": true,
+  "gap_count": 1,
+  "missing_total": 499,
+  "gaps": [
+   {
+    "after": 0,
+    "next": 500,
+    "missing": 499
+   }
+  ],
+  "buflen_requested": 1,
+  "buffer_samples_expected": 100,
+  "push_seconds": 0.201,
+  "writer_blocked": false
+ },
+ "multiconsumer": {
+  "fast": {
+   "received": 400,
+   "sent": 400,
+   "first": 0,
+   "last": 399,
+   "in_order": true,
+   "gap_count": 0,
+   "missing_total": 0,
+   "gaps": []
+  },
+  "slow": {
+   "received": 121,
+   "sent": 400,
+   "first": 0,
+   "last": 399,
+   "in_order": true,
+   "gap_count": 16,
+   "missing_total": 279,
+   "gaps": [
+    {
+     "after": 5,
+     "next": 16,
+     "missing": 10
+    },
+    {
+     "after": 16,
+     "next": 36,
+     "missing": 19
+    },
+    {
+     "after": 36,
+     "next": 55,
+     "missing": 18
+    },
+    {
+     "after": 55,
+     "next": 74,
+     "missing": 18
+    },
+    {
+     "after": 74,
+     "next": 94,
+     "missing": 19
+    },
+    {
+     "after": 94,
+     "next": 113,
+     "missing": 18
+    },
+    {
+     "after": 113,
+     "next": 132,
+     "missing": 18
+    },
+    {
+     "after": 132,
+     "next": 152,
+     "missing": 19
+    }
+   ]
+  }
+ },
+ "recovery": {
+  "uid_before": "a8cfdc43-15bf-4360-94a4-addbf45252f0",
+  "uid_after": "02dbab71-852e-4594-9c93-b07312f6e5db",
+  "uid_changed": true,
+  "received_before_stop": 98,
+  "received_after_stop": 98,
+  "received_after_restart": 300,
+  "recovered": true,
+  "summary": {
+   "received": 300,
+   "sent": 300,
+   "first": 0,
+   "last": 201,
+   "in_order": false,
+   "gap_count": 1,
+   "missing_total": -98,
+   "gaps": [
+    {
+     "after": 97,
+     "next": 0,
+     "missing": -98
+    }
+   ]
+  }
+ },
+ "chunking": [
+  {
+   "chunklen_requested": 0,
+   "sample_bytes": 17,
+   "body_bytes": 34,
+   "whole_samples": 2,
+   "read_count": 1,
+   "read_sizes_first": [
+    165
+   ],
+   "mean_read": 165.0
+  },
+  {
+   "chunklen_requested": 1,
+   "sample_bytes": 17,
+   "body_bytes": 2074,
+   "whole_samples": 122,
+   "read_count": 121,
+   "read_sizes_first": [
+    165,
+    17,
+    17,
+    17,
+    17,
+    17,
+    17,
+    17,
+    17,
+    17,
+    17,
+    17
+   ],
+   "mean_read": 18.2
+  },
+  {
+   "chunklen_requested": 16,
+   "sample_bytes": 17,
+   "body_bytes": 1938,
+   "whole_samples": 114,
+   "read_count": 8,
+   "read_sizes_first": [
+    165,
+    272,
+    272,
+    272,
+    272,
+    272,
+    272,
+    272
+   ],
+   "mean_read": 258.6
+  }
+ ]
+}

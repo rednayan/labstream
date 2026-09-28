@@ -1,0 +1,18 @@
+[package]
+name = "lsl-peer"
+version = "0.0.0"
+description = "The native implementation under test, behind the interop peer interface."
+# The conformance harness drives this program. It is a tool of this repository
+# and not a library, so it never goes to crates.io.
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lsl-peer"
+path = "src/main.rs"
+
+[dependencies]
+labstream-wire.workspace = true
+labstream-net.workspace = true

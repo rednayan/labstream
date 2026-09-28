@@ -1,0 +1,29 @@
+{
+ "oracle_commit": "e651023ca67996a05a028fd88a28603297120294",
+ "recovery": {
+  "inlet_stderr": "TRACE recover: the connection ended, recover=true\nTRACE recover: query \"channel_count='2' and name='RcTest' and type='Interop' and source_id='rc_fixed_source' and channel_format='float32'\" recoverable=true\nTRACE recover: found Some(\"15fe5db5-c249-9df4-3272-f1b3484da620\")\nDONE\n",
+  "uid_before": "b182d843-0407-dd6d-0af5-0c8a1f137b08",
+  "uid_after": "15fe5db5-c249-9df4-3272-f1b3484da620",
+  "uid_changed": true,
+  "received_before_stop": 100,
+  "received_after_stop": 100,
+  "received_after_restart": 300,
+  "recovered": true,
+  "summary": {
+   "received": 300,
+   "sent": 300,
+   "first": 0,
+   "last": 199,
+   "in_order": false,
+   "gap_count": 1,
+   "missing_total": -100,
+   "gaps": [
+    {
+     "after": 99,
+     "next": 0,
+     "missing": -100
+    }
+   ]
+  }
+ }
+}

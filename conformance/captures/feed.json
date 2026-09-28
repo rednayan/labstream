@@ -1,0 +1,879 @@
+{
+  "capture": "feed",
+  "oracle_commit": "e651023ca67996a05a028fd88a28603297120294",
+  "events": [
+    {
+      "t": 0.013092,
+      "dir": "tx",
+      "peer": "127.0.0.1:16572",
+      "len": 310,
+      "hex": "4c534c3a73747265616d666565642f3131302030623436343565632d646434622d343538322d613235362d3336313139653131373430330d0a4e61746976652d427974652d4f726465723a20313233340d0a456e6469616e2d506572666f726d616e63653a20300d0a4861732d494545453735342d466c6f6174733a20310d0a537570706f7274732d5375626e6f726d616c733a20310d0a56616c75652d53697a653a20340d0a446174612d50726f746f636f6c2d56657273696f6e3a203131300d0a4d61782d4275666665722d4c656e6774683a203336300d0a4d61782d4368756e6b2d4c656e6774683a20300d0a486f73746e616d653a20636170747572652d7269670d0a536f757263652d49643a20636170747572652d7269670d0a53657373696f6e2d49643a2064656661756c740d0a0d0a",
+      "text": "LSL:streamfeed/110 0b4645ec-dd4b-4582-a256-36119e117403\r\nNative-Byte-Order: 1234\r\nEndian-Performance: 0\r\nHas-IEEE754-Floats: 1\r\nSupports-Subnormals: 1\r\nValue-Size: 4\r\nData-Protocol-Version: 110\r\nMax-Buffer-Length: 360\r\nMax-Chunk-Length: 0\r\nHostname: capture-rig\r\nSource-Id: capture-rig\r\nSession-Id: default\r\n\r\n",
+      "note": "streamfeed request"
+    },
+    {
+      "t": 0.013407,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 213,
+      "hex": "4c534c2f31313020323030204f4b0d0a5549443a2030623436343565632d646434622d343538322d613235362d3336313139653131373430330d0a427974652d4f726465723a20313233340d0a53757070726573732d5375626e6f726d616c733a20300d0a446174612d50726f746f636f6c2d56657273696f6e3a203131300d0a0d0a02c976be9f0c24fe40000080400000a0c00000c0400000e0c000000041000010c100002041000030c102c976be9f0c24fe4000000040000040c0000080400000a0c00000c0400000e0c000000041000010c1",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.017213,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02c447bc236117bf4023db993f6891ed3e8b6ca7bf9a9999bf621098bfd7a370bf5c8f02bfc9767e3f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.027027,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "029a2290b06317bf40ac1c5abf819583bf4a0c82be4260653c31082cbe0c022b3f583934bdd1229bbf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.037113,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "021bd227406617bf4054e3a5bfe926b13f426065bcbc7493bff85323bffa7e2a3fd1229bbf96438bbf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.047128,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02b78098d06817bf40c520b0bdc1caa1bf931884be08acbc3f931884bf0681953f8195a3bf713daabf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.057165,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02b29d9e606b17bf40022b073e8195c3be79e9a6be3333933fa245363efa7e2a3f448bac3ff628bcbf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.067195,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02100c55ee6d17bf40583994bf9a99993e0000403f0e2d323e273108bf96434bbf448bec3e1283c03e",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.07718,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02f46d7a7d7017bf40c3f568bf0e2db2be1058393fa69b44bdc74b97bf3789813f39b4883f68916d3e",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.087248,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02bd9760107317bf4054e385bfc52030bfd578693f2506013ec1caa1bee926913f0000803fb072a83f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.097112,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "020d7f9c9c7517bf40583934bdaaf152bf713daabf8d97aebfa8c6ab3fa470bdbfae4721bf08ac1cbf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.107143,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02ac6675297817bf400ad7a33ed7a3b0bf9eef873f250681bf448b2cbf48e13a3f3f355e3f643b1f3f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.118242,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "0231aaa2fe7a17bf40a01a8fbf7f6abc3d560e6dbf1283c0bd2db29d3e79e926bf0456aebf6f12433f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.127221,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "0228ea414b7d17bf400ad7233e6666863f08ac1cbf3108ac3ffca9b13f3bdfcfbe736891bf2db21dbe",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.137057,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02b6b370d87f17bf40713d8a3eb4c876bfb29d2f3f60e5503f8fc275befed4b8bf54e3a5bfc74b37bf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.147426,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "028909f3698217bf403f351ebf0ad783bf426065bef4fd543eba498cbfd1225bbf1f852bbfa24536bf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.157154,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "0222b287f78417bf407f6a3c3ff6281c3ffca9313fd578e9bebe9fba3f5a64bbbf23dbf9be986e523f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.167241,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02a27aa38a8717bf40be9f9abfdf4f8d3ffa7e2a3fc3f5a8bfdf4f4dbf0ad7833f48e13a3fd9ce773f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.177219,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "024f833c178a17bf4048e13abf52b81e3f7368913eb6f39d3f68912d3f7593983f5a647bbf7f6a3cbf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.187229,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02db7242a98c17bf400c02abbf2b87963efed4783f8d976ebfc520703f6de7fbbe295c0f3f9cc4603f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.197157,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02261f9f368f17bf4068912dbffa7eea3ec976bebeec5138bf9a99993f0ad7233faaf1b2bfdbf9be3f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.207067,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "0293ff87c39117bf4023db793e7f6abc3f77be1fbf560eadbfcba1a5bf0e2db2bf17d98e3f355e3a3e",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.217133,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "021a50bb549417bf40355e3a3fd1221b3f3108acbdf6281c3f7593983e643bdf3e31086cbf7d3f953f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.227238,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02f143c1e69617bf40022b87bd1058b9bf295c0fbf77be9f3d022b873e0000c0bf96430bbf0c028b3f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.237174,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02c96452729917bf40f4fd943f0681153ff628dcbe1b2f5d3fd122db3e1283c03ed1225b3f23dbf9bd",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.247469,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02675693009c17bf40f0a7863f4e6210bff4fdd43c2506a13fb6f37d3ee926b13e8fc275bd355e3a3e",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.257076,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02dd29db8f9e17bf40ba490cbff2d2ad3f7d3f35bfcba185bfee7c7f3f6f1203be448b2cbf736811bf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.267134,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "0243313a1fa117bf409cc4203f2731883eae47813fa69bc43d4c37893e9eefa7becba1c53ee5d0223f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.277125,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02283fd7aea317bf40713d0abf3d0a57bf0000000085ebb13fa69b843f8fc2753dfca9f13e4260a53f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.28742,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "0247ee3241a617bf40dbf97e3f894180bf6666863f4a0c82be6210583f39b4483eb4c8b63fdbf9febe",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.297741,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02e897b6efa817bf404a0c423fe3a59bbdd578293f6f12833e000080bfc976be3ff2d28dbf068195bf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.307236,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02cc42ea5fab17bf406f12833e1d5a64bfd122db3e96438bbe295c8f3ebc74933c1b2fddbe52b89e3f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.317262,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02d09bf7f0ad17bf4068912d3f39b4883f7d3f95bf0c026b3fe7fba93e04564e3f8fc2353fc52030be",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.327165,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "023b74687bb017bf40b6f37dbfc74b773f7f6a9cbfe92671bf560eadbe3d0a17bf8195433f713d8abf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.337049,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02a2701009b317bf401904563f508d97bdd7a3b03f8fc275bf3f351e3fdd2406bf894120bf77be9f3d",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.347164,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "027763f099b517bf403108ac3dc9767ebfa4707dbf1b2fddbef0a7063f77be9f3d4260653c508d97be",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.35717,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02f76f292ab817bf403333b33e0e2db23e894160bf736851bfec51b83ea24576bfe3a59b3fb4c8b6bf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.366993,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "025142fab7ba17bf40ee7cbfbfdf4f4dbf52b85ebfa470bd3eae47e13d79e966bf643bbf3ff2d20dbf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.377308,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02747f9747bd17bf401b2f9d3f3bdfaf3f426065bcf0a7863f4260653dd9ceb7bfa470bdbe7b14aebf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.38782,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "026e9f1602c017bf4068916dbf7593583fe17a94be448b8c3f6f12033e4c3789bf21b032bf5c8f82bf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.397667,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02215eca85c217bf40a470bd3fae47213f5a64bb3ecba1853fc52090bf4c37493fa01a8f3f1904d6be",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.407874,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02d6653d24c517bf40295c4fbfba490cbfac1cba3fcdcc4c3ff4fd543d1058b93fcdcc0cbfd9cef73e",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.417217,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "0268e1318ac717bf40fed478bf7b14aebfbc74133d0681153fcba1a5bf4e6290bfb4c8b63ffed438bf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.427147,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "023625fb15ca17bf406de79b3fa01aaf3e3d0ad7be2db21dbeb81e453f0c028b3f0ad7833f1283403f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.437148,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02f65746a5cc17bf40643b5f3eac1c1a3f508d973e54e3a53f508d173f3f351e3f643b1fbf9318a43f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.447091,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02144c6234cf17bf40b4c8b6bf0c022bbfa69ba43fcff7533f426065bc819543bf128340be6de79b3f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.457095,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02286df3c4d117bf40643b1fbfcdccac3f9cc4803fbc74933eaaf112bfa01a6f3fa4709dbfd1225bbf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.467141,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02519a0055d417bf40b4c8f63e9a9919befed4983fd578e93e4e6210bf3d0ab73faaf1d23e0e2d92bf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.477197,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "029ca286e3d617bf402731083f713d4abfba49acbf9eefa73ed9ce77bf46b6733e60e5503fa69b44be",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.487693,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "0252ad5d91d917bf4091ed9cbfac1c1a3f1b2f5dbfb81e853e6abc74bf46b6933f8d972e3f8941203f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.497187,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "0264ba8401dc17bf404260a5bf1283403e190416bf5a64bbbe9eefa73ec1caa1be04568e3ed7a330bf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.507107,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "026a551390de17bf401d5a843f560e2d3f4a0ca23f79e9a6bed1221b3fec51383e96430b3da01aaf3e",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.517191,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "0237b1e81fe117bf40cff7b3bf1d5a643fcff753bf7b142ebea470bdbe17d94ebf85eb913f1283c0bd",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.527135,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02919a4bb1e317bf40cba1a53f08ac9cbf83c0aabffa7eeabe3d0ab73f8716b9bffa7eaabfb07228bf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.537209,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02c10e4043e617bf40d9ce773e986e923e46b6f33e7b146ebff628bc3f31082cbd0681153f4260a5bf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.547195,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02173bc3cfe817bf401b2f5dbf022b873f2b87163f79e986bfae47e13e9cc460bf713d4a3f39b4083f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.557398,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "0276a1af5ceb17bf403f35bebf068155bf1b2fddbe7d3fb5be736811be83c04abff0a7863fa245b63e",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.567631,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02c85410efed17bf40819503bfe7fb89bf3333b33f8fc2f53d6f1283bf355e3abffa7eaabfa245b63f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.577754,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "025d7b559df017bf4014ae873f2fdd243fbe9f9abe4a0ca2bfa69b44bee3a59bbf022b87bfaaf1923f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.587703,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02b69bab29f317bf401f85ab3f9318843fcff7b3bf295c8f3e1d5a24bfd34d623fbc74933c9cc420bf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.597735,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02927be5baf517bf40dbf93ebf0c028b3f7f6a9c3fb072a83f000000bf1b2fbd3f0e2d323eec51983f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.607134,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02bddd322af817bf405ebac9be022b473f8195033f4c37493f9a99b9bf8d972e3f8fc2353f7b148e3f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.617848,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "0218ad27e3fa17bf402731083f1f858bbf333373bfe17a94bf60e5d0bd83c04a3ec976be3fdd2486be",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.627287,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02e77fbc4efd17bf403f35de3eb4c836bf022b47bf4260a53f77be1fbffed4b83f022b07beb81e053e",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.637131,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "027cc812d8ff17bf404a0ca2bf508d973ef4fd54bd273188beba498c3e448b2cbfbc7413bfd7a3b03f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.64725,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02cb848a6a0218bf4021b0b2bfec51b83f0c022b3f1d5a24bf5ebaa93ff4fd143f79e9a6bec74bb73e",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.657278,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "0269cba2f80418bf4079e9a6bf4260653e21b0323f1283c03de7fb89bf85ebb13fb4c876bfd1225b3f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.667219,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "024f7c9e870718bf40986e52bf448bec3e560ead3f1b2f5d3d3bdfcf3e295c8fbeb072a8bfba49ac3f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.677186,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "024358c2170a18bf40b6f3bdbf1904563f3d0ad7be0681953e9643abbf48e19a3f8941603fb6f39dbf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.687171,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02ed7ba4a60c18bf4021b092bfee7c3f3fc3f5a83ec3f5a8bf4c37093fee7cbfbf713d0a3f5a643b3f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.697229,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "0275c9c1370f18bf40d578693ed34de23e31082cbf6666263f0c02ab3e7368113f8fc2353f3789813f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.707407,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02722820c61118bf40b29defbe3bdf0f3f713d8a3ee3a55bbf6de79bbfb072e83e378981bfb6f3fdbe",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.717193,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02ddcb64551418bf40f4fd54bedd24463f000080bfb072283f6210983fc520b03f295cafbfbe9fbabf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.727623,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02b49859fd1618bf40713daa3f1f85eb3eaaf112bf5a64bb3e6891ed3ee3a5bb3ff2d2cdbe17d94ebf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.737102,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "028f835c731918bf408d978e3fd7a3903f583974bff4fd54bdcdcc4c3eb81e85bf9eef273e273188bf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.747132,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "0283b308031c18bf40e5d0823fb07288bf6210d8beb6f37dbf5839b4bf96438b3dc74b373f2b87163f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.757233,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "0274f030931e18bf40b07228bfe3a59b3f250681beec5178bf23db99bf23dbf9bd426065beb29dafbf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.767478,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02d3742c252118bf406abc94bf46b6333f1058993f643bbfbf3bdfaf3f583934bf39b4c8bd91ed7c3f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.777476,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "0266351bb32318bf407f6abcbebc74933f295c0f3eb4c876bffca9b1bf871699bf022b07bf6abc94bf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.787231,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02ed7781422618bf4068916dbdcdcc0c3fcdcc4c3d96430b3dc1ca61bf5a643bbfc52030bee7fb293f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.797168,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02984376d12818bf404a0c82bf5eba893f560e8dbf426065bcc1ca213e9cc4603fd578e93db6f3fd3e",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.807202,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "023e7385602b18bf409eefa73d9318043f355e9a3fc3f5283f5a647bbf39b4c8beac1c5a3f9a99193e",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.817176,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "029bee8eef2d18bf40a4703dbf4a0c02bfb29d2f3fe3a59b3d0000003fa8c6abbfcff7d33e7d3fb5be",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.827234,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02b899d77f3018bf406abcb43fa69b84bf3d0a973f022b87be4c3789be6de7fbbecdcc8cbf31086c3f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.837172,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02098e680e3318bf40871659be6f12833b508d17bf8716b93f3f351ebfe5d0a2bf21b0923ffa7eaabf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.847143,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02fb61e99b3518bf40c9763e3fac1c5a3fcff7533f3789a13f3108acbeec51383e5839b4bd8716d93e",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.857112,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02d43c962a3818bf403bdf8fbf83c04abe000080bf8941603fe7fb293f60e5b0bf355e7abfcff7133f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.867117,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02ce6166bb3a18bf40fa7e6abf508d17bfd9ce97bf5c8f823f295c8f3f9eefa7bdd34de23e3d0a17bf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.877208,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02f2f7414c3d18bf401904b63f560ead3f8fc2753d0ad7233c8fc2b5bf068195bea245363eaaf1523f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.88764,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02a401f1f73f18bf40d7a370bf6de7fbbe2b87163f8b6c673ef2d28dbf508d97be068115be48e13abf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.89715,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02a5ac236a4218bf402506813f14ae873f666626bf8941603fb4c8963fcff7133f7f6a3cbdc9769ebf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.907137,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02aca42cfb4418bf403f35be3ffed4783f378981bfec5198bfa69bc43d7b146e3f295c8fbebc74933c",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.917148,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02da08dd884718bf403f35be3f9318a43f7f6abcbf508db7bff0a7463ed578693f46b6b3bfbe9fba3f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.92758,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02691bcb304a18bf401283c0befca9b13ff853633f6f12833c508d973e378941bf52b8be3f4a0c023f",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.937062,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "021fc639a44c18bf406de7fbbeb07228bfd578e9bd4e6250bf8fc2b53f6abc74bf2db21d3e0ad763bf",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.94703,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "024060a1334f18bf402db2bdbf1d5a243fb6f3fd3dd578e93dbc74933dba49ac3fe7fb29bf8fc2753d",
+      "text": null,
+      "note": "feed bytes"
+    },
+    {
+      "t": 0.957087,
+      "dir": "rx",
+      "peer": "127.0.0.1:16572",
+      "len": 41,
+      "hex": "02e4ffa7c55118bf40068195bf295c8f3de17a543fa4709d3fa69b04bf295cafbf6210983f14aea73f",
+      "text": null,
+      "note": "feed bytes"
+    }
+  ]
+}

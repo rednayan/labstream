@@ -1,0 +1,33 @@
+# Pinned versions for the reference oracle build.
+# Every value here is exact. Change one only on purpose, and regenerate
+# all golden vectors afterwards.
+
+# The reference implementation under study.
+LIBLSL_REPO=https://github.com/sccn/liblsl.git
+LIBLSL_COMMIT=e651023ca67996a05a028fd88a28603297120294
+LIBLSL_DESCRIBE=v1.17.7-18-ge651023c
+
+# Dependencies that liblsl fetches at configure time.
+# liblsl pins these by tag. A tag can move, so we pin the commit.
+PUGIXML_REPO=https://github.com/zeux/pugixml.git
+PUGIXML_TAG=v1.15
+PUGIXML_COMMIT=ee86beb30e4973f5feffe3ce63bfa4fbadf72f38
+
+CATCH2_REPO=https://github.com/catchorg/Catch2.git
+CATCH2_TAG=v3.4.0
+CATCH2_COMMIT=6e79e682b726f524310d55dec8ddac4e9c52fb5f
+
+# Build tools. The image digest pins the compiler, cmake, and Catch2 together.
+BASE_IMAGE=ubuntu@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+BASE_IMAGE_TAG=ubuntu:24.04
+IMAGE_CMAKE_VERSION=3.28.3-1build7
+IMAGE_CATCH2_VERSION=3.4.0-1build1
+
+# Catch2 comes from the base image, not from git. Catch2 runs the tests. It
+# never changes the bytes that liblsl sends, so the packaged build is safe here.
+# pugixml comes from git at an exact commit. pugixml evaluates the XPath query
+# that decides whether a stream matches, so its version changes oracle behavior.
+
+# The host build uses a different cmake. Record it, because a host build and a
+# container build are not the same build.
+HOST_CMAKE_VERSION=4.4.2
