@@ -147,7 +147,7 @@ Record the result in `docs/conformance.md`.
 | Job | What it does |
 |---|---|
 | `verify` | Checks the tag against the manifest and the changelog, then runs the format, the lint, and the tests on Linux |
-| `publish` | `cargo publish --workspace` to crates.io |
+| `publish` | `cargo publish --workspace` to crates.io, for each crate that crates.io does not hold at the version |
 | `binaries` | Builds `labstream-capi` on Linux, macOS, and Windows |
 | `release` | Writes the GitHub release, with the notes from `CHANGELOG.md` and the three libraries attached |
 
@@ -182,8 +182,28 @@ A crate can hold more than one trusted publisher. The entries for the old
 repositories, `labstream-core` and `labstream-rs`, can stay until the first
 release from this repository completes. Then remove them.
 
-Without that setting the `publish` job stops and nothing reaches crates.io.
-The `verify` job still reports whether the release is sound.
+Without that setting the `publish` job stops at the first crate that has no
+trusted publisher. The crates before it are then on crates.io, and the rest are
+not. v0.1.2 stopped that way: `labstream-time` went up, and `labstream-wire`
+had no setting. The next section gives the recovery.
+
+### If a publish stops partway
+
+A version on crates.io is permanent, so a stopped publish cannot go back. It
+can only go forward.
+
+1. Correct the cause. For a missing trusted publisher, add it for every crate
+   that is not on crates.io.
+2. In the Actions tab, open the failed run. Select "Re-run failed jobs".
+
+The `publish` job asks crates.io which crates it holds at the version. It
+publishes only the other crates. Then the `release` job writes the GitHub
+release.
+
+A rerun uses the workflow file of the tagged commit. A tag made before this
+behavior has the older file, and that file stops on a partial publish. For such
+a tag, publish the rest by hand, as the next section gives. Then rerun the
+failed jobs.
 
 ### If you want a person to approve each publish
 
@@ -211,6 +231,15 @@ cargo publish --workspace
 
 That finds the order itself. `labstream-capi` and `lsl-peer` set
 `publish = false`, so they stay out.
+
+If crates.io holds some crates at the version already, exclude each one:
+
+```sh
+git switch --detach vX.Y.Z
+cargo publish --workspace --exclude labstream-time
+```
+
+The published crates that need an excluded crate take it from crates.io.
 
 If a crate must go alone, this is the order. Each crate needs the crate above
 it:

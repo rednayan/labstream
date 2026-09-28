@@ -94,34 +94,40 @@ jobs:
       #
       # `cargo publish` stops when crates.io already holds a version, and a
       # release that stops here writes no GitHub release. This step asks
-      # crates.io first, so a second run of one release finishes what the first
-      # one began. crates.io answers 403 to a request that carries no user
-      # agent, so this sends one.
-      - name: Publish, unless crates.io holds this version
+      # crates.io first, and it publishes only the crates that crates.io does
+      # not hold. A second run of one release therefore finishes what the first
+      # one began, and a run after a complete publish publishes nothing.
+      #
+      # A crate that crates.io holds is excluded, and a crate that needs it
+      # takes it from crates.io. v0.1.2 needed this. `labstream-time` went up,
+      # and then `labstream-wire` had no trusted publisher.
+      #
+      # crates.io answers 403 to a request that carries no user agent, so this
+      # sends one.
+      - name: Publish the crates that crates.io does not hold
         run: |
           version=$(python3 -c \
             "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")
           ua="labstream-release-workflow (github.com/rednayan/labstream)"
-          held=0
+          exclude=()
+          missing=()
           for crate in labstream-wire labstream-time labstream-proto labstream-net labstream-core labstream; do
             code=$(curl -s -o /dev/null -w "%{http_code}" -A "$ua" \
               "https://crates.io/api/v1/crates/$crate/$version")
             case "$code" in
-              200) held=$((held + 1)) ;;
-              404) ;;
+              200) exclude+=(--exclude "$crate") ;;
+              404) missing+=("$crate") ;;
               *) echo "::error::crates.io answered $code for $crate, and this step reads 200 or 404"; exit 1 ;;
             esac
           done
-          if [ "$held" -eq 6 ]; then
+          if [ "${#missing[@]}" -eq 0 ]; then
             echo "crates.io holds all six crates at $version already. Nothing to publish."
             exit 0
           fi
-          if [ "$held" -ne 0 ]; then
-            echo "::error::crates.io holds $held of the six crates at $version."
-            echo "::error::A publish of the rest needs a person. cargo publish --workspace would stop."
-            exit 1
+          if [ "${#exclude[@]}" -ne 0 ]; then
+            echo "::notice::crates.io holds part of $version. This run publishes ${missing[*]}."
           fi
-          cargo publish --workspace --token ${{ steps.auth.outputs.token }}
+          cargo publish --workspace "${exclude[@]}" --token ${{ steps.auth.outputs.token }}
 
   binaries:
     name: Build liblsl for ${{ matrix.os }}

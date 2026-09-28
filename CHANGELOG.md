@@ -5,6 +5,13 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `release.yml` publishes only the crates that crates.io does not hold at the
+  version. A release that stops partway now completes when a person reruns the
+  failed jobs. Before, the workflow refused a partial state, and a person had
+  to publish the rest by hand. `docs/versioning.md` gives the recovery.
+
 ## [0.1.2] - 2026-09-29
 
 This release changes no source code of the library. It changes one
