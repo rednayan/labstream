@@ -18,8 +18,24 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `docs/versioning.md` gives the workflow, the one setting that crates.io needs
   for it, and the way to make a person approve each publish.
-- `README.md` names `labstream` on crates.io and its repository `labstream-rs`.
-  The page said that the API crate was not published.
+- `README.md` names `labstream` on crates.io. The page said that the API crate
+  was not published.
+- One repository, `rednayan/labstream`, now holds every crate. It replaces
+  `rednayan/labstream-core` and `rednayan/labstream-rs`, and it keeps the
+  history of both. The `repository` field of each crate names it.
+- `labstream` is a member of the workspace. It takes `labstream-net` and
+  `labstream-wire` by path and by version, so a change to both builds and
+  tests in one checkout. The published manifest still names a version on
+  crates.io.
+- `labstream` takes the version of the workspace. One release now publishes
+  six crates, and `release.yml` publishes `labstream` with the others.
+  `crates/labstream/CHANGELOG.md` holds the entry for `labstream` 0.1.0.
+- The conformance workbench is in `conformance/`. It held a copy of each
+  protocol crate from before the rename, and that copy was out of date. It now
+  tests the crates below `crates/`. `lsl-peer` is the one crate that it keeps,
+  and that crate sets `publish = false`.
+- The C++ library is a git submodule at `conformance/liblsl/`, at the same
+  commit, `e651023c`.
 
 ## [0.1.1] - 2026-08-04
 
@@ -112,6 +128,6 @@ Layer.
 - Protocol 1.00. That version carries every sample in a Boost archive. An
   inlet that asks for 1.00 gets a refusal, not a wrong read.
 
-[Unreleased]: https://github.com/rednayan/labstream-core/compare/v0.1.1...HEAD
-[0.1.1]: https://github.com/rednayan/labstream-core/releases/tag/v0.1.1
-[0.1.0]: https://github.com/rednayan/labstream-core/releases/tag/v0.1.0
+[Unreleased]: https://github.com/rednayan/labstream/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/rednayan/labstream/releases/tag/v0.1.1
+[0.1.0]: https://github.com/rednayan/labstream/releases/tag/v0.1.0

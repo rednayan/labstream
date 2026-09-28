@@ -11,7 +11,7 @@ Three versions appear in this project. Each one changes for its own reason.
 
 | Version | What it names | Who sets it |
 |---|---|---|
-| 0.1.0 | the crates in this repository | this project |
+| 0.1.1 | the crates in this repository | this project |
 | 1.10 | the LSL wire protocol | the C++ library at `sccn/liblsl` |
 | 1.75 | the minimum Rust compiler | this project |
 
@@ -22,8 +22,9 @@ library refuses protocol 1.00.
 
 ## What the version covers
 
-The version covers the public Rust API of these six crates:
+The version covers the public Rust API of these seven crates:
 
+- `labstream`
 - `labstream-core`
 - `labstream-wire`
 - `labstream-proto`
@@ -55,7 +56,7 @@ across every platform. The crate documentation gives the reason.
 
 ## The rule for 0.x
 
-The library is at 0.1.0. Under semantic versioning a major version of zero
+The library is before version 1.0. Under semantic versioning a major version of zero
 gives no stability promise. This project reads that rule as follows:
 
 | Change | Before 1.0 | At 1.0 and after |
@@ -67,11 +68,19 @@ gives no stability promise. This project reads that rule as follows:
 Read the `README.md` status table before you depend on an API. It states which
 parts are measured.
 
-## The five crates move together
+## The crates move together
 
-Every crate reads `version.workspace = true`. One release therefore gives all
-five crates the same number. A change in `labstream-net` alone still raises the
-version of `labstream-wire`.
+Every crate reads `version.workspace = true`. One release therefore gives every
+crate the same number. A change in `labstream-net` alone still raises the
+version of `labstream-wire` and of `labstream`.
+
+`labstream` joined this rule at 0.1.1. Before that it had a repository and a
+version of its own. crates.io holds one version of `labstream`, 0.1.0. The
+next release gives `labstream` the number of the workspace. Semantic versioning
+permits the skip of a number.
+
+`lsl-peer` below `conformance/` is not part of the rule. It is a tool of this
+repository. It keeps version 0.0.0 and sets `publish = false`.
 
 This costs a reader nothing, and it removes a matrix of crate pairs that no
 person measured. If two crates from different releases must work together, no
@@ -156,19 +165,23 @@ does, and it names the open cases on macOS and Windows.
 
 ### What the workflow needs once
 
-crates.io must hold a trusted publisher for each of the five crates. That
-setting lets this repository publish with no stored token, and a token that
-lasts 30 minutes does the upload.
+crates.io must hold a trusted publisher for each of the six published crates.
+That setting lets this repository publish with no stored token, and a token
+that lasts 30 minutes does the upload.
 
 For each of `labstream-wire`, `labstream-proto`, `labstream-time`,
-`labstream-net`, and `labstream-core`, open the crate on crates.io, then
-Settings, then Trusted Publishing, and add:
+`labstream-net`, `labstream-core`, and `labstream`, open the crate on
+crates.io, then Settings, then Trusted Publishing, and add:
 
 | Field | Value |
 |---|---|
 | Repository owner | `rednayan` |
-| Repository name | `labstream-core` |
+| Repository name | `labstream` |
 | Workflow filename | `release.yml` |
+
+A crate can hold more than one trusted publisher. The entries for the old
+repositories, `labstream-core` and `labstream-rs`, can stay until the first
+release from this repository completes. Then remove them.
 
 Without that setting the `publish` job stops and nothing reaches crates.io.
 The `verify` job still reports whether the release is sound.
@@ -197,8 +210,8 @@ twice before this step.
 cargo publish --workspace
 ```
 
-That finds the order itself. `labstream-capi` sets `publish = false`, so it
-stays out.
+That finds the order itself. `labstream-capi` and `lsl-peer` set
+`publish = false`, so they stay out.
 
 If a crate must go alone, this is the order. Each crate needs the crate above
 it:
@@ -208,6 +221,7 @@ it:
 3. `cargo publish -p labstream-proto`
 4. `cargo publish -p labstream-net`
 5. `cargo publish -p labstream-core`
+6. `cargo publish -p labstream`
 
 crates.io needs a moment to hold a new crate in its index. If step 3 reports
 that it cannot find `labstream-wire`, wait and run it again.

@@ -1,5 +1,13 @@
 # LSL Protocol Conformance Suite — Plan
 
+> **A note on names.** This page is a log, and it keeps the names of the day
+> that each entry was written. The crates had the names `lsl-wire`,
+> `lsl-proto`, `lsl-time`, `lsl-net`, and `lsl-capi`, below `crates/` of the
+> workbench. They now have the names `labstream-wire`, `labstream-proto`,
+> `labstream-time`, `labstream-net`, and `labstream-capi`, below `crates/` at
+> the repository root. `lsl-peer` keeps its name, and it is at
+> `conformance/peer/`.
+
 **Status:** draft v1
 **Oracle:** `sccn/liblsl` @ `e651023c` (`v1.17.7-18-ge651023c`), vendored at `./liblsl`
 **Goal:** an executable, implementation-independent definition of "speaks LSL correctly."

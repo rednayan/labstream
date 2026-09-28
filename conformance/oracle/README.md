@@ -17,7 +17,8 @@ that changes means a real change and not a different machine.
 
 ## Build the image
 
-Run this from the repository root, not from this directory:
+Run this from `conformance/`, not from this directory and not from the
+repository root:
 
 ```
 docker build -f oracle/Dockerfile -t lsl-oracle .

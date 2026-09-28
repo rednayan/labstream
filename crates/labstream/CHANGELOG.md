@@ -3,7 +3,9 @@
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+This page holds the history of `labstream` before it joined the workspace.
+From the next release, `labstream` takes the version of the workspace, and
+`CHANGELOG.md` at the repository root holds every entry.
 
 ## [0.1.0] - 2026-08-04
 
@@ -29,5 +31,4 @@ no protocol code.
 - `labstream-net` 0.1.1 and `labstream-wire` 0.1.1, from crates.io. Those
   crates hold the protocol, and they stay exact to `sccn/liblsl`.
 
-[Unreleased]: https://github.com/rednayan/labstream-rs/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/rednayan/labstream-rs/releases/tag/v0.1.0
+[0.1.0]: https://github.com/rednayan/labstream/releases/tag/labstream-v0.1.0

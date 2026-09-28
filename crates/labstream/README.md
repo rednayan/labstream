@@ -3,9 +3,10 @@
 The Lab Streaming Layer, for Rust programs.
 
 This crate is the API that a Rust program calls. It holds no protocol code. The
-protocol lives in
-[`labstream-core`](https://github.com/rednayan/labstream-core), and those crates
-stay exact to the C++ library at `sccn/liblsl`.
+protocol is in the crates of
+[`labstream-core`](https://crates.io/crates/labstream-core), and those crates
+stay exact to the C++ library at `sccn/liblsl`. All of them are in one
+repository, [`rednayan/labstream`](https://github.com/rednayan/labstream).
 
 ```
        labstream            this crate: the API a Rust program calls
@@ -21,17 +22,14 @@ This crate answers to the person who writes the program.
 
 ## Status
 
-Version 0.1.0. The API can change before version 1.0.
+The API can change before version 1.0. This crate takes the version of the
+workspace, so its number is the number of the protocol crates that it calls.
 
 ## Add the library to a program
 
 ```sh
 cargo add labstream
 ```
-
-The crate is `labstream`. This repository is `labstream-rs`, because a
-repository of that name says which language it holds, and a crate on crates.io
-holds Rust already.
 
 ## Read a stream
 
@@ -81,8 +79,8 @@ outlet.push(&[1.0f32, 2.0])?;
 
 ## What this crate adds
 
-Each item comes from a port of a real application. `docs/design.md` gives the
-measurements and the reason for each choice.
+Each item comes from a port of a real application. `docs/design.md` in this
+crate gives the measurements and the reason for each choice.
 
 | Item | What it removes |
 |---|---|
@@ -99,27 +97,20 @@ measurements and the reason for each choice.
 
 ## Build and test
 
+Run these commands from the repository root:
+
 ```sh
-cargo test          # the tests bind loopback sockets
-cargo run --release --example bench
+cargo test -p labstream          # the tests bind loopback sockets
+cargo run -p labstream --release --example bench
 ```
 
 The tests need no hardware. They publish their own stream and read it back.
 
 ## Conventions
 
-Documents and code comments follow ASD-STE100 Simplified Technical English, as
-in `labstream-core`. Before a pull request, run:
-
-```sh
-cargo fmt --all
-cargo clippy --all-targets
-cargo test
-cargo doc --no-deps
-```
-
-Correct every warning.
+`CONTRIBUTING.md` at the repository root gives the rules for a change. They
+apply to this crate as to every other crate of the workspace.
 
 ## License
 
-MIT.
+MIT. Read `LICENSE`.

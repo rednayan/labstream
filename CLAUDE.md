@@ -2,9 +2,16 @@
 
 ## The project
 
-This project studies the Lab Streaming Layer core library and plans a Rust
-implementation. The reference C++ source is in `liblsl/`, pinned at commit
-`e651023c`. Read `CONFORMANCE-PLAN.md` for the current direction.
+This project is a Rust implementation of the Lab Streaming Layer. One Cargo
+workspace holds the published crates below `crates/` and the conformance
+workbench below `conformance/`. The reference C++ source is in
+`conformance/liblsl/`, pinned at commit `e651023c`.
+
+`README.md` gives the layout. `docs/versioning.md` gives the release steps.
+`conformance/CONFORMANCE-PLAN.md` is the log of the conformance work.
+
+A citation of the form `src/tcp_server.cpp:328` names a file below
+`conformance/liblsl/`.
 
 ## Writing standard
 
@@ -81,6 +88,6 @@ Correct what you find.
 
 ## Source claims
 
-State a fact about liblsl only after you read it in `liblsl/`. Cite the source as
+State a fact about liblsl only after you read it in `conformance/liblsl/`. Cite the source as
 `file:line`. Do not repeat claims from project documentation or from other
 implementations without a check against the source.

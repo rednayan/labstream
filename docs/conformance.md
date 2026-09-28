@@ -16,7 +16,7 @@ libraries agree.
 
 | Evidence | Measure |
 |---|---|
-| Tests in this repository | 232 |
+| Tests of the protocol crates | 232 |
 | C symbols exported | 165 of 165, none a stub |
 | Golden vectors, transcripts, time sequences | 42, 22, and 10 with 96,008 samples |
 | Interop cells | 28 default, 16 blocking, 12 IPv6, and more |
@@ -198,17 +198,25 @@ Do not read a claim into this page that the table does not hold.
 
 ## The workbench
 
-The tools that made these measurements live in a separate repository, the
-conformance workbench. That repository holds the vendored C++ library, the
-comparison tools, and the recorded output. It is not published yet.
+The tools that made these measurements are in `conformance/`. That directory
+holds the pinned C++ library, the comparison tools, and the recorded output.
+`conformance/README.md` gives each tool and the command to run it.
 
-The workbench stays separate for one reason. It needs a C++ toolchain, cmake,
-Python, and a network. This repository needs none of them.
+The C++ library is a git submodule at `conformance/liblsl/`. A clone does not
+fetch it. The crates do not need it, so `cargo build` and `cargo test` work
+without it.
+
+The workbench needs a C++ toolchain, cmake, Python, and a network. The crates
+need none of them. For this reason, CI runs the tests of the crates and does
+not run the workbench.
 
 The source of this library cites workbench files as `captures/…`,
-`artifacts/…`, and `oracle/…`. Those paths name files in the workbench. A
+`artifacts/…`, and `oracle/…`. Those paths are below `conformance/`. A
 citation of the C++ source, such as `src/tcp_server.cpp:328`, names a file
-below `liblsl/` in the workbench. That directory holds the pinned oracle.
+below `conformance/liblsl/`.
+
+The workbench tests the crates below `crates/`. It holds no copy of them. Thus
+a run measures the code that goes to crates.io.
 
 If you change a protocol rule, ask for a conformance run in your pull request.
 `CONTRIBUTING.md` explains when a run is necessary.

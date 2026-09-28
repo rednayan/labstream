@@ -33,9 +33,9 @@ produced output that looked correct. Each one passed every test that existed.
 The list is in `docs/conformance.md`.
 
 A test in this repository cannot catch that class of error. Only a comparison
-against real liblsl can. The conformance workbench is a separate repository
-that holds the C++ library, the comparison tools, and the recorded
-measurements.
+against real liblsl can. The conformance workbench in `conformance/` holds the
+C++ library, the comparison tools, and the recorded measurements.
+`conformance/README.md` gives the tools.
 
 If you change `labstream-wire`, `labstream-proto`, `labstream-time`, or the protocol parts of
 `labstream-net`, ask for a conformance run in the pull request. A maintainer runs the
@@ -50,12 +50,17 @@ Each crate has one job. Keep the boundaries:
 
 | Crate | Rule |
 |---|---|
+| `labstream` | the API that a Rust program calls. No protocol code |
 | `labstream-core` | no code. It names the four crates below it |
 | `labstream-wire` | no input and no output. Bytes in, bytes out |
 | `labstream-proto` | no input and no output. Bytes and events in, decisions out |
 | `labstream-time` | no input and no output. Numbers in, numbers out |
 | `labstream-net` | the only crate that opens a socket or reads a clock |
 | `labstream-capi` | the only crate that holds a raw pointer |
+
+`labstream` calls `labstream-net` and `labstream-wire`. A protocol rule goes
+in those crates and not in `labstream`. `crates/labstream/docs/design.md`
+gives the reason.
 
 Do not add a socket to `labstream-wire`, `labstream-proto`, or `labstream-time`. The split is
 what makes a protocol rule testable with a byte slice.
@@ -79,6 +84,7 @@ a sequence of operations with a mathematically equal one.
 | golden | `tests/golden.rs` | compares against recorded output of liblsl |
 | mutant | `tests/mutants.rs` | makes sure that the golden data catches a defect |
 | live | `crates/labstream-net/tests/*_live.rs` | binds a loopback socket |
+| round trip | `crates/labstream/tests/round_trip.rs` | publishes a stream and reads it back through the API |
 
 A mutant test proves that the golden data has value. It changes the code on
 purpose and makes sure that at least one recorded case fails.

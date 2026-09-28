@@ -12,9 +12,9 @@ Every claim cites a file and a line in the pinned oracle. A claim with no
 citation is not a claim.
 
 A citation of the form `src/tcp_server.cpp:328` names a file and a line in the
-pinned C++ library. A citation of the form `captures/…`, `artifacts/…`, or
-`oracle/…` names a file in the conformance workbench. The workbench is a
-separate repository. Read `docs/conformance.md`.
+pinned C++ library. That library is at `conformance/liblsl/`. A citation of the
+form `captures/…`, `artifacts/…`, or `oracle/…` names a file in the conformance
+workbench, below `conformance/`. Read `docs/conformance.md`.
 
 ## How to read this document
 

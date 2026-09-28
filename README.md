@@ -1,6 +1,6 @@
-# labstream-core
+# labstream
 
-A Lab Streaming Layer core library in Rust.
+The Lab Streaming Layer, in Rust.
 
 This library speaks the protocol of the C++ library at `sccn/liblsl`. An
 unchanged application that was written for liblsl runs on it. pylsl,
@@ -18,16 +18,31 @@ ABI, so the C ABI will not change. `docs/versioning.md` gives the full rule.
 | Example programs of liblsl that link and agree | 21 of 21 |
 | XPath queries answered as the oracle answers them | 42 of 42 |
 | Longest recording | 7.81 hours, 8.4 million samples, no loss |
-| Tests in this repository | 232 |
+| Tests in this repository | 252 |
 
-A separate conformance workbench made each measurement against a pinned build
-of liblsl at commit `e651023c`. `docs/conformance.md` gives the method and the
-full result.
+The conformance workbench in `conformance/` made each measurement against a
+pinned build of liblsl at commit `e651023c`. `docs/conformance.md` gives the
+method and the full result.
+
+## Layout
+
+| Path | What it holds |
+|---|---|
+| `crates/` | every crate, one directory for each crate |
+| `conformance/` | the tools that measure the crates against liblsl, and their records |
+| `conformance/liblsl/` | the pinned C++ library, a git submodule |
+| `docs/` | the conformance result and the release rules |
+| `SPEC.md` | the protocol, with a citation for every claim |
+
+One Cargo workspace holds every crate. A crate takes another crate of this
+repository by path and by version. The workspace builds against the path, and
+the published crate asks crates.io for the version.
 
 ## The crates
 
 | Crate | What it holds | Touches the operating system |
 |---|---|---|
+| `labstream` | the API that a Rust program calls | through `labstream-net` |
 | `labstream-core` | the four crates below, as one dependency | through `labstream-net` |
 | `labstream-wire` | the sample codec | no |
 | `labstream-proto` | the handshake, discovery, and time sync | no |
@@ -39,24 +54,31 @@ full result.
 takes one dependency. `labstream-capi` is not one of them, because it builds a
 shared library for a C program and gives a Rust program nothing.
 
+`labstream` holds no protocol code. It calls `labstream-net` and
+`labstream-wire`, and it gives a Rust program block reads, a channel list, a
+query builder, and one error type. `crates/labstream/docs/design.md` gives why
+it is a separate crate.
+
+`lsl-peer`, in `conformance/peer/`, is a tool of the workbench and not a
+library. It is not on crates.io.
+
 Only `labstream-net` touches the operating system. A protocol rule therefore gets a
 unit test with a byte slice. Only the tests of `labstream-net` need a network.
 
 ## Add the library to a Rust program
 
-Most programs want [`labstream`](https://crates.io/crates/labstream) and not
-these crates. That crate is the API: it holds the block reads, the channel
-list, the query builder, and the error type. It calls the crates here.
+Most programs want [`labstream`](https://crates.io/crates/labstream). That
+crate is the API: it holds the block reads, the channel list, the query
+builder, and the error type.
 
 ```sh
 cargo add labstream
 ```
 
-Its repository is
-[`labstream-rs`](https://github.com/rednayan/labstream-rs).
+`crates/labstream/README.md` gives examples of that API.
 
-Use the crates here directly when a program needs a protocol detail that the API
-does not give.
+If a program needs a protocol detail that the API does not give, use the
+protocol crates directly.
 
 ```sh
 cargo add labstream-core
@@ -162,8 +184,8 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-The tests need no network hardware and no C++ toolchain. The tests of `labstream-net`
-bind loopback sockets. All 232 tests run in about 10 seconds.
+The tests need no network hardware, no C++ toolchain, and no submodule. The
+tests of `labstream-net` and `labstream` bind loopback sockets.
 
 Those numbers come from Linux, which is the platform that carries a
 measurement. macOS and Windows each hold one open test.
@@ -186,11 +208,16 @@ The source cites three kinds of evidence. Each kind has its own form:
 - `SPEC.md 6.4` names a section of the protocol document in this repository.
   Every claim in that document cites the C++ source.
 - `captures/discover.json`, `artifacts/behavior-liblsl.json`, and
-  `oracle/descxml.cpp` name files in the conformance workbench. That repository
-  holds the measurements and the tools that made them.
+  `oracle/descxml.cpp` name files in the conformance workbench, below
+  `conformance/`. That directory holds the measurements and the tools that
+  made them.
 
-The third kind of path does not exist in this repository. `docs/conformance.md`
-explains where to find the workbench.
+The first kind of path is below `conformance/liblsl/`. A clone does not fetch
+that submodule. To read the C++ source, fetch it once:
+
+```sh
+git submodule update --init conformance/liblsl
+```
 
 ## Documentation
 
@@ -198,6 +225,8 @@ explains where to find the workbench.
 |---|---|
 | `SPEC.md` | the protocol, with a citation for every claim |
 | `docs/conformance.md` | what was measured, how, and the result |
+| `conformance/README.md` | the tools of the workbench, and how to run them |
+| `crates/labstream/docs/design.md` | why the API is a separate crate |
 | `docs/versioning.md` | what the version number covers, and how to release |
 | `CONTRIBUTING.md` | how to make a change and how to test it |
 | `CHANGELOG.md` | what changed in each version |
