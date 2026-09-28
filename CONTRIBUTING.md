@@ -13,6 +13,11 @@ State a fact about LSL only after you read it in the C++ source. Cite the
 source as `file:line`. Do not repeat a claim from documentation of another
 project without a check against the source.
 
+## Before you start
+
+`docs/repository.md` gives the layout of the repository, the commands of the
+daily work, and how CI runs. `docs/releasing.md` gives how a release is made.
+
 ## Before you open a pull request
 
 1. Run `cargo fmt --all`.

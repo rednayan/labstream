@@ -227,7 +227,9 @@ git submodule update --init conformance/liblsl
 | `docs/conformance.md` | what was measured, how, and the result |
 | `conformance/README.md` | the tools of the workbench, and how to run them |
 | `crates/labstream/docs/design.md` | why the API is a separate crate |
-| `docs/versioning.md` | what the version number covers, and how to release |
+| `docs/repository.md` | the layout of the repository, and the daily work |
+| `docs/releasing.md` | how to release to crates.io and to GitHub |
+| `docs/versioning.md` | what the version number covers |
 | `CONTRIBUTING.md` | how to make a change and how to test it |
 | `CHANGELOG.md` | what changed in each version |
 

@@ -5,12 +5,23 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `docs/repository.md`. It gives the layout of the repository, how the
+  workspace joins the crates, the daily commands, CI, and the dependency
+  updates.
+- `docs/releasing.md`. It gives each step of a release to crates.io and to
+  GitHub, a test of the pipeline with no publish, the recovery for each
+  failure, a publish by hand, and a checklist.
+
 ### Changed
 
+- `docs/versioning.md` gives only what a version number means. Its release
+  steps are now in `docs/releasing.md`.
 - `release.yml` publishes only the crates that crates.io does not hold at the
   version. A release that stops partway now completes when a person reruns the
   failed jobs. Before, the workflow refused a partial state, and a person had
-  to publish the rest by hand. `docs/versioning.md` gives the recovery.
+  to publish the rest by hand. `docs/releasing.md` gives the recovery.
 
 ## [0.1.2] - 2026-09-29
 

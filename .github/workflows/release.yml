@@ -85,7 +85,7 @@ jobs:
 
       # This exchanges the token of this workflow for one that lasts 30
       # minutes. crates.io must hold a trusted publisher for each crate.
-      # `docs/versioning.md` gives that step.
+      # `docs/releasing.md` gives that step.
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
 

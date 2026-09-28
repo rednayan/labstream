@@ -7,7 +7,9 @@ workspace holds the published crates below `crates/` and the conformance
 workbench below `conformance/`. The reference C++ source is in
 `conformance/liblsl/`, pinned at commit `e651023c`.
 
-`README.md` gives the layout. `docs/versioning.md` gives the release steps.
+`docs/repository.md` gives the layout and the daily work. `docs/releasing.md`
+gives the release steps. `docs/versioning.md` gives which version a change
+needs.
 `conformance/CONFORMANCE-PLAN.md` is the log of the conformance work.
 
 A citation of the form `src/tcp_server.cpp:328` names a file below
