@@ -6,7 +6,7 @@
 # having three is attribution: a failure of one and a pass of another names the
 # cause.
 #
-#   rust    lsl-net directly. No C ABI on the path.
+#   rust    labstream-net directly. No C ABI on the path.
 #   capi    the example program SendData of liblsl, linked against this library.
 #   oracle  the same program, linked against real liblsl. THE CONTROL.
 #
@@ -62,7 +62,7 @@ Publish a stream for LabRecorder on another machine.
 
   oracle/labrecorder.sh oracle [args]   real liblsl. Run this first.
   oracle/labrecorder.sh capi   [args]   this library, through the C ABI.
-  oracle/labrecorder.sh rust   [args]   this library, through lsl-net.
+  oracle/labrecorder.sh rust   [args]   this library, through labstream-net.
 
 Every mode takes the same options and sends the same signal:
 
@@ -122,10 +122,10 @@ help | -h | --help)
 
 rust)
     show_network
-    cargo build --release -p lsl-net --example publish --manifest-path "$ROOT/Cargo.toml" \
+    cargo build --release -p labstream-net --example publish --manifest-path "$ROOT/../Cargo.toml" \
         >/dev/null 2>&1
-    echo "=== publisher: lsl-net, no C ABI"
-    exec "$ROOT/target/release/examples/publish" "$@"
+    echo "=== publisher: labstream-net, no C ABI"
+    exec "$ROOT/../target/release/examples/publish" "$@"
     ;;
 
 capi | oracle)
@@ -134,7 +134,7 @@ capi | oracle)
         WHAT="this library, through the C ABI"
         if [ ! -f "$LIBDIR/liblsl.so" ]; then
             echo "no library at $LIBDIR/liblsl.so"
-            echo "run: cargo build -p lsl-capi --release && cp target/release/liblsl.so $LIBDIR/"
+            echo "run: cargo build -p labstream-capi --release && cp ../target/release/liblsl.so $LIBDIR/"
             exit 1
         fi
     else

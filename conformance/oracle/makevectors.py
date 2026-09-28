@@ -184,7 +184,7 @@ def build(fmt, channels, order, genbin, outdir, index):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--gen", default=".build/genvectors")
-    ap.add_argument("--out", default="crates/lsl-wire/tests/vectors")
+    ap.add_argument("--out", default=str(pathlib.Path(__file__).resolve().parents[2] / "crates/labstream-wire/tests/vectors"))
     ap.add_argument("--formats", default="float32,double64,string,int8,int16,int32,int64")
     ap.add_argument("--channels", default="1,2,8")
     ap.add_argument("--orders", default="little,big")

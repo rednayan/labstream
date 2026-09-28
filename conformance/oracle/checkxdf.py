@@ -2,7 +2,7 @@
 """Compare the streams of one recording, one library against another.
 
 `oracle/labrecorder.sh` publishes the same signal three times, once through
-real liblsl, once through this library's C ABI, and once through `lsl-net`.
+real liblsl, once through this library's C ABI, and once through `labstream-net`.
 Each one tags its streams, so LabRecorder can record all six into one file.
 
 This reads that file and compares the three. **The oracle streams inside the

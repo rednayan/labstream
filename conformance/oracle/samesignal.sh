@@ -28,7 +28,7 @@ cc -I "$ROOT/.build/install/include" "$ROOT/oracle/publish.c" -o "$WORK/pub_orac
     -L "$ORACLE_LIB" -llsl -Wl,-rpath,"$ORACLE_LIB"
 cc -I "$ROOT/.build/install/include" "$ROOT/oracle/publish.c" -o "$WORK/pub_capi" -lm \
     -L "$RUST_LIB" -llsl -Wl,-rpath,"$RUST_LIB"
-cargo build --release -p lsl-net --example publish --manifest-path "$ROOT/Cargo.toml" >/dev/null 2>&1
+cargo build --release -p labstream-net --example publish --manifest-path "$ROOT/../Cargo.toml" >/dev/null 2>&1
 
 cat > "$WORK/capture.py" <<'PY'
 import sys, time, struct, pylsl
@@ -70,7 +70,7 @@ capture() {
 echo "=== recording from each publisher"
 capture oracle "$WORK/pub_oracle"
 capture capi "$WORK/pub_capi"
-capture rust "$ROOT/target/release/examples/publish"
+capture rust "$ROOT/../target/release/examples/publish"
 
 echo
 echo "=== comparing the values"

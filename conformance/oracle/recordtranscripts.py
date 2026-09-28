@@ -7,7 +7,7 @@ negotiation and compares the two answers.
 
 The comparison runs after canonicalizing, because an answer carries a UID that
 changes on every run. Every canonical placeholder carries a predicate, so an
-erased field still gets an assertion. See `crates/lsl-proto/src/canon.rs`.
+erased field still gets an assertion. See `crates/labstream-proto/src/canon.rs`.
 
 `Endian-Performance` is a measured benchmark result, and no test can compare
 it. The cases therefore use only the two unambiguous extremes: a value of 0,
@@ -147,7 +147,7 @@ BAD_UID_CASES = [("wrong_uid", "float32", {}), ("empty_uid", "float32", {})]
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--gen", default=".build/genvectors")
-    ap.add_argument("--out", default="crates/lsl-proto/tests/transcripts")
+    ap.add_argument("--out", default=str(pathlib.Path(__file__).resolve().parents[2] / "crates/labstream-proto/tests/transcripts"))
     args = ap.parse_args()
     outdir = pathlib.Path(args.out)
     outdir.mkdir(parents=True, exist_ok=True)

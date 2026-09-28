@@ -27,7 +27,7 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ORACLE = ROOT / ".build" / "peer"
-RUST = ROOT / "target" / "release" / "lsl-peer"
+RUST = ROOT.parent / "target" / "release" / "lsl-peer"
 
 # Two samples, written the way the peers read them: the bits of a double, then
 # one bit pattern for each channel.

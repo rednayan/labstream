@@ -1,4 +1,4 @@
-/* Publish the same signal as `crates/lsl-net/examples/publish.rs`, through the
+/* Publish the same signal as `crates/labstream-net/examples/publish.rs`, through the
  * C ABI.
  *
  * The example program `SendData.cpp` of liblsl sends `rand()` noise, so two

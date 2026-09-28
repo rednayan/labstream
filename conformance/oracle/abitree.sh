@@ -23,7 +23,7 @@ if [ ! -f "$ORACLE_DIR/liblsl.so" ]; then
 fi
 if [ ! -f "$RUST_DIR/liblsl.so" ]; then
     echo "no Rust library at $RUST_DIR/liblsl.so"
-    echo "run: cargo build -p lsl-capi --release && cp target/release/liblsl.so $RUST_DIR/"
+    echo "run: cargo build -p labstream-capi --release && cp ../target/release/liblsl.so $RUST_DIR/"
     exit 1
 fi
 

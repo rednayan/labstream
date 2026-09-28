@@ -68,10 +68,10 @@ def main():
         print(f"=== {args.analyse}, {longest / 60:.1f} minutes of readings")
         return report(history, longest / 60.0, args.analyse)
 
-    rust_pub = ROOT / "target" / "release" / "examples" / "publish"
+    rust_pub = ROOT.parent / "target" / "release" / "examples" / "publish"
     capi_pub = ROOT / ".build" / "publish_capi"
     oracle_pub = ROOT / ".build" / "publish_oracle"
-    peer = ROOT / "target" / "release" / "lsl-peer"
+    peer = ROOT.parent / "target" / "release" / "lsl-peer"
     for path in (rust_pub, capi_pub, oracle_pub, peer):
         if not path.exists():
             print(f"missing {path}")
