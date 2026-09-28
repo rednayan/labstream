@@ -1,14 +1,17 @@
 [package]
 name = "labstream"
-version = "0.1.0"
-edition = "2021"
-rust-version = "1.75"
-license = "MIT"
 description = "The Lab Streaming Layer, for Rust programs."
-repository = "https://github.com/rednayan/labstream-rs"
-authors = ["rednayan"]
-keywords = ["lsl", "labstreaminglayer", "eeg", "neuroscience", "streaming"]
-categories = ["network-programming", "science"]
+# The version moves with every other crate of the workspace. `docs/versioning.md`
+# gives the rule.
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+# This crate has its own README, and it is not the one of the workspace.
 readme = "README.md"
 
 # The protocol crates of `labstream-core`. This crate holds no protocol code.

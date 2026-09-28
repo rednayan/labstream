@@ -86,8 +86,8 @@ jobs:
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
 
-      # `--workspace` finds the order itself. `labstream-capi` sets
-      # `publish = false`, so it stays out.
+      # `--workspace` finds the order itself. `labstream-capi` and `lsl-peer` set
+      # `publish = false`, so they stay out.
       #
       # `cargo publish` stops when crates.io already holds a version, and a
       # release that stops here writes no GitHub release. This step asks
@@ -98,9 +98,9 @@ jobs:
         run: |
           version=$(python3 -c \
             "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")
-          ua="labstream-release-workflow (github.com/rednayan/labstream-core)"
+          ua="labstream-release-workflow (github.com/rednayan/labstream)"
           held=0
-          for crate in labstream-wire labstream-time labstream-proto labstream-net labstream-core; do
+          for crate in labstream-wire labstream-time labstream-proto labstream-net labstream-core labstream; do
             code=$(curl -s -o /dev/null -w "%{http_code}" -A "$ua" \
               "https://crates.io/api/v1/crates/$crate/$version")
             case "$code" in
@@ -109,12 +109,12 @@ jobs:
               *) echo "::error::crates.io answered $code for $crate, and this step reads 200 or 404"; exit 1 ;;
             esac
           done
-          if [ "$held" -eq 5 ]; then
-            echo "crates.io holds all five crates at $version already. Nothing to publish."
+          if [ "$held" -eq 6 ]; then
+            echo "crates.io holds all six crates at $version already. Nothing to publish."
             exit 0
           fi
           if [ "$held" -ne 0 ]; then
-            echo "::error::crates.io holds $held of the five crates at $version."
+            echo "::error::crates.io holds $held of the six crates at $version."
             echo "::error::A publish of the rest needs a person. cargo publish --workspace would stop."
             exit 1
           fi
@@ -195,7 +195,9 @@ jobs:
           body = text[start:].split("\n", 1)[1]
           end = re.search(r"^## \[", body, re.M)
           print((body[: end.start()] if end else body).strip())
-          print("\n## Install\n\n```sh\ncargo add labstream-core\n```\n")
+          print("\n## Install\n\n```sh\ncargo add labstream\n```\n")
+          print("`labstream` is the API for a Rust program. `labstream-core` gives the")
+          print("protocol crates for a program that needs a lower level.\n")
           print("The C library for each platform is below. crates.io carries")
           print("source and not a binary, so `labstream-capi` is not there.")
           EOF
