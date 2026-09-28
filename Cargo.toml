@@ -12,7 +12,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"
@@ -27,10 +27,10 @@ categories = ["network-programming", "science"]
 # crate has no such path. `docs/versioning.md` gives the release steps, and one
 # of them is to raise these numbers with the version above.
 [workspace.dependencies]
-labstream-wire = { path = "crates/labstream-wire", version = "0.1.1" }
-labstream-proto = { path = "crates/labstream-proto", version = "0.1.1" }
-labstream-time = { path = "crates/labstream-time", version = "0.1.1" }
-labstream-net = { path = "crates/labstream-net", version = "0.1.1" }
+labstream-wire = { path = "crates/labstream-wire", version = "0.1.2" }
+labstream-proto = { path = "crates/labstream-proto", version = "0.1.2" }
+labstream-time = { path = "crates/labstream-time", version = "0.1.2" }
+labstream-net = { path = "crates/labstream-net", version = "0.1.2" }
 
 # The golden tests read several thousand recorded vectors. At opt-level 0 the
 # decoder makes the suite slow enough to discourage a person from running it.

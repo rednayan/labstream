@@ -8,7 +8,7 @@ LabRecorder, and a third-party recorder each do so.
 
 ## Status
 
-This is version 0.1.1, and it is on crates.io. The protocol work is complete
+This is version 0.1.2, and it is on crates.io. The protocol work is complete
 and measured. These crates can change before version 1.0. liblsl fixes the C
 ABI, so the C ABI will not change. `docs/versioning.md` gives the full rule.
 

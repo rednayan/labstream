@@ -5,6 +5,12 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-29
+
+This release changes no source code of the library. It changes one
+dependency, `socket2`. It is the first release from the repository
+`rednayan/labstream`, and the first that publishes all six crates together. `labstream` goes from 0.1.0 to 0.1.2, and it has no 0.1.1.
+
 ### Fixed
 
 - Four live tests pushed a sample before the outlet registered the inlet. The
@@ -29,6 +35,10 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `labstream-net` takes `socket2` 0.6 in place of 0.5. `labstream-net` uses it
+  for one socket option, `reuse_address`, on the port of the multicast query.
+  The call did not change. `socket2` 0.6 needs Rust 1.70, and the minimum of
+  this workspace stays 1.75.
 - `docs/versioning.md` gives the workflow, the one setting that crates.io needs
   for it, and the way to make a person approve each publish.
 - `README.md` names `labstream` on crates.io. The page said that the API crate
@@ -141,6 +151,7 @@ Layer.
 - Protocol 1.00. That version carries every sample in a Boost archive. An
   inlet that asks for 1.00 gets a refusal, not a wrong read.
 
-[Unreleased]: https://github.com/rednayan/labstream/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/rednayan/labstream/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/rednayan/labstream/releases/tag/v0.1.2
 [0.1.1]: https://github.com/rednayan/labstream/releases/tag/v0.1.1
 [0.1.0]: https://github.com/rednayan/labstream/releases/tag/v0.1.0

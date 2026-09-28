@@ -11,7 +11,7 @@ Three versions appear in this project. Each one changes for its own reason.
 
 | Version | What it names | Who sets it |
 |---|---|---|
-| 0.1.1 | the crates in this repository | this project |
+| 0.1.2 | the crates in this repository | this project |
 | 1.10 | the LSL wire protocol | the C++ library at `sccn/liblsl` |
 | 1.75 | the minimum Rust compiler | this project |
 
@@ -74,10 +74,9 @@ Every crate reads `version.workspace = true`. One release therefore gives every
 crate the same number. A change in `labstream-net` alone still raises the
 version of `labstream-wire` and of `labstream`.
 
-`labstream` joined this rule at 0.1.1. Before that it had a repository and a
-version of its own. crates.io holds one version of `labstream`, 0.1.0. The
-next release gives `labstream` the number of the workspace. Semantic versioning
-permits the skip of a number.
+`labstream` joined this rule at 0.1.2. Before that it had a repository and a
+version of its own, and its one release was 0.1.0. Thus `labstream` has no
+version 0.1.1. Semantic versioning permits the skip of a number.
 
 `lsl-peer` below `conformance/` is not part of the rule. It is a tool of this
 repository. It keeps version 0.0.0 and sets `publish = false`.
