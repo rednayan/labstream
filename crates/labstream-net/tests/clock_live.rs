@@ -87,6 +87,10 @@ fn clock_sync_moves_a_timestamp_by_the_measured_offset() {
     }
     let offset = inlet.time_correction().expect("an offset");
 
+    // The time measurement travels on its own socket, so it does not prove
+    // that the outlet registered the inlet. A sample pushed before that is lost.
+    assert!(outlet.wait_for_consumers(Duration::from_secs(5)));
+
     // Push one sample with a timestamp that no clock produced, so the change
     // is visible.
     let sample = Sample {
@@ -163,6 +167,10 @@ fn a_deduced_timestamp_is_rebuilt_from_the_rate() {
             return;
         }
     };
+
+    // An outlet sends only to a connected consumer. A sample pushed before the
+    // outlet registers the inlet is lost.
+    assert!(outlet.wait_for_consumers(Duration::from_secs(5)));
 
     // The first sample carries a timestamp. The rest ask the reader to derive
     // one, exactly as a chunk does.

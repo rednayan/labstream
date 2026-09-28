@@ -7,10 +7,13 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- `no_stage_leaves_a_timestamp_alone` failed in some runs, on Windows and on
-  Linux. The test pushed its sample before the outlet registered the inlet, and
-  the outlet sent that sample to no consumer. The test now waits for the
-  consumer. The library did not change.
+- Four live tests pushed a sample before the outlet registered the inlet. The
+  outlet sent that sample to no consumer, and the test failed in some runs.
+  `no_stage_leaves_a_timestamp_alone` failed on Windows and on Linux, and
+  `a_deduced_timestamp_is_rebuilt_from_the_rate` failed on Windows.
+  `clock_sync_moves_a_timestamp_by_the_measured_offset` and
+  `a_marker_stream_goes_out_and_comes_back_as_text` held the same fault. Each
+  test now waits for the consumer. The library did not change.
 - `both_outlets_hold_the_multicast_port` is ignored on macOS. It fails there,
   and `docs/conformance.md` gives the measurement that decides the correction.
   Linux and Windows still run it.

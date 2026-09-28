@@ -163,6 +163,9 @@ fn a_marker_stream_goes_out_and_comes_back_as_text() {
         .buffer(Buffer::Samples(100))
         .open(Duration::from_secs(5))
         .expect("an inlet");
+    // An outlet sends only to a connected consumer. A marker pushed before the
+    // outlet registers the inlet is lost.
+    assert!(outlet.wait_for_consumers(Duration::from_secs(5)));
 
     let sent = ["trial start", "cue", "response"];
     for m in sent {
