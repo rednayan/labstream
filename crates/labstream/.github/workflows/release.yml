@@ -1,0 +1,142 @@
+name: Release
+
+# A push of a tag that starts with `v` makes the whole release: it checks the
+# tag against the manifest, publishes to crates.io, and writes the GitHub
+# release.
+#
+# `cargo publish` cannot be undone. The `verify` job therefore runs first, and
+# every later job waits for it.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  # `id-token` lets crates.io trust this workflow without a stored token.
+  # `contents` lets the last job write the release.
+  id-token: write
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify the tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # A tag that does not match the manifest would publish one version under
+      # the name of another. crates.io keeps that mistake for ever.
+      - name: The tag must match the manifest
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest=$(python3 -c \
+            "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['package']['version'])")
+          echo "tag $tag, manifest $manifest"
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::the tag says $tag and the manifest says $manifest"
+            exit 1
+          fi
+
+      # A release with no entry tells a reader nothing about what changed.
+      - name: The changelog must hold the version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          if ! grep -q "^## \[$tag\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md holds no section for $tag"
+            exit 1
+          fi
+
+      # A patch reaches no reader of the crate, so a patch left in the manifest
+      # would publish a crate that was never built against what it names.
+      - name: The manifest must hold no patch
+        run: |
+          if grep -q "^\[patch" Cargo.toml; then
+            echo "::error::Cargo.toml holds a live [patch] section"
+            exit 1
+          fi
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets
+        env:
+          RUSTFLAGS: -D warnings
+      - run: cargo test
+
+  publish:
+    name: Publish to crates.io
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # This exchanges the token of this workflow for one that lasts 30
+      # minutes. crates.io must hold a trusted publisher for this crate.
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      # `cargo publish` stops when crates.io already holds the version, and a
+      # release that stops here writes no GitHub release. This step asks
+      # crates.io first, so a second run of one release finishes what the first
+      # one began. It publishes nothing twice, because crates.io holds a
+      # version for ever.
+      # crates.io answers 403 to a request that carries no user agent, so this
+      # sends one. Without it every answer looks the same as a missing version.
+      - name: Publish, unless crates.io holds this version
+        run: |
+          version=$(python3 -c \
+            "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['package']['version'])")
+          code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -A "labstream-release-workflow (github.com/rednayan/labstream-rs)" \
+            "https://crates.io/api/v1/crates/labstream/$version")
+          case "$code" in
+            200)
+              echo "crates.io holds labstream $version already. Nothing to publish."
+              exit 0
+              ;;
+            404)
+              cargo publish --token ${{ steps.auth.outputs.token }}
+              ;;
+            *)
+              echo "::error::crates.io answered $code, and this step reads 200 or 404"
+              exit 1
+              ;;
+          esac
+
+  release:
+    name: Write the GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The notes are the section of CHANGELOG.md for this version. One text
+      # then holds the release, and no person writes it twice.
+      - name: Take the notes from the changelog
+        run: |
+          python3 - "$GITHUB_REF_NAME" <<'EOF' > notes.md
+          import re, sys
+          tag = sys.argv[1].lstrip("v")
+          text = open("CHANGELOG.md").read()
+          start = text.index(f"## [{tag}]")
+          body = text[start:].split("\n", 1)[1]
+          end = re.search(r"^## \[", body, re.M)
+          print((body[: end.start()] if end else body).strip())
+          print("\n## Install\n\n```sh\ncargo add labstream\n```\n")
+          EOF
+
+      - name: Write the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            --verify-tag
