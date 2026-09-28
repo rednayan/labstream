@@ -16,6 +16,10 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `README.md` gives how to download the built C library from a GitHub release,
+  for each of the three platforms. It no longer says that only the tests of
+  `labstream-net` need a network, because the tests of `labstream` bind sockets
+  too.
 - `docs/versioning.md` gives only what a version number means. Its release
   steps are now in `docs/releasing.md`.
 - `release.yml` publishes only the crates that crates.io does not hold at the

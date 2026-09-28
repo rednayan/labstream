@@ -31,7 +31,7 @@ method and the full result.
 | `crates/` | every crate, one directory for each crate |
 | `conformance/` | the tools that measure the crates against liblsl, and their records |
 | `conformance/liblsl/` | the pinned C++ library, a git submodule |
-| `docs/` | the conformance result and the release rules |
+| `docs/` | the layout of the repository, the release steps, the version rule, and the conformance result |
 | `SPEC.md` | the protocol, with a citation for every claim |
 
 One Cargo workspace holds every crate. A crate takes another crate of this
@@ -62,8 +62,9 @@ it is a separate crate.
 `lsl-peer`, in `conformance/peer/`, is a tool of the workbench and not a
 library. It is not on crates.io.
 
-Only `labstream-net` touches the operating system. A protocol rule therefore gets a
-unit test with a byte slice. Only the tests of `labstream-net` need a network.
+Only `labstream-net` touches the operating system. `labstream` and
+`labstream-capi` reach it through `labstream-net`. A protocol rule therefore
+gets a unit test with a byte slice.
 
 ## Add the library to a Rust program
 
@@ -108,7 +109,8 @@ cargo add labstream-wire
 ```
 
 `labstream-capi` is not on crates.io. It builds a shared library for a C
-program, and a Rust program cannot link it. Build it from this repository.
+program, and a Rust program cannot link it. The next section gives how to get
+it.
 
 ### Send samples
 
@@ -160,21 +162,43 @@ cargo run --release -p labstream-net --example publish -- --name RustTest
 
 ## Use the library from C, C++, or Python
 
-`labstream-capi` builds a shared library named `liblsl.so`. It exports the 165 C
-symbols of liblsl.
+`labstream-capi` builds a shared library that exports the 165 C symbols of
+liblsl. A C or C++ program links against it with no change to its source.
+
+### Download a built library
+
+Each [GitHub release](https://github.com/rednayan/labstream/releases) carries
+the library for three platforms. You need no Rust toolchain for it.
+
+| Platform | File in the release | Name that an application loads |
+|---|---|---|
+| Linux, x86-64 | `liblsl-x86_64-linux.so` | `liblsl.so` |
+| macOS, Apple silicon | `liblsl-aarch64-macos.dylib` | `liblsl.dylib` |
+| Windows, x86-64 | `lsl-x86_64-windows.dll` | `lsl.dll` |
+
+Download the file for your platform from the release page, or with `gh`:
+
+```sh
+gh release download -R rednayan/labstream --pattern 'liblsl-x86_64-linux.so'
+```
+
+If an application loads the library by name, rename the file to the name in
+the third column.
+
+### Build the library
 
 ```sh
 cargo build -p labstream-capi --release
 ```
 
-The result is at `target/release/liblsl.so`. An application finds it the way it
-finds any other shared library. A C or C++ program links against it with no
-change to its source.
+The result is in `target/release/`, with the name in the third column above.
 
-For pylsl, name the file in the environment:
+### Use it from Python
+
+pylsl reads the path of the library from the environment:
 
 ```sh
-export PYLSL_LIB=/path/to/target/release/liblsl.so
+export PYLSL_LIB=/path/to/liblsl.so
 ```
 
 ## Build and test
@@ -187,9 +211,11 @@ cargo test --workspace
 The tests need no network hardware, no C++ toolchain, and no submodule. The
 tests of `labstream-net` and `labstream` bind loopback sockets.
 
-Those numbers come from Linux, which is the platform that carries a
-measurement. macOS holds one open test, and the test run ignores it there.
+CI runs the tests on Linux, macOS, and Windows. Only Linux carries a
+measurement against liblsl. On macOS, the test run ignores one open test.
 `docs/conformance.md` gives the result for each platform.
+
+`docs/repository.md` gives the other commands of the daily work.
 
 ## Protocol 1.00
 
