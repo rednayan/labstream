@@ -26,7 +26,7 @@ The user made these decisions on 2026-11-16:
 7. Step 1 comes before step 0. The tests of step 1 cut the connection
    themselves. Step 0 comes directly after step 1, and measures it.
 8. `resume/1` is on by default, with `seq/1`: `labstream.Features` is
-   `{seq resume}`.
+   `{seq, resume}`. The configuration file separates two names with a comma.
 9. Step 1 also adds a C function for the `seq` loss count.
 10. `resume/1` carries a random epoch of the outlet, so a new outlet with
     an old `uid` gets no resend.
