@@ -52,6 +52,9 @@ A labstream inlet adds one header line to its feed request:
 Labstream-Features: seq/1 shm/1
 ```
 
+The name of the header is `Labstream-Features`. This name is final. A later
+version of labstream must not change it, because released peers send it.
+
 The value is a list of tokens with one space between two tokens. Each token
 has this form:
 
@@ -284,5 +287,4 @@ Each item gives its status on the branch `feat/seq`.
 
 ## Open questions
 
-- The final name of the header.
 - The API that reports the features of the current connection.
