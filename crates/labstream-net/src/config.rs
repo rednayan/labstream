@@ -442,6 +442,14 @@ mod tests {
     }
 
     #[test]
+    fn the_labstream_features_are_on_by_default_and_a_file_turns_them_off() {
+        let c = Config::from_ini(&Ini::default(), "test");
+        assert_eq!(c.features, vec!["seq".to_string()]);
+        let off = Ini::parse("[labstream]\nFeatures = {}\n").expect("a file");
+        assert!(Config::from_ini(&off, "test").features.is_empty());
+    }
+
+    #[test]
     fn the_scope_decides_the_groups_and_the_hop_count() {
         let of = |scope: &str| {
             let ini =

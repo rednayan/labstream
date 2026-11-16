@@ -158,7 +158,10 @@ u64 number   little-endian, the number of the next sample
 2. The number is always little-endian. The `Byte-Order` of the connection
    does not apply to it.
 3. On each connection, the first record comes directly after the second test
-   pattern sample. Each connection thus starts with an absolute number.
+   pattern sample. The outlet writes it at once, before any sample, with the
+   number that the next sample will get. Each connection thus starts with an
+   absolute number, and a gap before the connection shows at once, also on
+   a stream that sends no more samples.
 4. After that, the outlet writes a record only before a sample whose number
    is not one more than the number of the sample before it. A connection
    with no loss carries one record and no more.
@@ -179,9 +182,11 @@ The inlet keeps the number that it expects next.
    takes the new number. The arithmetic must not underflow.
 4. Each sample adds one to the expected number.
 5. A recovery to the same outlet (the same `uid`) keeps the expected number.
-   The first record of the new connection then shows the gap.
+   The first record of the new connection then shows the gap. Live test:
+   `a_gap_shows_at_once_on_a_quiet_stream`.
 6. A recovery to a new outlet (a new `uid`) starts again at rule 1, because
-   the new outlet has a new counter.
+   the new outlet has a new counter. Live test:
+   `a_new_outlet_starts_a_new_count`.
 
 #### What the inlet reports
 
@@ -251,7 +256,9 @@ Each item gives its status on the branch `feat/seq`.
 1. **liblsl outlet, raw request.** Send a feed request with the header to the
    oracle outlet. Make sure that the answer and the data bytes are the same
    as for the request without the header. **Done:** `oracle/headerprobe.py`
-   passes for liblsl and for labstream `main`.
+   passes for liblsl and for labstream `main`. It also reads the first data
+   byte: a sample tag (1 or 2) for each outlet, and the record tag `0xFE`
+   only when the answer holds `seq/1`.
 2. **liblsl inlet.** Make sure that a labstream outlet sends no
    `Labstream-Features` line, and no record, when the request has none.
    **Done:** `crates/labstream-net/tests/seq_live.rs`,

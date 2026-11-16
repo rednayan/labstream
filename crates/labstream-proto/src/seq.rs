@@ -125,6 +125,17 @@ impl Numbering {
         Numbering::default()
     }
 
+    /// Write the record that opens a connection. `number` is the number
+    /// that the next sample will get.
+    ///
+    /// The record goes out at once, before any sample. A gap that happened
+    /// before this connection is then visible to the inlet at once, also on
+    /// a stream that sends no more samples for a long time.
+    pub fn start(&mut self, number: u64, out: &mut Vec<u8>) {
+        write_record(out, number);
+        self.next = Some(number);
+    }
+
     /// Write a record into `out` if the sample with `number` needs one, then
     /// expect the number after it.
     pub fn before(&mut self, number: u64, out: &mut Vec<u8>) {
@@ -208,6 +219,19 @@ mod tests {
         c.record(3);
         assert_eq!(c.lost(), 3);
         assert_eq!(c.backwards(), 0);
+    }
+
+    #[test]
+    fn a_started_connection_needs_no_second_record_for_the_next_number() {
+        let mut w = Numbering::new();
+        let mut out = Vec::new();
+        w.start(30, &mut out);
+        assert_eq!(peek(&out), Next::Record(30));
+        let mut more = Vec::new();
+        w.before(30, &mut more);
+        assert!(more.is_empty(), "the next sample follows the record");
+        w.before(35, &mut more);
+        assert_eq!(peek(&more), Next::Record(35));
     }
 
     #[test]

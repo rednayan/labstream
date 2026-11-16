@@ -95,6 +95,8 @@ fn the_count_adds_up_when_the_outlet_queue_drops() {
 struct Proxy {
     port: u16,
     accepted: Arc<Mutex<Vec<TcpStream>>>,
+    /// While true, the proxy closes each new connection at once.
+    paused: Arc<AtomicBool>,
 }
 
 impl Proxy {
@@ -103,8 +105,14 @@ impl Proxy {
         let port = listener.local_addr().ok()?.port();
         let accepted = Arc::new(Mutex::new(Vec::new()));
         let list = Arc::clone(&accepted);
+        let paused = Arc::new(AtomicBool::new(false));
+        let hold = Arc::clone(&paused);
         std::thread::spawn(move || {
             for client in listener.incoming().flatten() {
+                if hold.load(Ordering::SeqCst) {
+                    let _ = client.shutdown(Shutdown::Both);
+                    continue;
+                }
                 let server = match TcpStream::connect(("127.0.0.1", target)) {
                     Ok(s) => s,
                     Err(_) => continue,
@@ -114,7 +122,11 @@ impl Proxy {
                 pipe(server, client);
             }
         });
-        Some(Proxy { port, accepted })
+        Some(Proxy {
+            port,
+            accepted,
+            paused,
+        })
     }
 
     fn cut(&self) {
@@ -279,4 +291,89 @@ fn a_request_without_the_header_gets_plain_samples() {
     let (agreed, first) = raw_feed(&out, vec![Token::new(features::SEQ, 1)]);
     assert!(features::has(&agreed, features::SEQ, 1));
     assert_eq!(first, seq::TAG, "a numbered feed starts with a record");
+}
+
+#[test]
+fn a_gap_shows_at_once_on_a_quiet_stream() {
+    // A marker stream can stay quiet for minutes. The loss of a lost
+    // connection must show when the inlet connects again, not at the next
+    // sample.
+    let out = match outlet("SeqLive4") {
+        Some(o) => o,
+        None => {
+            eprintln!("no local network; skipping");
+            return;
+        }
+    };
+    let real = out.info().clone();
+    let proxy = match Proxy::start(real.v4data_port) {
+        Some(p) => p,
+        None => {
+            eprintln!("no local network; skipping");
+            return;
+        }
+    };
+    let mut via_proxy = real.clone();
+    via_proxy.v4address = "127.0.0.1".to_string();
+    via_proxy.v4data_port = proxy.port;
+    let mut inlet = Inlet::open_recovering(&via_proxy, Duration::from_secs(5), 1000)
+        .expect("the inlet connects through the proxy");
+    assert!(out.wait_for_consumers(Duration::from_secs(5)));
+    out.push_samples((0..10).map(sample).collect());
+    assert_eq!(pull_until(&mut inlet, 9, Duration::from_secs(5)).len(), 10);
+
+    // Cut the connection, and hold the inlet off while 20 samples go out.
+    proxy.paused.store(true, Ordering::SeqCst);
+    proxy.cut();
+    std::thread::sleep(Duration::from_millis(100));
+    out.push_samples((10..30).map(sample).collect());
+    std::thread::sleep(Duration::from_millis(300));
+    proxy.paused.store(false, Ordering::SeqCst);
+
+    // No sample goes out after this point.
+    let end = Instant::now() + Duration::from_secs(10);
+    while inlet.samples_lost() != Some(20) && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(inlet.recoveries() >= 1, "the inlet connected again");
+    assert_eq!(
+        inlet.samples_lost(),
+        Some(20),
+        "the gap shows with no new sample"
+    );
+}
+
+#[test]
+fn a_new_outlet_starts_a_new_count() {
+    // The second outlet has its own counter. It pushes 1000 samples before
+    // the inlet finds it. If the inlet kept the expected number of the first
+    // outlet, those 1000 would show as lost.
+    let make = || outlet("SeqLive5");
+    let first = match make() {
+        Some(o) => o,
+        None => {
+            eprintln!("no local network; skipping");
+            return;
+        }
+    };
+    let mut inlet = Inlet::open_recovering(first.info(), Duration::from_secs(5), 100_000)
+        .expect("the inlet connects");
+    assert!(first.wait_for_consumers(Duration::from_secs(5)));
+    first.push_samples((0..5).map(sample).collect());
+    assert_eq!(pull_until(&mut inlet, 4, Duration::from_secs(5)).len(), 5);
+    drop(first);
+
+    let second = make().expect("the second outlet opens");
+    second.push_samples((0..1000).map(sample).collect());
+    let mut k = 1000;
+    let mut got = Vec::new();
+    let end = Instant::now() + Duration::from_secs(20);
+    while got.is_empty() && Instant::now() < end {
+        second.push(&sample(k));
+        k += 1;
+        let _ = inlet.pull_chunk(&mut got, 100_000, Duration::from_millis(20));
+    }
+    assert!(!got.is_empty(), "samples of the second outlet arrive");
+    assert_eq!(inlet.current_info().uid, second.info().uid);
+    assert_eq!(inlet.samples_lost(), Some(0), "the count starts again");
 }

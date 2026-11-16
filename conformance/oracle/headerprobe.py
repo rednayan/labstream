@@ -101,7 +101,9 @@ def feed(port: int, uid: str, extra: bool) -> tuple:
         # Each test pattern sample: a tag, a timestamp, and the values.
         # SPEC.md 6.4.
         pattern = read_exact(s, 2 * (1 + 8 + 4 * CHANNELS))
-    return head.decode(errors="replace"), pattern
+        # The publisher pushes all the time, so the first data byte follows.
+        first = read_exact(s, 1)[0]
+    return head.decode(errors="replace"), pattern, first
 
 
 def probe(name: str, lib_dir: Path, work: Path) -> bool:
@@ -114,8 +116,8 @@ def probe(name: str, lib_dir: Path, work: Path) -> bool:
     try:
         time.sleep(1.0)
         uid, port = find_stream(lib_dir, stream)
-        plain_head, plain_pattern = feed(port, uid, extra=False)
-        with_head, with_pattern = feed(port, uid, extra=True)
+        plain_head, plain_pattern, plain_first = feed(port, uid, extra=False)
+        with_head, with_pattern, with_first = feed(port, uid, extra=True)
     finally:
         pub.kill()
         pub.wait()
@@ -127,12 +129,17 @@ def probe(name: str, lib_dir: Path, work: Path) -> bool:
     heads_same = plain_head == rest
     pattern_same = plain_pattern == with_pattern
     answer_ok = len(feature_lines) <= 1 and answered <= offered
-    ok = heads_same and pattern_same and answer_ok
+    # A sample starts with tag 1 or 2 (SPEC.md 7.1). With seq/1 on, the data
+    # starts with a numbering record, tag 0xFE. `docs/extensions.md`.
+    plain_data_ok = plain_first in (1, 2)
+    with_data_ok = with_first == 0xFE if "seq/1" in answered else with_first in (1, 2)
+    ok = heads_same and pattern_same and answer_ok and plain_data_ok and with_data_ok
     answer = (f"answer '{' '.join(sorted(answered))}'" if feature_lines
               else "no Labstream-Features answer")
     print(f"  {name:<8} {'pass' if ok else 'FAIL'}  other answer headers "
           f"{'same' if heads_same else 'DIFFERENT'}, test pattern "
-          f"{'same' if pattern_same else 'DIFFERENT'}, {answer}")
+          f"{'same' if pattern_same else 'DIFFERENT'}, {answer}, first data byte "
+          f"{plain_first:#04x} plain, {with_first:#04x} with the header")
     if not ok:
         print("    without:", plain_head.replace("\r\n", " | "))
         print("    with:   ", with_head.replace("\r\n", " | "))

@@ -675,10 +675,23 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         if trace {
             eprintln!("TRACE handing the socket to the blocking writer");
         }
-        shared.sync.lock().unwrap().list.push(SyncConsumer {
+        let mut set = shared.sync.lock().unwrap();
+        // A numbered consumer gets its first record at once, under the lock
+        // that numbers the writes. `docs/extensions.md`.
+        let numbering = if numbered {
+            let mut n = Numbering::new();
+            let mut record = Vec::new();
+            n.start(set.next, &mut record);
+            stream.write_all(&record)?;
+            stream.flush()?;
+            Some(n)
+        } else {
+            None
+        };
+        set.list.push(SyncConsumer {
             stream,
             codec,
-            numbering: numbered.then(Numbering::new),
+            numbering,
         });
         return Ok(());
     }
@@ -744,6 +757,17 @@ fn feed<W: Write>(
     trace: bool,
 ) -> usize {
     let mut numbering = numbered.then(Numbering::new);
+    // The first record goes out at once, before any sample. A gap before
+    // this connection is then visible on a quiet stream too.
+    if let Some(n) = numbering.as_mut() {
+        let (_, next) = queue.pop_many_numbered(&mut Vec::new(), 0, Duration::ZERO);
+        let mut record = Vec::new();
+        n.start(next, &mut record);
+        if out.write_all(&record).is_err() {
+            return 0;
+        }
+        let _ = out.flush();
+    }
     let mut batch: Vec<Sample> = Vec::new();
     let mut pending: Vec<u8> = Vec::new();
     let mut count = 0usize;
@@ -1020,7 +1044,9 @@ mod tests {
         let (got, records, out) = run_numbered(&q, 16, ByteOrder::native());
         assert_eq!(got.len(), 32);
         assert_eq!(records, vec![7]);
-        assert_eq!(out.writes, 2, "16 samples in each write, the record extra");
+        // The opening record is a write of its own, at the start of the
+        // connection. Then 16 samples go in each write.
+        assert_eq!(out.writes, 3, "the record, then two chunks of 16");
     }
 
     #[test]
