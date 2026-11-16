@@ -16,10 +16,42 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+/// The samples of a queue, and the number after the last one.
+///
+/// Each push adds one to `back`, also for a sample that the queue drops at
+/// once. A removal does not change it. The samples in the queue thus always
+/// have the numbers `back - len .. back`, with no gap: the queue drops only
+/// from the front, and a push only adds at the back. `docs/extensions.md`.
+#[derive(Debug)]
+struct Ring {
+    q: VecDeque<Sample>,
+    back: u64,
+}
+
+impl std::ops::Deref for Ring {
+    type Target = VecDeque<Sample>;
+    fn deref(&self) -> &VecDeque<Sample> {
+        &self.q
+    }
+}
+
+impl std::ops::DerefMut for Ring {
+    fn deref_mut(&mut self) -> &mut VecDeque<Sample> {
+        &mut self.q
+    }
+}
+
+impl Ring {
+    /// The number of the sample at the front.
+    fn front_number(&self) -> u64 {
+        self.back.wrapping_sub(self.q.len() as u64)
+    }
+}
+
 /// A queue that never blocks its writer.
 #[derive(Debug)]
 pub struct SampleQueue {
-    inner: Mutex<VecDeque<Sample>>,
+    inner: Mutex<Ring>,
     room: Condvar,
     capacity: usize,
     dropped: AtomicU64,
@@ -32,9 +64,20 @@ impl SampleQueue {
     /// A capacity of zero would drop every sample, so the value floors at 1.
     /// liblsl floors the same way (`src/stream_info_impl.cpp:268`).
     pub fn new(capacity: usize) -> Self {
+        Self::with_first_number(capacity, 0)
+    }
+
+    /// Build a queue whose first pushed sample gets the number `first`.
+    ///
+    /// The `seq` feature numbers the samples of an outlet with one counter.
+    /// A consumer that connects later starts at the current count.
+    pub fn with_first_number(capacity: usize, first: u64) -> Self {
         let capacity = capacity.max(1);
         SampleQueue {
-            inner: Mutex::new(VecDeque::with_capacity(capacity.min(4096))),
+            inner: Mutex::new(Ring {
+                q: VecDeque::with_capacity(capacity.min(4096)),
+                back: first,
+            }),
             room: Condvar::new(),
             capacity,
             dropped: AtomicU64::new(0),
@@ -76,6 +119,7 @@ impl SampleQueue {
             self.dropped.fetch_add(1, Ordering::SeqCst);
         }
         q.push_back(s);
+        q.back = q.back.wrapping_add(1);
         drop(q);
         self.room.notify_one();
     }
@@ -102,6 +146,7 @@ impl SampleQueue {
             }
             q.push_back(s.clone());
         }
+        q.back = q.back.wrapping_add(samples.len() as u64);
         drop(q);
         if lost > 0 {
             self.dropped.fetch_add(lost, Ordering::SeqCst);
@@ -123,6 +168,8 @@ impl SampleQueue {
         let mut lost = 0u64;
         // Samples that the queue drops at once are never moved in.
         let skip = samples.len().saturating_sub(self.capacity);
+        // Each sample takes a number, also the ones that are never moved in.
+        q.back = q.back.wrapping_add(samples.len() as u64);
         for s in samples.drain(..).skip(skip) {
             if q.len() >= self.capacity {
                 q.pop_front();
@@ -208,6 +255,38 @@ impl SampleQueue {
         }
     }
 
+    /// Like [`SampleQueue::pop_many`], and also give the number of the first
+    /// sample that it took.
+    ///
+    /// The samples that it took have consecutive numbers. With no sample, the
+    /// number is the one that the next sample gets.
+    pub fn pop_many_numbered(
+        &self,
+        out: &mut Vec<Sample>,
+        max: usize,
+        timeout: Duration,
+    ) -> (usize, u64) {
+        if max == 0 {
+            return (0, self.inner.lock().unwrap().front_number());
+        }
+        let end = Instant::now() + timeout;
+        let mut q = self.inner.lock().unwrap();
+        loop {
+            if !q.is_empty() || Instant::now() >= end || *self.closed.lock().unwrap() {
+                let first = q.front_number();
+                let take = q.len().min(max);
+                out.extend(q.drain(..take));
+                return (take, first);
+            }
+            let left = end.saturating_duration_since(Instant::now());
+            let (guard, _) = self
+                .room
+                .wait_timeout(q, left.min(Duration::from_millis(100)))
+                .unwrap();
+            q = guard;
+        }
+    }
+
     /// Wake every reader and stop the queue.
     pub fn close(&self) {
         *self.closed.lock().unwrap() = true;
@@ -226,7 +305,17 @@ impl SampleQueue {
 /// its own queue, so a slow consumer loses only its own samples. SPEC.md 8.8.
 #[derive(Debug, Default)]
 pub struct Fanout {
-    consumers: Mutex<Vec<Arc<SampleQueue>>>,
+    consumers: Mutex<Consumers>,
+}
+
+/// The queues of a fanout, and the number of the next pushed sample.
+///
+/// One lock holds both, so a new queue starts at the number that the next
+/// push gives, and every queue sees the same numbers.
+#[derive(Debug, Default)]
+struct Consumers {
+    list: Vec<Arc<SampleQueue>>,
+    next: u64,
 }
 
 impl Fanout {
@@ -237,9 +326,15 @@ impl Fanout {
 
     /// Add a consumer with its own queue.
     pub fn add(&self, capacity: usize) -> Arc<SampleQueue> {
-        let q = Arc::new(SampleQueue::new(capacity));
-        self.consumers.lock().unwrap().push(Arc::clone(&q));
+        let mut set = self.consumers.lock().unwrap();
+        let q = Arc::new(SampleQueue::with_first_number(capacity, set.next));
+        set.list.push(Arc::clone(&q));
         q
+    }
+
+    /// The number that the next pushed sample gets.
+    pub fn next_number(&self) -> u64 {
+        self.consumers.lock().unwrap().next
     }
 
     /// Remove a consumer.
@@ -247,12 +342,13 @@ impl Fanout {
         self.consumers
             .lock()
             .unwrap()
+            .list
             .retain(|c| !Arc::ptr_eq(c, q));
     }
 
     /// How many consumers are connected.
     pub fn count(&self) -> usize {
-        self.consumers.lock().unwrap().len()
+        self.consumers.lock().unwrap().list.len()
     }
 
     /// Give one sample to every consumer.
@@ -261,8 +357,9 @@ impl Fanout {
     /// waits, whatever any consumer is doing.
     pub fn push(&self, s: &Sample) {
         let mut set = self.consumers.lock().unwrap();
-        set.retain(|q| !q.is_closed());
-        for q in set.iter() {
+        set.next = set.next.wrapping_add(1);
+        set.list.retain(|q| !q.is_closed());
+        for q in set.list.iter() {
             q.push(s.clone());
         }
     }
@@ -276,15 +373,16 @@ impl Fanout {
             return;
         }
         let mut set = self.consumers.lock().unwrap();
-        set.retain(|q| !q.is_closed());
-        for q in set.iter() {
+        set.next = set.next.wrapping_add(samples.len() as u64);
+        set.list.retain(|q| !q.is_closed());
+        for q in set.list.iter() {
             q.push_many(samples);
         }
     }
 
     /// Close every consumer queue.
     pub fn close(&self) {
-        for q in self.consumers.lock().unwrap().iter() {
+        for q in self.consumers.lock().unwrap().list.iter() {
             q.close();
         }
     }
@@ -537,5 +635,93 @@ mod tests {
         f.remove(&a);
         f.push(&sample(2));
         assert_eq!(a.len(), 1, "a removed consumer must receive nothing more");
+    }
+
+    /// A small generator, so the test runs the same steps on each run.
+    struct Steps(u64);
+
+    impl Steps {
+        fn next(&mut self, below: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % below
+        }
+    }
+
+    #[test]
+    fn the_numbers_follow_a_model_with_one_number_for_each_sample() {
+        // Each sample carries its own number as its value. The model keeps
+        // the numbers. Every way to push, drop and pop must agree with it.
+        for seed in 1..40u64 {
+            let mut steps = Steps(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let capacity = 1 + steps.next(12) as usize;
+            let first = steps.next(1000);
+            let q = SampleQueue::with_first_number(capacity, first);
+            let mut model: VecDeque<u64> = VecDeque::new();
+            let mut next = first;
+            for _ in 0..400 {
+                match steps.next(5) {
+                    0 => {
+                        q.push(sample(next as i32));
+                        model.push_back(next);
+                        next += 1;
+                    }
+                    1 | 2 => {
+                        let k = steps.next(30) as usize;
+                        let block: Vec<Sample> =
+                            (0..k).map(|i| sample((next + i as u64) as i32)).collect();
+                        if steps.next(2) == 0 {
+                            q.push_many(&block);
+                        } else {
+                            let mut owned = block;
+                            q.push_owned(&mut owned);
+                        }
+                        for i in 0..k as u64 {
+                            model.push_back(next + i);
+                        }
+                        next += k as u64;
+                    }
+                    3 => {
+                        let got = q.pop(Duration::ZERO);
+                        let want = model.pop_front();
+                        assert_eq!(got.map(|s| index(&s) as u64), want);
+                    }
+                    _ => {
+                        let max = 1 + steps.next(20) as usize;
+                        let mut out = Vec::new();
+                        let (n, number) = q.pop_many_numbered(&mut out, max, Duration::ZERO);
+                        assert_eq!(n, out.len());
+                        let want_first = model.front().copied().unwrap_or(next);
+                        assert_eq!(number, want_first, "seed {seed}");
+                        for (i, s) in out.iter().enumerate() {
+                            assert_eq!(index(s) as u64, number + i as u64, "seed {seed}");
+                            assert_eq!(model.pop_front(), Some(number + i as u64));
+                        }
+                    }
+                }
+                while model.len() > capacity {
+                    model.pop_front();
+                }
+                assert_eq!(q.len(), model.len(), "seed {seed}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_late_consumer_starts_at_the_current_number() {
+        let f = Fanout::new();
+        let a = f.add(100);
+        for i in 0..5 {
+            f.push(&sample(i));
+        }
+        let b = f.add(100);
+        assert_eq!(f.next_number(), 5);
+        f.push_many(&[sample(5), sample(6)]);
+        let mut out = Vec::new();
+        assert_eq!(a.pop_many_numbered(&mut out, 100, Duration::ZERO), (7, 0));
+        out.clear();
+        assert_eq!(b.pop_many_numbered(&mut out, 100, Duration::ZERO), (2, 5));
+        assert_eq!(index(&out[0]), 5);
     }
 }

@@ -5,6 +5,7 @@ use crate::config;
 use crate::info::StreamInfo;
 use crate::queue::SampleQueue;
 use labstream_proto::discovery;
+use labstream_proto::features;
 use labstream_proto::feed::{FeedClient, FeedParams, State, TestPatternError};
 use labstream_time::{flags, PostProcessor};
 use labstream_wire::Sample;
@@ -365,6 +366,10 @@ struct ConnState {
     /// The description of the stream that the reader is attached to. A
     /// recovery replaces it, and the instance identifier changes.
     info: Mutex<StreamInfo>,
+    /// True when the current connection uses `seq/1`. `docs/extensions.md`.
+    numbered: AtomicBool,
+    /// The samples that never arrived, from the `seq/1` numbers.
+    lost: AtomicU64,
 }
 
 /// How long without data before the reader treats the source as gone.
@@ -416,6 +421,7 @@ impl Inlet {
     ) -> std::io::Result<Self> {
         let (stream, client, buf) = handshake(info, timeout, buffer_samples)?;
         debug_assert_eq!(client.state(), State::Streaming);
+        let numbered = uses_seq(&client);
 
         // The queue holds what the application has not pulled yet. Its size is
         // the value that went out in `Max-Buffer-Length`, which is a count of
@@ -438,6 +444,8 @@ impl Inlet {
             recoveries: AtomicU64::new(0),
             connected: AtomicBool::new(true),
             info: Mutex::new(info.clone()),
+            numbered: AtomicBool::new(numbered),
+            lost: AtomicU64::new(0),
         });
 
         // One thread owns the connection for its whole life: it reads, and when
@@ -586,6 +594,24 @@ impl Inlet {
         self.queue.dropped()
     }
 
+    /// How many samples never reached this inlet, since it opened.
+    ///
+    /// The count comes from the `seq/1` numbers (`docs/extensions.md`). It
+    /// shows a sample that the outlet dropped from a full queue, and the
+    /// samples between a lost connection and the next one. The value is
+    /// `None` when the current connection does not use `seq/1`, for example
+    /// with a liblsl outlet. `None` means unknown, not zero.
+    ///
+    /// The inlet queue drops after this count, so a full total adds
+    /// [`Inlet::samples_dropped`].
+    pub fn samples_lost(&self) -> Option<u64> {
+        if self.conn.numbered.load(Ordering::SeqCst) {
+            Some(self.conn.lost.load(Ordering::SeqCst))
+        } else {
+            None
+        }
+    }
+
     /// The size of the queue, in samples.
     pub fn buffer_capacity(&self) -> usize {
         self.queue.capacity()
@@ -632,6 +658,10 @@ fn read_and_recover(
     let srate = conn.info.lock().unwrap().nominal_srate;
     let mut deducer = labstream_wire::TimestampDeducer::new(srate);
 
+    // The `seq/1` count. It lives as long as the inlet, so the first record
+    // after a reconnect to the same outlet shows the gap.
+    let mut counter = labstream_proto::seq::Counter::new();
+
     loop {
         if queue.is_closed() {
             break;
@@ -639,7 +669,15 @@ fn read_and_recover(
 
         // Decode everything already buffered before reading more. The whole
         // read goes into the queue with one lock.
-        let decoded = decode_buffered(&codec, &mut carry, &mut deducer, &mut batch);
+        let numbered = conn.numbered.load(Ordering::SeqCst);
+        let decoded = decode_buffered(
+            &codec,
+            &mut carry,
+            &mut deducer,
+            numbered.then_some(&mut counter),
+            &mut batch,
+        );
+        conn.lost.store(counter.lost(), Ordering::SeqCst);
         if !batch.is_empty() {
             last_data = Instant::now();
             queue.push_owned(&mut batch);
@@ -725,6 +763,7 @@ fn read_and_recover(
                     sock = s;
                     carry = rest;
                     codec = *c.codec().expect("the handshake set the codec");
+                    conn.numbered.store(uses_seq(&c), Ordering::SeqCst);
                     conn.recoveries.fetch_add(1, Ordering::SeqCst);
                     conn.connected.store(true, Ordering::SeqCst);
                     last_data = Instant::now();
@@ -755,6 +794,9 @@ fn read_and_recover(
                             }
                             clock.reset_offset();
                             deducer = labstream_wire::TimestampDeducer::new(fresh.nominal_srate);
+                            // A new outlet has a new counter.
+                            counter.restart();
+                            conn.numbered.store(uses_seq(&c), Ordering::SeqCst);
                             *conn.info.lock().unwrap() = *fresh;
                             conn.recoveries.fetch_add(1, Ordering::SeqCst);
                             conn.connected.store(true, Ordering::SeqCst);
@@ -799,15 +841,33 @@ fn decode_buffered(
     codec: &labstream_wire::Codec,
     carry: &mut Vec<u8>,
     deducer: &mut labstream_wire::TimestampDeducer,
+    mut counter: Option<&mut labstream_proto::seq::Counter>,
     out: &mut Vec<Sample>,
 ) -> Result<(), labstream_wire::Error> {
+    use labstream_proto::seq::{peek, Next, RECORD_LEN};
     let mut pos = 0;
     let result = loop {
+        // With `seq/1`, a numbering record can stand before a sample. A cut
+        // record waits for more bytes, as a cut sample does.
+        if let Some(c) = counter.as_deref_mut() {
+            match peek(&carry[pos..]) {
+                Next::Record(n) => {
+                    c.record(n);
+                    pos += RECORD_LEN;
+                    continue;
+                }
+                Next::Incomplete => break Ok(()),
+                Next::Sample => {}
+            }
+        }
         match codec.decode(&carry[pos..]) {
             Ok((mut sample, used)) => {
                 pos += used;
                 sample.timestamp = deducer.apply(sample.timestamp);
                 out.push(sample);
+                if let Some(c) = counter.as_deref_mut() {
+                    c.sample();
+                }
             }
             Err(labstream_wire::Error::Truncated) => break Ok(()),
             Err(e) => break Err(e),
@@ -895,6 +955,11 @@ pub fn read_fullinfo(known: &StreamInfo, timeout: Duration) -> std::io::Result<S
     StreamInfo::from_fullinfo_xml(&text).map_err(std::io::Error::other)
 }
 
+/// True when the connection of this client uses `seq/1`.
+fn uses_seq(client: &FeedClient) -> bool {
+    features::has(client.features(), features::SEQ, 1)
+}
+
 /// Connect and run the whole handshake. SPEC.md 4 and 6.
 ///
 /// The reader thread calls this again after a recovery, so it lives outside
@@ -916,7 +981,11 @@ fn handshake(
     params.session_id = info.session_id.clone();
     params.max_buffer_length = buffer_samples.max(1);
 
-    let (mut client, request) = FeedClient::start(params, info.format, info.channel_count as usize);
+    // A labstream outlet answers the offer, and any other outlet ignores it.
+    // `docs/extensions.md`.
+    let offer = features::offer(&crate::config::get().features);
+    let (mut client, request) =
+        FeedClient::start_with(params, info.format, info.channel_count as usize, offer);
     stream.write_all(&request)?;
     stream.flush()?;
 
@@ -1022,11 +1091,82 @@ mod tests {
         let mut from = 0;
         for &to in cuts.iter().chain(std::iter::once(&bytes.len())) {
             carry.extend_from_slice(&bytes[from..to]);
-            decode_buffered(codec, &mut carry, &mut deducer, &mut out).unwrap();
+            decode_buffered(codec, &mut carry, &mut deducer, None, &mut out).unwrap();
             from = to;
         }
         assert!(carry.is_empty(), "no byte stays behind at the end");
         out
+    }
+
+    /// Decode in reads, with a `seq/1` counter. Give the samples and the
+    /// counter at the end.
+    fn decode_numbered(
+        codec: &Codec,
+        bytes: &[u8],
+        cuts: &[usize],
+    ) -> (Vec<Sample>, labstream_proto::seq::Counter) {
+        let mut carry = Vec::new();
+        let mut deducer = TimestampDeducer::new(100.0);
+        let mut counter = labstream_proto::seq::Counter::new();
+        let mut out = Vec::new();
+        let mut from = 0;
+        for &to in cuts.iter().chain(std::iter::once(&bytes.len())) {
+            carry.extend_from_slice(&bytes[from..to]);
+            decode_buffered(
+                codec,
+                &mut carry,
+                &mut deducer,
+                Some(&mut counter),
+                &mut out,
+            )
+            .unwrap();
+            from = to;
+        }
+        assert!(carry.is_empty(), "no byte stays behind at the end");
+        (out, counter)
+    }
+
+    #[test]
+    fn a_numbered_stream_cut_at_any_byte_gives_the_same_samples_and_count() {
+        use labstream_proto::seq::write_record;
+        for order in [ByteOrder::Little, ByteOrder::Big] {
+            let codec = Codec::new(Format::Float32, 3, order);
+            let (samples, _) = stream(&codec, 12);
+            // Numbers 40..45, then a gap of 3, then 48..54.
+            let mut bytes = Vec::new();
+            write_record(&mut bytes, 40);
+            for s in &samples[..5] {
+                codec.encode(s, &mut bytes).unwrap();
+            }
+            write_record(&mut bytes, 48);
+            for s in &samples[5..] {
+                codec.encode(s, &mut bytes).unwrap();
+            }
+            let (whole, c) = decode_numbered(&codec, &bytes, &[]);
+            assert_eq!(whole.len(), 12);
+            assert_eq!(c.lost(), 3);
+            assert_eq!(c.expected(), Some(55));
+            for cut in 1..bytes.len() {
+                let (got, c) = decode_numbered(&codec, &bytes, &[cut]);
+                assert_eq!(got, whole, "a cut at {cut}");
+                assert_eq!(c.lost(), 3, "a cut at {cut}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_plain_stream_never_reads_a_record() {
+        // Without `seq/1`, the byte 0xFE is not a record. Here it can only
+        // stand inside a value, and the codec reads it as data.
+        let codec = Codec::new(Format::Int8, 1, ByteOrder::native());
+        let s = Sample {
+            timestamp: 1.0,
+            values: vec![Value::I8(-2)],
+        };
+        let mut bytes = Vec::new();
+        codec.encode(&s, &mut bytes).unwrap();
+        assert!(bytes.contains(&0xFE));
+        assert_eq!(decode_in_reads(&codec, &bytes, &[]), vec![s]);
     }
 
     #[test]
@@ -1065,7 +1205,7 @@ mod tests {
         let mut carry = bytes;
         let mut deducer = TimestampDeducer::new(100.0);
         let mut out = Vec::new();
-        assert!(decode_buffered(&codec, &mut carry, &mut deducer, &mut out).is_err());
+        assert!(decode_buffered(&codec, &mut carry, &mut deducer, None, &mut out).is_err());
         assert_eq!(out.len(), 2);
     }
 
