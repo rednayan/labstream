@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Make sure that an outlet ignores the `Labstream-Features` request header.
+"""Make sure that the `Labstream-Features` request header changes nothing else.
 
-`docs/extensions.md` proposes this header. The proposal depends on one fact:
-an outlet that does not know the header gives the same answer with it and
-without it. This probe measures that fact on a real outlet.
+`docs/extensions.md` defines this header. It depends on two facts:
+
+- An outlet that does not know the header (liblsl) gives the same answer
+  with it and without it.
+- An outlet that knows it (labstream) adds one answer line, with only
+  offered tokens, and changes nothing else in the answer or in the test
+  pattern.
 
 The probe starts `oracle/publish.c`, linked to one library. It opens two feed
 connections by hand. One request has the extra header, and one does not.
-The answer headers and the two test pattern samples must be the same, byte
-for byte.
+Without the `Labstream-Features` line, the answer headers must be the same,
+byte for byte. The two test pattern samples must be the same, byte for byte.
 
 Usage:
     oracle/headerprobe.py                      # liblsl and the Rust library
@@ -115,13 +119,20 @@ def probe(name: str, lib_dir: Path, work: Path) -> bool:
     finally:
         pub.kill()
         pub.wait()
-    same = plain_head == with_head and plain_pattern == with_pattern
-    leaked = "labstream-features" in with_head.lower()
-    ok = same and not leaked
-    print(f"  {name:<8} {'pass' if ok else 'FAIL'}  answer headers "
-          f"{'same' if plain_head == with_head else 'DIFFERENT'}, test pattern "
-          f"{'same' if plain_pattern == with_pattern else 'DIFFERENT'}, "
-          f"{'a Labstream-Features answer' if leaked else 'no Labstream-Features answer'}")
+    lines = with_head.split("\r\n")
+    feature_lines = [x for x in lines if x.lower().startswith("labstream-features:")]
+    rest = "\r\n".join(x for x in lines if x not in feature_lines)
+    offered = set(EXTRA.split(":", 1)[1].split())
+    answered = set(feature_lines[0].split(":", 1)[1].split()) if feature_lines else set()
+    heads_same = plain_head == rest
+    pattern_same = plain_pattern == with_pattern
+    answer_ok = len(feature_lines) <= 1 and answered <= offered
+    ok = heads_same and pattern_same and answer_ok
+    answer = (f"answer '{' '.join(sorted(answered))}'" if feature_lines
+              else "no Labstream-Features answer")
+    print(f"  {name:<8} {'pass' if ok else 'FAIL'}  other answer headers "
+          f"{'same' if heads_same else 'DIFFERENT'}, test pattern "
+          f"{'same' if pattern_same else 'DIFFERENT'}, {answer}")
     if not ok:
         print("    without:", plain_head.replace("\r\n", " | "))
         print("    with:   ", with_head.replace("\r\n", " | "))
@@ -142,9 +153,9 @@ def main() -> int:
         results.append(probe(name, Path(path).resolve(), work))
     print()
     if all(results):
-        print("each outlet ignores the Labstream-Features header")
+        print("the Labstream-Features header changes nothing else on any outlet")
         return 0
-    print("an outlet reacts to the Labstream-Features header")
+    print("the Labstream-Features header changed something else on an outlet")
     return 1
 
 

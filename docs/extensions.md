@@ -246,21 +246,34 @@ the stored data, and it does not describe one connection.
 
 ## The conformance plan
 
+Each item gives its status on the branch `feat/seq`.
+
 1. **liblsl outlet, raw request.** Send a feed request with the header to the
    oracle outlet. Make sure that the answer and the data bytes are the same
-   as for the request without the header. `oracle/headerprobe.py` does this
-   now. It passes for liblsl and for labstream `main`.
+   as for the request without the header. **Done:** `oracle/headerprobe.py`
+   passes for liblsl and for labstream `main`.
 2. **liblsl inlet.** Make sure that a labstream outlet sends no
-   `Labstream-Features` line when the request has none.
+   `Labstream-Features` line, and no record, when the request has none.
+   **Done:** `crates/labstream-net/tests/seq_live.rs`,
+   `a_request_without_the_header_gets_plain_samples`. The interop matrix
+   also runs liblsl inlets against the labstream outlet.
 3. **Released labstream 0.1.2.** Run it as a peer in both directions. It
-   knows nothing of the header, so each run must give plain LSL.
+   knows nothing of the header, so each run must give plain LSL. **Done:**
+   below `crates/`, `main` differs from the tag `v0.1.2` only in one comment.
+   `oracle/headerprobe.py` on a `main` outlet shows no answer line. Item 2
+   covers a 0.1.2 inlet, which sends no header.
 4. **Two labstream peers.** Run each feature on and off, and each mix of
-   offer and answer.
+   offer and answer. **Done:** the unit tests in `feed.rs` and
+   `features.rs` cover each mix. `oracle/interop.py` and its self test pass
+   with `seq` on, and again with `labstream.Features = {}` in a
+   configuration file. `oracle/headerprobe.py` with the feature off gives an
+   empty answer and no other change.
 5. **Syntax.** Send tokens with uppercase letters, with `;`, and with a bad
    form. Make sure that the outlet ignores each bad token, and keeps the
-   good ones.
+   good ones. **Done:** the unit tests in `features.rs`.
 6. **The full interop matrix.** `oracle/interop.py` must give the same result
-   as before, with the header on.
+   as before, with the header on. **Done:** each mode gives the same count
+   as on `main`.
 
 ## Open questions
 

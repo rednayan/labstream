@@ -7,6 +7,20 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The `seq/1` feature between two labstream peers (`docs/extensions.md`). A
+  labstream inlet offers it in the request header `Labstream-Features`, and
+  a labstream outlet answers it. liblsl ignores the header on both sides.
+  The outlet numbers its samples, and the inlet counts the samples that
+  never arrived: from a full outlet queue, and from a lost connection.
+- `Inlet::lost` in `labstream` and `Inlet::samples_lost` in `labstream-net`.
+  The value is `None` when the connection does not use `seq/1`.
+- The configuration key `labstream.Features`. The value `{}` turns every
+  labstream feature off.
+- `labstream_proto::features` and `labstream_proto::seq`, with
+  `FeedParams::to_wire_with`, `FeedClient::start_with`,
+  `FeedClient::features` and `Accepted::to_wire_with`.
+- `SampleQueue::with_first_number`, `SampleQueue::pop_many_numbered` and
+  `Fanout::next_number`.
 - `docs/latency.md` and `conformance/oracle/latency.py`, with
   `conformance/oracle/latency.c`. They measure the time from a push to a pull,
   and the CPU of each side, for liblsl and labstream.
