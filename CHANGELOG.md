@@ -13,6 +13,29 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `docs/releasing.md`. It gives each step of a release to crates.io and to
   GitHub, a test of the pipeline with no publish, the recovery for each
   failure, a publish by hand, and a checklist.
+- `Outlet::push_samples`, which sends a block with one timestamp for each
+  sample.
+- `SampleQueue::push_owned`, which moves a block into a queue with no copy.
+- `ClockState::reset_offset`, `ClockState::retarget`, `ClockState::is_running`,
+  and `clock::FIRST_OFFSET_TIMEOUT`.
+
+### Fixed
+
+- An inlet with `CLOCKSYNC` waits up to 5 s for the first clock offset, as
+  liblsl does. Before, the first timestamps used an offset of 0, and the real
+  offset arrived about 0.6 s later as a step. If no offset arrives in 5 s, the
+  samples continue with no correction. liblsl raises a timeout error there.
+- A recovering inlet connects again to the same outlet after its TCP
+  connection closes. Before, the stream stopped with no error while the
+  outlet still ran. After a restart of the outlet, the clock probes now go to
+  the new service port, and the offset resets.
+- A consumer connection writes the samples of one push call with one socket
+  write. Before, each sample had its own write, and a partial chunk could
+  wait 200 ms.
+- The inlet reader moves its buffer once for each read, and takes the queue
+  lock once for each read. Before, it did both once for each sample.
+- A discovery query uses the multicast TTL of the configuration. Before, it
+  always used 1.
 
 ### Changed
 

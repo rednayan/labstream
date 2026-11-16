@@ -1,7 +1,7 @@
 //! The outlet: a discovery responder and a TCP feed server.
 
 use crate::info::StreamInfo;
-use crate::queue::Fanout;
+use crate::queue::{Fanout, SampleQueue};
 use crate::{clock, config};
 use labstream_proto::discovery;
 use labstream_proto::header::parse_block;
@@ -261,6 +261,21 @@ fn write_blocking(shared: &Shared, sample: &Sample) {
         out.clear();
         if c.codec.encode(sample, &mut out).is_err() {
             return false;
+        }
+        c.stream.write_all(&out).is_ok() && c.stream.flush().is_ok()
+    });
+}
+
+/// Write several samples to every consumer, with one write for each consumer.
+fn write_blocking_many(shared: &Shared, samples: &[Sample]) {
+    let mut out = Vec::new();
+    let mut consumers = shared.sync.lock().unwrap();
+    consumers.retain_mut(|c| {
+        out.clear();
+        for s in samples {
+            if c.codec.encode(s, &mut out).is_err() {
+                return false;
+            }
         }
         c.stream.write_all(&out).is_ok() && c.stream.flush().is_ok()
     });
@@ -656,60 +671,89 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         .add(accepted.max_buffer_length.max(1) as usize);
 
     // A chunk decides when one write happens. It is not a wire unit. SPEC.md 9.
-    let chunk = if accepted.max_chunk_length > 0 {
+    // A value of zero means no limit (`src/tcp_server.cpp:749-753`). This
+    // outlet has no chunk size of its own.
+    let max_chunk = if accepted.max_chunk_length > 0 {
         accepted.max_chunk_length as usize
     } else {
-        1
+        usize::MAX
     };
 
-    let mut pending = Vec::new();
-    let mut count = 0usize;
-    let mut sent = 0usize;
-    loop {
-        if *shared.stop.lock().unwrap() || queue.is_closed() {
-            break;
-        }
-        match queue.pop(Duration::from_millis(200)) {
-            Some(s) => {
-                if codec.encode(&s, &mut pending).is_err() {
-                    break;
-                }
-                count += 1;
-                if count >= chunk {
-                    if trace && sent == 0 {
-                        eprintln!("TRACE first data write, {} bytes", pending.len());
-                    }
-                    if let Err(e) = stream.write_all(&pending) {
-                        if trace {
-                            eprintln!("TRACE write failed after {sent} samples: {e}");
-                        }
-                        break;
-                    }
-                    sent += count;
-                    let _ = stream.flush();
-                    pending.clear();
-                    count = 0;
-                }
-            }
-            None => {
-                // Nothing arrived. Write whatever is waiting so a partial
-                // chunk does not sit here.
-                if !pending.is_empty() {
-                    if stream.write_all(&pending).is_err() {
-                        break;
-                    }
-                    let _ = stream.flush();
-                    pending.clear();
-                    count = 0;
-                }
-            }
-        }
-    }
+    let stop = || *shared.stop.lock().unwrap();
+    let sent = feed(&queue, &codec, &mut stream, max_chunk, &stop, trace);
     if trace {
         eprintln!("TRACE session over after {sent} samples");
     }
     shared.fanout.remove(&queue);
     Ok(())
+}
+
+/// Copy the samples of one consumer queue to its socket.
+///
+/// liblsl writes when a sample carries the push-through flag, or when the
+/// count reaches the chunk size (`src/tcp_server.cpp:782`). Each push call of
+/// liblsl sets the flag on its last sample by default
+/// (`src/stream_outlet_impl.h:74`, `src/stream_outlet_impl.h:208-209`).
+///
+/// Here, the samples of one push call go into the queue with one lock. The
+/// writer takes all samples that wait, and it writes when the count reaches
+/// the chunk size or when the queue is empty. An empty queue therefore acts
+/// as the push-through flag. When the writer is slower than the source, one
+/// write can carry more than one push call. No sample waits for a later push.
+///
+/// The result is the number of samples written.
+fn feed<W: Write>(
+    queue: &SampleQueue,
+    codec: &Codec,
+    out: &mut W,
+    max_chunk: usize,
+    stop: &dyn Fn() -> bool,
+    trace: bool,
+) -> usize {
+    let mut batch: Vec<Sample> = Vec::new();
+    let mut pending: Vec<u8> = Vec::new();
+    let mut count = 0usize;
+    let mut sent = 0usize;
+    let mut write = |pending: &mut Vec<u8>, count: &mut usize, sent: &mut usize| -> bool {
+        if trace && *sent == 0 {
+            eprintln!("TRACE first data write, {} bytes", pending.len());
+        }
+        if let Err(e) = out.write_all(pending) {
+            if trace {
+                eprintln!("TRACE write failed after {sent} samples: {e}");
+            }
+            return false;
+        }
+        let _ = out.flush();
+        *sent += *count;
+        pending.clear();
+        *count = 0;
+        true
+    };
+    loop {
+        if stop() || queue.is_closed() {
+            break;
+        }
+        batch.clear();
+        if queue.pop_many(&mut batch, usize::MAX, Duration::from_millis(200)) == 0 {
+            continue;
+        }
+        for s in &batch {
+            if codec.encode(s, &mut pending).is_err() {
+                return sent;
+            }
+            count += 1;
+            if count >= max_chunk && !write(&mut pending, &mut count, &mut sent) {
+                return sent;
+            }
+        }
+        // The queue was empty when the batch came out, so nothing more is on
+        // the way. Write what is left.
+        if !pending.is_empty() && !write(&mut pending, &mut count, &mut sent) {
+            return sent;
+        }
+    }
+    sent
 }
 
 fn find_double_crlf(buf: &[u8]) -> Option<usize> {
@@ -719,34 +763,32 @@ fn find_double_crlf(buf: &[u8]) -> Option<usize> {
 impl Outlet {
     /// Send several samples that share one timestamp, with one lock.
     ///
-    /// The timestamps are the timestamps of [`Outlet::push_chunk`]. The only
-    /// difference is the number of locks: this takes the set of consumers once
-    /// for the whole block, and each consumer queue once. `push_chunk` takes both
-    /// once for each sample.
-    ///
-    /// A block of 500 samples to 2 consumers costs 3 locks here and 1500 locks
-    /// there.
-    ///
-    /// The blocking mode is not batched. That mode waits for each write on
-    /// purpose, so a block gives no gain.
+    /// This is the same call as [`Outlet::push_chunk`]. It stays for the
+    /// programs that use it.
     pub fn push_chunk_fast(&self, samples: &[Sample], timestamp: f64) {
+        self.push_chunk(samples, timestamp);
+    }
+
+    /// Send several samples, each with its own timestamp, with one lock.
+    ///
+    /// The timestamp rules of [`Outlet::push`] apply to each sample. A
+    /// consumer receives the samples of one call together, so a consumer
+    /// connection writes them with one socket write. SPEC.md 9.
+    ///
+    /// A blocking outlet writes the samples to each consumer with one write,
+    /// before the call returns.
+    pub fn push_samples(&self, mut samples: Vec<Sample>) {
         if samples.is_empty() {
             return;
         }
+        for s in &mut samples {
+            s.timestamp = self.stamp(s.timestamp);
+        }
         if self.shared.sync_mode {
-            self.push_chunk(samples, timestamp);
+            write_blocking_many(&self.shared, &samples);
             return;
         }
-        let block: Vec<Sample> = self
-            .chunk_timestamps(samples, timestamp)
-            .map(|(t, s)| Sample {
-                // The rule of `Outlet::push` runs for each sample, so a
-                // configuration that orders the current clock still gets it.
-                timestamp: self.stamp(t),
-                values: s.values.clone(),
-            })
-            .collect();
-        self.shared.fanout.push_many(&block);
+        self.shared.fanout.push_many(&samples);
     }
 
     /// The timestamp of each sample of a chunk. SPEC.md 9.2.
@@ -792,28 +834,106 @@ impl Outlet {
     /// An application that acquires a block and stamps it on arrival therefore
     /// gets the right time for every sample in the block.
     ///
-    /// [`Outlet::push_chunk_fast`] does the same with one lock for the block.
+    /// The samples go to each consumer with one lock, and a consumer
+    /// connection writes them with one socket write. SPEC.md 9.
     pub fn push_chunk(&self, samples: &[Sample], timestamp: f64) {
         if samples.is_empty() {
             return;
         }
-        let mut first = if timestamp == 0.0 {
-            crate::clock()
-        } else {
-            timestamp
-        };
-        if self.info.nominal_srate != 0.0 {
-            first -= (samples.len() - 1) as f64 / self.info.nominal_srate;
-        }
-        for (k, s) in samples.iter().enumerate() {
-            self.push(&Sample {
-                timestamp: if k == 0 {
-                    first
-                } else {
-                    labstream_wire::DEDUCED_TIMESTAMP
-                },
+        let block: Vec<Sample> = self
+            .chunk_timestamps(samples, timestamp)
+            .map(|(t, s)| Sample {
+                timestamp: t,
                 values: s.values.clone(),
-            });
+            })
+            .collect();
+        self.push_samples(block);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use labstream_wire::{ByteOrder, Format, Value};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A writer that counts its calls and keeps the bytes.
+    #[derive(Default)]
+    struct Counting {
+        writes: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for Counting {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
         }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn samples(n: usize) -> Vec<Sample> {
+        (0..n)
+            .map(|k| Sample {
+                timestamp: k as f64,
+                values: vec![Value::F32(k as f32), Value::F32(0.5)],
+            })
+            .collect()
+    }
+
+    /// Feed the queue that the caller filled, then stop.
+    fn run(queue: &SampleQueue, max_chunk: usize) -> (usize, Counting) {
+        let codec = Codec::new(Format::Float32, 2, ByteOrder::native());
+        let mut out = Counting::default();
+        let once = AtomicBool::new(false);
+        // The first call to `stop` lets one round run. The second one stops.
+        let stop = || once.swap(true, Ordering::SeqCst);
+        let sent = feed(queue, &codec, &mut out, max_chunk, &stop, false);
+        (sent, out)
+    }
+
+    #[test]
+    fn a_chunk_with_no_limit_goes_out_in_one_write() {
+        let q = SampleQueue::new(1000);
+        q.push_many(&samples(100));
+        let (sent, out) = run(&q, usize::MAX);
+        assert_eq!(sent, 100);
+        assert_eq!(out.writes, 1, "one write for the whole chunk");
+    }
+
+    #[test]
+    fn a_chunk_limit_splits_the_writes() {
+        let q = SampleQueue::new(1000);
+        q.push_many(&samples(100));
+        let (sent, out) = run(&q, 16);
+        assert_eq!(sent, 100);
+        // Six full chunks of 16, then the last 4 samples.
+        assert_eq!(out.writes, 7);
+    }
+
+    #[test]
+    fn a_single_sample_is_not_held_back() {
+        // A limit that one sample does not reach. The sample still goes out
+        // at once, as the push-through flag of liblsl does.
+        let q = SampleQueue::new(1000);
+        q.push_many(&samples(1));
+        let (sent, out) = run(&q, 16);
+        assert_eq!(sent, 1);
+        assert_eq!(out.writes, 1);
+    }
+
+    #[test]
+    fn the_bytes_decode_to_the_same_samples() {
+        let q = SampleQueue::new(1000);
+        let sent = samples(50);
+        q.push_many(&sent);
+        let (_, out) = run(&q, 7);
+        let codec = Codec::new(Format::Float32, 2, ByteOrder::native());
+        let (got, used) = codec.decode_all(&out.bytes).unwrap();
+        assert_eq!(used, out.bytes.len());
+        assert_eq!(got, sent);
     }
 }

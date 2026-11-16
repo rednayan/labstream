@@ -110,6 +110,34 @@ impl SampleQueue {
         self.room.notify_all();
     }
 
+    /// Move every sample out of `samples` into the queue, with one lock.
+    ///
+    /// The result is the same as [`SampleQueue::push_many`], but no sample is
+    /// copied. `samples` is empty after the call and keeps its capacity, so
+    /// the caller can fill it again with no new allocation.
+    pub fn push_owned(&self, samples: &mut Vec<Sample>) {
+        if samples.is_empty() {
+            return;
+        }
+        let mut q = self.inner.lock().unwrap();
+        let mut lost = 0u64;
+        // Samples that the queue drops at once are never moved in.
+        let skip = samples.len().saturating_sub(self.capacity);
+        for s in samples.drain(..).skip(skip) {
+            if q.len() >= self.capacity {
+                q.pop_front();
+                lost += 1;
+            }
+            q.push_back(s);
+        }
+        drop(q);
+        lost += skip as u64;
+        if lost > 0 {
+            self.dropped.fetch_add(lost, Ordering::SeqCst);
+        }
+        self.room.notify_all();
+    }
+
     /// Take the oldest sample, waiting up to `timeout`.
     ///
     /// Returns `None` when the timeout passes with nothing waiting, or when the
@@ -320,6 +348,36 @@ mod tests {
             assert_eq!(index(&a), index(&b));
         }
         assert!(many.pop(Duration::from_millis(10)).is_none());
+    }
+
+    #[test]
+    fn an_owned_block_write_gives_what_single_writes_give() {
+        // The same rules as `push_many`, with the existing samples first, then
+        // a block larger than the queue.
+        for (before, block_len) in [(0, 50), (30, 50), (30, 600), (0, 100), (99, 1)] {
+            let one = SampleQueue::new(100);
+            let owned = SampleQueue::new(100);
+            for i in 0..before {
+                one.push(sample(i));
+                owned.push(sample(i));
+            }
+            let mut block: Vec<Sample> = (1000..1000 + block_len).map(sample).collect();
+            for s in &block {
+                one.push(s.clone());
+            }
+            owned.push_owned(&mut block);
+            assert!(block.is_empty(), "the call takes every sample");
+
+            assert_eq!(one.len(), owned.len());
+            assert_eq!(one.dropped(), owned.dropped(), "{before} then {block_len}");
+            while let Some(a) = one.pop(Duration::from_millis(10)) {
+                let b = owned
+                    .pop(Duration::from_millis(10))
+                    .expect("the same count");
+                assert_eq!(index(&a), index(&b));
+            }
+            assert!(owned.pop(Duration::from_millis(10)).is_none());
+        }
     }
 
     #[test]
