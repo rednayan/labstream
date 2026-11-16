@@ -1295,13 +1295,14 @@ unsafe fn push_chunk_typed(
         first -= (samples - 1) as f64 / b.info.nominal_srate;
     }
 
-    for k in 0..samples {
-        let values: Vec<Value> = (0..chans).map(|c| build(k * chans + c)).collect();
-        b.outlet.push(&Sample {
+    // One call for the whole chunk, so a consumer gets it with one write.
+    let block: Vec<Sample> = (0..samples)
+        .map(|k| Sample {
             timestamp: if k == 0 { first } else { LSL_DEDUCED_TIMESTAMP },
-            values,
-        });
-    }
+            values: (0..chans).map(|c| build(k * chans + c)).collect(),
+        })
+        .collect();
+    b.outlet.push_samples(block);
     LSL_NO_ERROR
 }
 
@@ -1325,14 +1326,15 @@ unsafe fn push_chunk_stamped(
         return LSL_ARGUMENT_ERROR;
     }
     let samples = count_values as usize / chans;
-    for k in 0..samples {
-        let values: Vec<Value> = (0..chans).map(|c| build(k * chans + c)).collect();
-        let t = *stamps.add(k);
-        b.outlet.push(&Sample {
-            timestamp: if t == 0.0 { labstream_net::clock() } else { t },
-            values,
-        });
-    }
+    // One call for the whole chunk, so a consumer gets it with one write.
+    // `push_samples` replaces a timestamp of zero with the current clock.
+    let block: Vec<Sample> = (0..samples)
+        .map(|k| Sample {
+            timestamp: *stamps.add(k),
+            values: (0..chans).map(|c| build(k * chans + c)).collect(),
+        })
+        .collect();
+    b.outlet.push_samples(block);
     LSL_NO_ERROR
 }
 
