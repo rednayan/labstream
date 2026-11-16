@@ -18,6 +18,7 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `SampleQueue::push_owned`, which moves a block into a queue with no copy.
 - `ClockState::reset_offset`, `ClockState::retarget`, `ClockState::is_running`,
   and `clock::FIRST_OFFSET_TIMEOUT`.
+- `clock::FIRST_PROBE_INTERVAL` and `clock::FIRST_RETRY`.
 
 ### Fixed
 
@@ -45,6 +46,22 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   too.
 - `docs/versioning.md` gives only what a version number means. Its release
   steps are now in `docs/releasing.md`.
+- Without a clock offset, an inlet sends its clock probes 4 ms apart, and
+  the burst stops when each probe has its answer. The first offset on
+  loopback now arrives in about 40 ms. Before, it took about 370 ms. A burst
+  that finds no offset tries again after 250 ms. The later bursts keep the
+  configured cadence.
+- Each read in a clock probe slot waits only for the time that is left in the
+  slot. Before, a fixed 40 ms read timeout ended a 64 ms slot early.
+- Each data connection uses TCP keepalive: a first probe after 2 s without
+  traffic, then one each second, and an end after 3 probes without an
+  answer. On Linux, data without an acknowledgement for 6 s also ends the
+  connection. A connection that died with no close now ends in about 5 s,
+  and a recovering inlet connects again. Before, an inlet waited for the
+  15 s watchdog, and kept the dead socket while the outlet was visible.
+- On Unix, a read that gives `ETIMEDOUT` ends the connection. A read timeout
+  gives `EAGAIN` there.
+- `socket2` now uses its `all` feature.
 - `release.yml` publishes only the crates that crates.io does not hold at the
   version. A release that stops partway now completes when a person reruns the
   failed jobs. Before, the workflow refused a partial state, and a person had
