@@ -23,6 +23,13 @@ The user made these decisions on 2026-11-16:
    proposal.
 6. A second research pass gave eight more features. The user added all
    eight: steps 2, 3, 6, 12, 13, 14, 15, and 16.
+7. Step 1 comes before step 0. The tests of step 1 cut the connection
+   themselves. Step 0 comes directly after step 1, and measures it.
+8. `resume/1` is on by default, with `seq/1`: `labstream.Features` is
+   `{seq resume}`.
+9. Step 1 also adds a C function for the `seq` loss count.
+10. `resume/1` carries a random epoch of the outlet, so a new outlet with
+    an old `uid` gets no resend.
 
 ## The map
 
@@ -64,7 +71,7 @@ later feature works without the earlier one, and gets better with it.
 |---|---|---|---|---|
 | Gate | Merge #9 to #12, and freeze the header name | Not applicable | none | small |
 | 0 | Lossy-link benchmark | No measurement | gate | small |
-| 1 | `resume/1` | Loses each sample that the outlet pushes during a dropout | gate, step 0 | medium |
+| 1 | `resume/1` | Loses each sample that the outlet pushes during a dropout | gate | medium |
 | 2 | Loss-aware dejitter | Counts only the samples that arrive | gate | small |
 | 3 | Store-and-forward | No history | step 1 | medium |
 | 4 | Relay | Not applicable. A liblsl outlet gets no labstream feature | step 1 | small to medium |
@@ -140,7 +147,8 @@ inlet gives.
    irregular rate. A lost marker has the highest cost for an experiment.
 3. If the gap is longer than the history, `Inlet::lost()` gives the exact
    count of the samples that the history did not hold.
-4. In step 0, the cut of 3 s gives 0 lost samples.
+4. In step 0, the cut of 3 s gives 0 lost samples. This check runs when
+   step 0 is complete.
 5. `latency.py` shows no change of p50 or p99 outside the range of the runs.
    The CPU of the outlet increases by not more than the cost of one consumer.
 
@@ -150,7 +158,7 @@ The spec is `docs/extensions.md`, section `resume`.
 
 The dejitter filter of liblsl fits a line through the timestamps. Its
 position on the line is a count of the samples that arrived
-(`src/time_postprocessor.cpp:118`). The filter cannot see a lost sample, so
+(`src/time_postprocessor.cpp:119`). The filter cannot see a lost sample, so
 each timestamp after a loss is too early by one sample interval for each
 lost sample. The filter corrects this error slowly. With `seq/1`, the inlet
 has the exact count of lost samples, and can move the position of the
@@ -414,10 +422,11 @@ example, a shared trigger) measures the error.
 
 ## Where the work sits
 
-- This page and the `resume` spec are on the branch `feat/seq` (#12), not
-  committed.
-- The merge order of the open pull requests is #9, #10, #11, #12.
-- After the gate, each feature branch starts from `main`.
+- This page and the `resume` spec are on the local branch `local/roadmap`.
+  They do not go to a remote.
+- The gate is complete. `main` holds #9 to #12. The development remote is
+  Forgejo, until GitHub CI works again.
+- Each feature branch starts from `main`.
 
 ## The process for each feature
 
@@ -431,8 +440,6 @@ example, a shared trigger) measures the error.
 
 ## Open questions
 
-- The memory of the `resume` history before step 8. See `docs/extensions.md`,
-  section `resume`.
 - A new inlet can ask for the last seconds of the history when it opens.
   See `docs/extensions.md`, section `resume`, open questions.
 - The final name of the datagram transport token, and if it uses QUIC or
