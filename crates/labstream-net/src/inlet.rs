@@ -520,6 +520,10 @@ impl Inlet {
     /// The timestamp passes through the post-processing stages that
     /// [`Inlet::set_postprocessing`] selected. With none selected the value is
     /// the one that the sender wrote.
+    ///
+    /// With `CLOCKSYNC` selected, the first call waits for the first offset
+    /// measurement, for up to 5 s. The timeout of the call does not limit that
+    /// wait. liblsl waits the same time (`src/stream_inlet_impl.h:44`).
     pub fn pull(&mut self, timeout: Duration) -> std::io::Result<Option<Sample>> {
         match self.queue.pop(timeout) {
             Some(mut s) => {
@@ -541,6 +545,9 @@ impl Inlet {
     /// The timeout applies to the first sample only. The call never waits for
     /// `max` samples, because a program that shows live signals must show what
     /// arrived.
+    ///
+    /// With `CLOCKSYNC` selected, the first call can wait up to 5 s for the
+    /// first offset measurement, as [`Inlet::pull`] does.
     ///
     /// This is the call for a fast stream. [`Inlet::pull`] takes the queue lock
     /// and reads the clock for each sample. A stream of 8 channels at 1000 Hz
@@ -735,6 +742,8 @@ fn read_and_recover(
 
     conn.connected.store(false, Ordering::SeqCst);
     done.store(true, Ordering::SeqCst);
+    // No new offset can matter now. A stop also ends a wait for the first one.
+    clock.stop();
     queue.close();
 }
 
