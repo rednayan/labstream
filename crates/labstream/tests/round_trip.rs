@@ -92,6 +92,11 @@ fn a_program_uses_only_this_crate() {
     // Timestamps stay ordered under the post-processing stages.
     let stamps = chunk.timestamps();
     assert!(stamps.windows(2).all(|w| w[1] > w[0]), "monotonic");
+
+    // Two labstream peers number their samples and keep a history, so both
+    // counts are known, and nothing was lost or sent again.
+    assert_eq!(inlet.lost(), Some(0));
+    assert_eq!(inlet.resent(), Some(0));
 }
 
 #[test]

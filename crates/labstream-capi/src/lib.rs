@@ -1816,6 +1816,45 @@ pub unsafe extern "C" fn lsl_was_clock_reset(inlet: lsl_inlet) -> i32 {
     }
 }
 
+/// How many samples never reached this inlet, since it opened.
+///
+/// This function is a labstream extension. liblsl has no function of this
+/// name. The count comes from the `seq/1` numbers (`docs/extensions.md`).
+/// The result is -1 when the count is unknown: the stream is not open, or
+/// the source does not number its samples, for example a liblsl outlet.
+///
+/// # Safety
+/// The handle must be null or have come from this library.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_samples_lost(inlet: lsl_inlet) -> i64 {
+    inlet_count(inlet, Inlet::samples_lost)
+}
+
+/// How many samples came again from the history of the source, since the
+/// inlet opened.
+///
+/// This function is a labstream extension. liblsl has no function of this
+/// name. The count comes from the `resume/1` feature (`docs/extensions.md`).
+/// The result is -1 when the count is unknown: the stream is not open, or
+/// the source keeps no history.
+///
+/// # Safety
+/// The handle must be null or have come from this library.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_samples_resent(inlet: lsl_inlet) -> i64 {
+    inlet_count(inlet, Inlet::samples_resent)
+}
+
+/// A count of an open inlet, or -1 for unknown. A count above `i64::MAX`
+/// stays at `i64::MAX`.
+unsafe fn inlet_count(inlet: lsl_inlet, count: fn(&Inlet) -> Option<u64>) -> i64 {
+    (inlet as *mut InletBox)
+        .as_ref()
+        .and_then(|b| b.inlet.as_ref())
+        .and_then(count)
+        .map_or(-1, |n| n.min(i64::MAX as u64) as i64)
+}
+
 /// How many samples wait for the application.
 ///
 /// # Safety
@@ -2859,4 +2898,62 @@ pub unsafe extern "C" fn lsl_time_correction_ex(
         *remote_time = 0.0;
     }
     offset
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_count_is_unknown_for_no_inlet_and_for_a_closed_one() {
+        unsafe {
+            assert_eq!(labstream_samples_lost(std::ptr::null_mut()), -1);
+            assert_eq!(labstream_samples_resent(std::ptr::null_mut()), -1);
+            let info = lsl_create_streaminfo(
+                b"CapiCount0\0".as_ptr() as *const c_char,
+                b"Test\0".as_ptr() as *const c_char,
+                1,
+                100.0,
+                1,
+                b"capi0\0".as_ptr() as *const c_char,
+            );
+            // The inlet has not opened its stream yet.
+            let inlet = lsl_create_inlet(info, 360, 0, 1);
+            assert_eq!(labstream_samples_lost(inlet), -1);
+            assert_eq!(labstream_samples_resent(inlet), -1);
+            lsl_destroy_inlet(inlet);
+            lsl_destroy_streaminfo(info);
+        }
+    }
+
+    #[test]
+    fn two_labstream_peers_give_both_counts() {
+        unsafe {
+            let info = lsl_create_streaminfo(
+                b"CapiCount1\0".as_ptr() as *const c_char,
+                b"Test\0".as_ptr() as *const c_char,
+                1,
+                100.0,
+                1,
+                b"capi1\0".as_ptr() as *const c_char,
+            );
+            let outlet = lsl_create_outlet(info, 0, 360);
+            if outlet.is_null() {
+                eprintln!("no local network; skipping");
+                lsl_destroy_streaminfo(info);
+                return;
+            }
+            let full = lsl_get_info(outlet);
+            let inlet = lsl_create_inlet(full, 360, 0, 1);
+            let mut ec = 0;
+            lsl_open_stream(inlet, 5.0, &mut ec);
+            assert_eq!(ec, LSL_NO_ERROR);
+            assert_eq!(labstream_samples_lost(inlet), 0);
+            assert_eq!(labstream_samples_resent(inlet), 0);
+            lsl_destroy_inlet(inlet);
+            lsl_destroy_streaminfo(full);
+            lsl_destroy_outlet(outlet);
+            lsl_destroy_streaminfo(info);
+        }
+    }
 }

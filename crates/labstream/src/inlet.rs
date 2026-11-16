@@ -243,6 +243,20 @@ impl Inlet {
         self.inner.samples_lost()
     }
 
+    /// How many samples came again from the history of the source, since
+    /// this inlet opened.
+    ///
+    /// After a lost connection, a labstream source sends the samples of the
+    /// dropout again (the `resume/1` feature of `docs/extensions.md`). They
+    /// arrive late, with their original timestamps, and in order.
+    /// [`Inlet::lost`] counts only the samples that the history did not hold.
+    ///
+    /// The value is `None` when the source does not keep a history, for
+    /// example a liblsl outlet. `None` means unknown, not zero.
+    pub fn resent(&self) -> Option<u64> {
+        self.inner.samples_resent()
+    }
+
     /// True when the source ended and the program read every sample.
     ///
     /// An inlet that recovers reconnects on its own, so this stays false while
