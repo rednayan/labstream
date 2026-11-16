@@ -27,6 +27,10 @@ use std::time::{Duration, Instant};
 struct Ring {
     q: VecDeque<Sample>,
     back: u64,
+    /// The full timestamp of each sample that leaves the queue, in order.
+    /// Only a queue for a `resume` consumer has one. `docs/extensions.md`,
+    /// rule 5 of the resend timestamps.
+    deducer: Option<TimestampDeducer>,
 }
 
 impl std::ops::Deref for Ring {
@@ -46,6 +50,18 @@ impl Ring {
     /// The number of the sample at the front.
     fn front_number(&self) -> u64 {
         self.back.wrapping_sub(self.q.len() as u64)
+    }
+
+    /// Remove the oldest sample because the queue is full.
+    ///
+    /// The deducer sees the sample, so the full timestamp of the next sample
+    /// stays correct after the drop.
+    fn drop_front(&mut self) {
+        if let Some(old) = self.q.pop_front() {
+            if let Some(d) = self.deducer.as_mut() {
+                d.apply(old.timestamp);
+            }
+        }
     }
 }
 
@@ -73,11 +89,25 @@ impl SampleQueue {
     /// The `seq` feature numbers the samples of an outlet with one counter.
     /// A consumer that connects later starts at the current count.
     pub fn with_first_number(capacity: usize, first: u64) -> Self {
+        Self::build(capacity, first, None)
+    }
+
+    /// Build a queue that also gives the full timestamp of each sample.
+    ///
+    /// `deducer` must hold the state after the sample with the number
+    /// `first - 1`. [`SampleQueue::pop_many_full`] then gives the full
+    /// timestamps, also after a drop.
+    pub fn with_deducer(capacity: usize, first: u64, deducer: TimestampDeducer) -> Self {
+        Self::build(capacity, first, Some(deducer))
+    }
+
+    fn build(capacity: usize, first: u64, deducer: Option<TimestampDeducer>) -> Self {
         let capacity = capacity.max(1);
         SampleQueue {
             inner: Mutex::new(Ring {
                 q: VecDeque::with_capacity(capacity.min(4096)),
                 back: first,
+                deducer,
             }),
             room: Condvar::new(),
             capacity,
@@ -116,7 +146,7 @@ impl SampleQueue {
     pub fn push(&self, s: Sample) {
         let mut q = self.inner.lock().unwrap();
         if q.len() >= self.capacity {
-            q.pop_front();
+            q.drop_front();
             self.dropped.fetch_add(1, Ordering::SeqCst);
         }
         q.push_back(s);
@@ -142,7 +172,7 @@ impl SampleQueue {
         let mut lost = 0u64;
         for s in samples {
             if q.len() >= self.capacity {
-                q.pop_front();
+                q.drop_front();
                 lost += 1;
             }
             q.push_back(s.clone());
@@ -161,11 +191,15 @@ impl SampleQueue {
     /// The result is the same as [`SampleQueue::push_many`], but no sample is
     /// copied. `samples` is empty after the call and keeps its capacity, so
     /// the caller can fill it again with no new allocation.
+    ///
+    /// A queue with a deducer must not use this call, because the samples
+    /// that the queue drops at once never pass the deducer.
     pub fn push_owned(&self, samples: &mut Vec<Sample>) {
         if samples.is_empty() {
             return;
         }
         let mut q = self.inner.lock().unwrap();
+        debug_assert!(q.deducer.is_none());
         let mut lost = 0u64;
         // Samples that the queue drops at once are never moved in.
         let skip = samples.len().saturating_sub(self.capacity);
@@ -267,16 +301,50 @@ impl SampleQueue {
         max: usize,
         timeout: Duration,
     ) -> (usize, u64) {
-        if max == 0 {
-            return (0, self.inner.lock().unwrap().front_number());
-        }
+        self.pop_many_inner(out, None, max, timeout)
+    }
+
+    /// Like [`SampleQueue::pop_many_numbered`], and also add the full
+    /// timestamp of each sample that it took to the end of `full`.
+    ///
+    /// A queue with no deducer gives the timestamps of the samples as they
+    /// are.
+    pub fn pop_many_full(
+        &self,
+        out: &mut Vec<Sample>,
+        full: &mut Vec<f64>,
+        max: usize,
+        timeout: Duration,
+    ) -> (usize, u64) {
+        self.pop_many_inner(out, Some(full), max, timeout)
+    }
+
+    fn pop_many_inner(
+        &self,
+        out: &mut Vec<Sample>,
+        mut full: Option<&mut Vec<f64>>,
+        max: usize,
+        timeout: Duration,
+    ) -> (usize, u64) {
         let end = Instant::now() + timeout;
         let mut q = self.inner.lock().unwrap();
         loop {
-            if !q.is_empty() || Instant::now() >= end || *self.closed.lock().unwrap() {
+            if max == 0 || !q.is_empty() || Instant::now() >= end || *self.closed.lock().unwrap() {
                 let first = q.front_number();
                 let take = q.len().min(max);
-                out.extend(q.drain(..take));
+                let ring = &mut *q;
+                for s in ring.q.drain(..take) {
+                    // The deducer sees each sample that leaves the queue, also
+                    // when the caller does not ask for the full timestamps.
+                    let t = match ring.deducer.as_mut() {
+                        Some(d) => d.apply(s.timestamp),
+                        None => s.timestamp,
+                    };
+                    if let Some(f) = full.as_mut() {
+                        f.push(t);
+                    }
+                    out.push(s);
+                }
                 return (take, first);
             }
             let left = end.saturating_duration_since(Instant::now());
@@ -428,6 +496,20 @@ impl Fanout {
         let q = Arc::new(SampleQueue::with_first_number(capacity, set.next));
         set.list.push(Arc::clone(&q));
         q
+    }
+
+    /// Add a consumer for the `resume` feature. The result is its queue and
+    /// `N`, the number of the first sample that the queue gets.
+    ///
+    /// The queue gives the full timestamp of each sample
+    /// ([`SampleQueue::pop_many_full`]). The history holds the samples below
+    /// `N`. `docs/extensions.md`, resend rule 1.
+    pub fn add_resumable(&self, capacity: usize) -> (Arc<SampleQueue>, u64) {
+        let mut set = self.consumers.lock().unwrap();
+        let n = set.next;
+        let q = Arc::new(SampleQueue::with_deducer(capacity, n, set.deducer.clone()));
+        set.list.push(Arc::clone(&q));
+        (q, n)
     }
 
     /// The number that the next pushed sample gets.

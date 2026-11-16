@@ -31,6 +31,9 @@ struct Shared {
     /// True when this outlet writes each sample before the push returns.
     sync_mode: bool,
     stop: Mutex<bool>,
+    /// The random value that identifies this run of the outlet for the
+    /// `resume` feature. `docs/extensions.md`, negotiation rule 2.
+    epoch: u64,
 }
 
 /// One consumer of a blocking outlet.
@@ -155,6 +158,10 @@ impl Outlet {
             sync: Mutex::new(SyncSet::default()),
             sync_mode,
             stop: Mutex::new(false),
+            epoch: {
+                let b = crate::random_bytes();
+                u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+            },
         });
 
         for sock in [udp4, udp6].into_iter().flatten() {
@@ -623,12 +630,53 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
 
     // A labstream inlet offers its features in one more header. An inlet
     // that sent none gets the plain answer. `docs/extensions.md`.
-    let answered = headers
-        .get(features::HEADER_KEY)
-        .map(|v| features::answer(&features::parse(v), &config::get().features));
+    let allowed = &config::get().features;
+    let offered = headers.get(features::HEADER_KEY).map(features::parse);
+    let mut answered = offered.as_deref().map(|o| features::answer(o, allowed));
     let numbered = answered
         .as_deref()
         .is_some_and(|a| features::has(a, features::SEQ, 1));
+
+    // A `resume` consumer gets its queue before the answer, because the
+    // answer holds the number of the first sample of the queue. liblsl makes
+    // the queue later (`src/tcp_server.cpp:746`), which a peer cannot see.
+    // `docs/extensions.md`, resend rule 1.
+    let mut resumed: Option<(Registered, Resend)> = None;
+    let queue_follows =
+        !shared.sync_mode && accepted.max_buffer_length > 0 && accepted.codec_order().is_some();
+    if let (true, Some(o), Some(a)) = (queue_follows, offered.as_deref(), answered.as_mut()) {
+        if let Some(request) = features::resume_request(o, a, allowed) {
+            if shared.fanout.start_history() {
+                let (queue, n) = shared
+                    .fanout
+                    .add_resumable(accepted.max_buffer_length.max(1) as usize);
+                // A different epoch is a different run of the outlet. Its
+                // numbers mean nothing here, so nothing goes again.
+                let from = match request {
+                    features::ResumeRequest::From(p) if p.epoch == shared.epoch => Some(p.number),
+                    _ => None,
+                };
+                a.push(
+                    features::ResumeParam {
+                        epoch: shared.epoch,
+                        number: n,
+                    }
+                    .token(),
+                );
+                if trace {
+                    eprintln!("TRACE resume: from {from:?}, first live sample {n}");
+                }
+                resumed = Some((
+                    Registered {
+                        fanout: &shared.fanout,
+                        queue,
+                    },
+                    Resend { from, until: n },
+                ));
+            }
+        }
+    }
+
     stream.write_all(
         accepted
             .to_wire_with(srv.configured_version, &info.uid, answered.as_deref())
@@ -698,9 +746,18 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
 
     // The header carries a count of samples, already converted from whatever
     // unit the peer's API used. SPEC.md 8.6.
-    let queue = shared
-        .fanout
-        .add(accepted.max_buffer_length.max(1) as usize);
+    let (consumer, resend) = match resumed {
+        Some((c, r)) => (c, Some(r)),
+        None => (
+            Registered {
+                fanout: &shared.fanout,
+                queue: shared
+                    .fanout
+                    .add(accepted.max_buffer_length.max(1) as usize),
+            },
+            None,
+        ),
+    };
 
     // A chunk decides when one write happens. It is not a wire unit. SPEC.md 9.
     // A value of zero means no limit (`src/tcp_server.cpp:749-753`). This
@@ -712,21 +769,48 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
     };
 
     let stop = || *shared.stop.lock().unwrap();
-    let sent = feed(
-        &queue,
+    let sent = feed_with(
+        &consumer.queue,
         &codec,
         &mut stream,
         max_chunk,
         numbered,
+        resend.as_ref().map(|r| (&shared.fanout, r)),
         &stop,
         trace,
     );
     if trace {
         eprintln!("TRACE session over after {sent} samples");
     }
-    shared.fanout.remove(&queue);
     Ok(())
 }
+
+/// A consumer queue in the fanout. The drop removes it, also when a write
+/// fails before the session starts.
+struct Registered<'a> {
+    fanout: &'a Fanout,
+    queue: Arc<SampleQueue>,
+}
+
+impl Drop for Registered<'_> {
+    fn drop(&mut self) {
+        self.fanout.remove(&self.queue);
+    }
+}
+
+/// What a `resume` connection sends from the history.
+#[derive(Debug, Clone, Copy)]
+struct Resend {
+    /// The number `R` from the inlet, or `None` when nothing goes again.
+    from: Option<u64>,
+    /// `N`: the first number of the queue. The history sends only numbers
+    /// below it.
+    until: u64,
+}
+
+/// The largest count of samples that one read of the history copies. A push
+/// waits for at most one such copy. `docs/extensions.md`, resend rule 6.
+const RESEND_BLOCK: usize = 256;
 
 /// Copy the samples of one consumer queue to its socket.
 ///
@@ -747,6 +831,7 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
 /// the chunk size. `docs/extensions.md`.
 ///
 /// The result is the number of samples written.
+#[cfg(test)]
 fn feed<W: Write>(
     queue: &SampleQueue,
     codec: &Codec,
@@ -756,11 +841,47 @@ fn feed<W: Write>(
     stop: &dyn Fn() -> bool,
     trace: bool,
 ) -> usize {
+    feed_with(queue, codec, out, max_chunk, numbered, None, stop, trace)
+}
+
+/// [`feed`], with an optional resend for the `resume` feature.
+///
+/// With a resend, the connection first sends the history samples from `R`
+/// up to `N - 1`, in blocks, each sample with its full timestamp. Then it
+/// sends the queue. The first sample of the connection, and each sample
+/// whose number does not follow the number before it, also carry the full
+/// timestamp. `docs/extensions.md`, section `resume`.
+#[allow(clippy::too_many_arguments)]
+fn feed_with<W: Write>(
+    queue: &SampleQueue,
+    codec: &Codec,
+    out: &mut W,
+    max_chunk: usize,
+    numbered: bool,
+    resend: Option<(&Fanout, &Resend)>,
+    stop: &dyn Fn() -> bool,
+    trace: bool,
+) -> usize {
     let mut numbering = numbered.then(Numbering::new);
+    // The first history block decides the number of the first record.
+    let mut history = Vec::new();
+    let mut block = match resend {
+        Some((fanout, r)) => r
+            .from
+            .and_then(|from| fanout.read_history(from, r.until, RESEND_BLOCK, &mut history)),
+        None => None,
+    };
     // The first record goes out at once, before any sample. A gap before
     // this connection is then visible on a quiet stream too.
     if let Some(n) = numbering.as_mut() {
-        let (_, next) = queue.pop_many_numbered(&mut Vec::new(), 0, Duration::ZERO);
+        let next = match block {
+            Some((first, _)) => first,
+            None => {
+                queue
+                    .pop_many_numbered(&mut Vec::new(), 0, Duration::ZERO)
+                    .1
+            }
+        };
         let mut record = Vec::new();
         n.start(next, &mut record);
         if out.write_all(&record).is_err() {
@@ -788,19 +909,76 @@ fn feed<W: Write>(
         *count = 0;
         true
     };
+
+    // The resend. Each history sample has its full timestamp.
+    let mut last: Option<u64> = None;
+    while let Some((first, taken)) = block {
+        if stop() {
+            return sent;
+        }
+        for (i, s) in history.iter().enumerate() {
+            let number = first.wrapping_add(i as u64);
+            if let Some(n) = numbering.as_mut() {
+                n.before(number, &mut pending);
+            }
+            if codec.encode(s, &mut pending).is_err() {
+                return sent;
+            }
+            last = Some(number);
+            count += 1;
+            if count >= max_chunk && !write(&mut pending, &mut count, &mut sent) {
+                return sent;
+            }
+        }
+        // Each block goes out at once. The resend thus holds at most one
+        // block of bytes, and a dead socket ends it after one block.
+        if !pending.is_empty() && !write(&mut pending, &mut count, &mut sent) {
+            return sent;
+        }
+        history.clear();
+        let (fanout, r) = resend.expect("a block comes only from a resend");
+        let next = first.wrapping_add(taken as u64);
+        block = fanout.read_history(next, r.until, RESEND_BLOCK, &mut history);
+    }
+    if !pending.is_empty() && !write(&mut pending, &mut count, &mut sent) {
+        return sent;
+    }
+    if trace && last.is_some() {
+        eprintln!("TRACE resume: resent {sent} samples");
+    }
+
+    let mut full = Vec::new();
     loop {
         if stop() || queue.is_closed() {
             break;
         }
         batch.clear();
-        let (taken, first) =
-            queue.pop_many_numbered(&mut batch, usize::MAX, Duration::from_millis(200));
+        full.clear();
+        let (taken, first) = if resend.is_some() {
+            queue.pop_many_full(
+                &mut batch,
+                &mut full,
+                usize::MAX,
+                Duration::from_millis(200),
+            )
+        } else {
+            queue.pop_many_numbered(&mut batch, usize::MAX, Duration::from_millis(200))
+        };
         if taken == 0 {
             continue;
         }
-        for (i, s) in batch.iter().enumerate() {
+        for (i, s) in batch.iter_mut().enumerate() {
+            let number = first.wrapping_add(i as u64);
             if let Some(n) = numbering.as_mut() {
-                n.before(first.wrapping_add(i as u64), &mut pending);
+                n.before(number, &mut pending);
+            }
+            // After a gap, a deduced timestamp has no correct sample before
+            // it. `docs/extensions.md`, rule 5 of the resend timestamps.
+            if resend.is_some() {
+                if last.map(|l| l.wrapping_add(1)) != Some(number) {
+                    s.timestamp = full[i];
+                }
+                last = Some(number);
             }
             if codec.encode(s, &mut pending).is_err() {
                 return sent;
@@ -1059,5 +1237,311 @@ mod tests {
         let (got, used) = codec.decode_all(&out.bytes).unwrap();
         assert_eq!(used, out.bytes.len());
         assert_eq!(got, sent);
+    }
+
+    // The `resume` resend. `docs/extensions.md`, section `resume`.
+
+    const RATE: f64 = 300.0;
+
+    /// Chunks of `len` samples, as `Outlet::push_chunk` makes them: a
+    /// timestamp on the first sample, and the deduced tag on the others.
+    fn push_chunks(f: &Fanout, from: i32, to: i32, len: i32) {
+        let mut k = from;
+        while k < to {
+            let end = (k + len).min(to);
+            let block: Vec<Sample> = (k..end)
+                .map(|i| Sample {
+                    timestamp: if i == k {
+                        1000.0 + i as f64 / RATE + 0.000_123
+                    } else {
+                        labstream_wire::DEDUCED_TIMESTAMP
+                    },
+                    values: vec![Value::I32(i)],
+                })
+                .collect();
+            f.push_many(&block);
+            k = end;
+        }
+    }
+
+    /// A plain queue that gets every push, for a reference.
+    fn witness(f: &Fanout) -> Arc<SampleQueue> {
+        f.add(usize::MAX)
+    }
+
+    /// The full timestamp of each sample that the witness got, as an inlet
+    /// with no loss calculates it. The index is the value of the sample.
+    fn reference(witness: &SampleQueue) -> Vec<u64> {
+        let mut out = Vec::new();
+        witness.pop_many(&mut out, usize::MAX, Duration::ZERO);
+        let mut d = labstream_wire::TimestampDeducer::new(RATE);
+        out.iter().map(|s| d.apply(s.timestamp).to_bits()).collect()
+    }
+
+    struct Received {
+        /// The value, the wire timestamp, and the full timestamp of each
+        /// sample, as an inlet reads them.
+        samples: Vec<(i32, f64, u64)>,
+        records: Vec<u64>,
+    }
+
+    /// Run one resume connection once, and read it back as an inlet does.
+    fn run_resume(f: &Fanout, queue: &SampleQueue, resend: Resend) -> Received {
+        // The resend asks once, and must go on. Then the live part stops
+        // when the queue is empty.
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let stop = || calls.fetch_add(1, Ordering::SeqCst) >= 1 && queue.is_empty();
+        run_resume_with(f, queue, resend, &stop).0
+    }
+
+    /// [`run_resume`] with the stop function of the caller. The result also
+    /// gives the count of writes.
+    fn run_resume_with(
+        f: &Fanout,
+        queue: &SampleQueue,
+        resend: Resend,
+        stop: &dyn Fn() -> bool,
+    ) -> (Received, usize) {
+        use labstream_proto::seq::{peek, Next, RECORD_LEN};
+        let codec = Codec::new(Format::Int32, 1, ByteOrder::native());
+        let mut out = Counting::default();
+        feed_with(
+            queue,
+            &codec,
+            &mut out,
+            usize::MAX,
+            true,
+            Some((f, &resend)),
+            stop,
+            false,
+        );
+        let mut deducer = labstream_wire::TimestampDeducer::new(RATE);
+        let mut got = Received {
+            samples: Vec::new(),
+            records: Vec::new(),
+        };
+        let mut pos = 0;
+        while pos < out.bytes.len() {
+            if let Next::Record(n) = peek(&out.bytes[pos..]) {
+                got.records.push(n);
+                pos += RECORD_LEN;
+                continue;
+            }
+            let (s, used) = codec.decode(&out.bytes[pos..]).unwrap();
+            let v = match s.values[0] {
+                Value::I32(v) => v,
+                _ => unreachable!(),
+            };
+            let full = deducer.apply(s.timestamp).to_bits();
+            got.samples.push((v, s.timestamp, full));
+            pos += used;
+        }
+        (got, out.writes)
+    }
+
+    #[test]
+    fn a_resend_gives_each_missing_sample_once_with_its_timestamp() {
+        let f = Fanout::with_rate(RATE, crate::history::HistoryLimits::DEFAULT);
+        f.start_history();
+        let all = witness(&f);
+        push_chunks(&f, 0, 30, 9);
+        let (queue, n) = f.add_resumable(1000);
+        assert_eq!(n, 30);
+        push_chunks(&f, 30, 45, 9);
+
+        // Sample 10 is in the middle of a chunk.
+        let got = run_resume(
+            &f,
+            &queue,
+            Resend {
+                from: Some(10),
+                until: n,
+            },
+        );
+        assert_eq!(got.records, vec![10], "the numbers have no gap");
+        let values: Vec<i32> = got.samples.iter().map(|s| s.0).collect();
+        assert_eq!(values, (10..45).collect::<Vec<_>>());
+
+        let want = reference(&all);
+        for &(v, wire, full) in &got.samples {
+            if v < 30 {
+                assert_ne!(wire, labstream_wire::DEDUCED_TIMESTAMP, "resent sample {v}");
+            }
+            assert_eq!(full, want[v as usize], "sample {v}");
+        }
+        // The live samples keep the tags of their push. Sample 30 starts a
+        // chunk, and sample 31 does not.
+        let tag = |v: i32| got.samples.iter().find(|s| s.0 == v).unwrap().1;
+        assert_ne!(tag(30), labstream_wire::DEDUCED_TIMESTAMP);
+        assert_eq!(tag(31), labstream_wire::DEDUCED_TIMESTAMP);
+    }
+
+    #[test]
+    fn a_resend_starts_at_the_oldest_sample_when_the_history_is_too_short() {
+        let limits = crate::history::HistoryLimits {
+            seconds: 20.0 / RATE,
+            bytes: usize::MAX,
+        };
+        let f = Fanout::with_rate(RATE, limits);
+        f.start_history();
+        let all = witness(&f);
+        push_chunks(&f, 0, 50, 7);
+        let (queue, n) = f.add_resumable(1000);
+        let got = run_resume(
+            &f,
+            &queue,
+            Resend {
+                from: Some(5),
+                until: n,
+            },
+        );
+        // The inlet counts 30 - 5 lost samples from this record.
+        assert_eq!(got.records, vec![30]);
+        assert_eq!(got.samples.first().map(|s| s.0), Some(30));
+        assert_eq!(got.samples.len(), 20);
+        let want = reference(&all);
+        for &(v, _, full) in &got.samples {
+            assert_eq!(full, want[v as usize], "sample {v}");
+        }
+    }
+
+    #[test]
+    fn a_connection_with_nothing_to_resend_starts_at_the_queue() {
+        // No number, a number equal to N, and a number above N.
+        for from in [None, Some(20), Some(500)] {
+            let f = Fanout::with_rate(RATE, crate::history::HistoryLimits::DEFAULT);
+            f.start_history();
+            let all = witness(&f);
+            push_chunks(&f, 0, 20, 9);
+            let (queue, n) = f.add_resumable(1000);
+            assert_eq!(n, 20);
+            // Sample 20 is in the middle of a chunk that starts at 18.
+            push_chunks(&f, 20, 30, 9);
+            let got = run_resume(&f, &queue, Resend { from, until: n });
+            assert_eq!(got.records, vec![20], "from {from:?}");
+            let values: Vec<i32> = got.samples.iter().map(|s| s.0).collect();
+            assert_eq!(values, (20..30).collect::<Vec<_>>(), "from {from:?}");
+            // The first sample of the connection carries its full timestamp.
+            assert_ne!(got.samples[0].1, labstream_wire::DEDUCED_TIMESTAMP);
+            let want = reference(&all);
+            for &(v, _, full) in &got.samples {
+                assert_eq!(full, want[v as usize], "from {from:?}, sample {v}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_drop_in_the_queue_gives_a_full_timestamp_after_the_gap() {
+        let f = Fanout::with_rate(RATE, crate::history::HistoryLimits::DEFAULT);
+        f.start_history();
+        let all = witness(&f);
+        let (queue, n) = f.add_resumable(5);
+        assert_eq!(n, 0);
+        // One chunk of 12 into a queue of 5. The queue keeps 7 to 11, and the
+        // only explicit timestamp, on sample 0, is gone.
+        push_chunks(&f, 0, 12, 12);
+        let got = run_resume(
+            &f,
+            &queue,
+            Resend {
+                from: None,
+                until: n,
+            },
+        );
+        // The queue dropped 0 to 6 before the first record.
+        assert_eq!(got.records, vec![7]);
+        let values: Vec<i32> = got.samples.iter().map(|s| s.0).collect();
+        assert_eq!(values, vec![7, 8, 9, 10, 11]);
+        assert_ne!(got.samples[0].1, labstream_wire::DEDUCED_TIMESTAMP);
+        let want = reference(&all);
+        for &(v, _, full) in &got.samples {
+            assert_eq!(full, want[v as usize], "sample {v}");
+        }
+    }
+
+    #[test]
+    fn a_long_resend_goes_out_block_by_block() {
+        let f = Fanout::with_rate(RATE, crate::history::HistoryLimits::DEFAULT);
+        f.start_history();
+        let all = witness(&f);
+        push_chunks(&f, 0, 1000, 9);
+        let (queue, n) = f.add_resumable(5000);
+        push_chunks(&f, 1000, 1010, 9);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        // Four blocks of the resend ask first. Then the live part stops when
+        // the queue is empty.
+        let stop = || calls.fetch_add(1, Ordering::SeqCst) >= 4 && queue.is_empty();
+        let (got, writes) = run_resume_with(
+            &f,
+            &queue,
+            Resend {
+                from: Some(0),
+                until: n,
+            },
+            &stop,
+        );
+        assert_eq!(got.records, vec![0]);
+        let values: Vec<i32> = got.samples.iter().map(|s| s.0).collect();
+        assert_eq!(values, (0..1010).collect::<Vec<_>>());
+        // The record, four history blocks, and the live samples.
+        assert_eq!(writes, 6);
+        let want = reference(&all);
+        for &(v, _, full) in &got.samples {
+            assert_eq!(full, want[v as usize], "sample {v}");
+        }
+    }
+
+    #[test]
+    fn samples_that_leave_the_history_during_a_resend_show_as_gaps() {
+        // A history of 600 samples.
+        let limits = crate::history::HistoryLimits {
+            seconds: 2.0,
+            bytes: usize::MAX,
+        };
+        let f = Fanout::with_rate(RATE, limits);
+        f.start_history();
+        let all = witness(&f);
+        push_chunks(&f, 0, 600, 9);
+        let (queue, n) = f.add_resumable(5000);
+        assert_eq!(n, 600);
+        // Before the first two blocks go out, the outlet pushes 300 more
+        // samples each time. The history then loses its oldest samples.
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let stop = || {
+            let c = calls.fetch_add(1, Ordering::SeqCst);
+            if c < 2 {
+                let from = 600 + 300 * c as i32;
+                push_chunks(&f, from, from + 300, 9);
+                false
+            } else {
+                queue.is_empty()
+            }
+        };
+        let (got, _) = run_resume_with(
+            &f,
+            &queue,
+            Resend {
+                from: Some(0),
+                until: n,
+            },
+            &stop,
+        );
+        // Block 0 was read before the first removal. The second read starts
+        // at the oldest sample, 300. The third read finds nothing below 600.
+        assert_eq!(got.records, vec![0, 300, 600]);
+        let mut want_values: Vec<i32> = (0..256).collect();
+        want_values.extend(300..556);
+        want_values.extend(600..1200);
+        let values: Vec<i32> = got.samples.iter().map(|s| s.0).collect();
+        assert_eq!(values, want_values);
+        // The first sample after each gap carries its full timestamp, so each
+        // timestamp is correct.
+        let want = reference(&all);
+        for &(v, wire, full) in &got.samples {
+            assert_eq!(full, want[v as usize], "sample {v}");
+            if v == 600 {
+                assert_ne!(wire, labstream_wire::DEDUCED_TIMESTAMP);
+            }
+        }
     }
 }

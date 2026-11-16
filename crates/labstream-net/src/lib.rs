@@ -219,7 +219,7 @@ pub fn make_query_id() -> String {
     s
 }
 
-fn random_bytes() -> [u8; 16] {
+pub(crate) fn random_bytes() -> [u8; 16] {
     // The operating system supplies the bytes. This value never needs to be
     // reproducible, and it must not repeat across two processes that start at
     // the same moment.
