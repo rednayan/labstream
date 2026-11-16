@@ -756,7 +756,7 @@ fn read_and_recover(
                                 clock.retarget(target);
                             }
                             deducer = labstream_wire::TimestampDeducer::new(fresh.nominal_srate);
-                            *conn.info.lock().unwrap() = fresh;
+                            *conn.info.lock().unwrap() = *fresh;
                             conn.recoveries.fetch_add(1, Ordering::SeqCst);
                             conn.connected.store(true, Ordering::SeqCst);
                             last_data = Instant::now();
@@ -833,7 +833,7 @@ enum Found {
     /// The stream with the old instance identifier is still visible.
     Same,
     /// Exactly one stream matches, and it has a new instance identifier.
-    Moved(StreamInfo),
+    Moved(Box<StreamInfo>),
     /// No stream matches, or more than one does.
     Nothing,
 }
@@ -857,7 +857,7 @@ fn find_again(known: &StreamInfo) -> Found {
     if found.len() != 1 {
         return Found::Nothing;
     }
-    Found::Moved(found.into_iter().next().unwrap())
+    Found::Moved(Box::new(found.into_iter().next().unwrap()))
 }
 
 /// Ask a data port for the whole description.
