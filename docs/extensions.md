@@ -277,11 +277,12 @@ connection and the start of the next. liblsl has no history for each outlet.
 7. The outlet answers `resume/1=<epoch><N>`. The epoch is its own epoch.
    `N` is the number of the first live sample of the connection. The
    answer always holds both parts, also for an offer with no parameter.
-8. If the answer epoch is not the epoch that the inlet offered, the outlet
-   is a new run. The inlet then resets the `seq` count (`seq` count rule
-   6), the timestamp deducer, and the clock offset, as for a new `uid`. An
-   offer with no parameter gives the same result. The inlet keeps the new
-   epoch for the next recovery.
+8. If the inlet knows an epoch, and the answer gives a different epoch,
+   the outlet is a new run. The inlet then resets the `seq` count (`seq`
+   count rule 6), the timestamp deducer, and the clock offset, as for a
+   new `uid`. If the inlet knows no epoch, it cannot see a new run, and it
+   keeps its state, as with `seq/1` only. The inlet keeps the epoch of
+   each answer for the next recovery.
 9. The outlet ignores a `resume/1` token with a parameter of fewer than 17
    or more than 32 digits. If the offer holds more than one `resume/1`
    token, the outlet ignores all of them. The connection then has no
