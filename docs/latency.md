@@ -104,6 +104,24 @@ Libraries:
   changes the start of a connection and the end of a dead connection. This
   benchmark measures neither.
 
+## The order of the runs
+
+The order of the runs can move a result. In one run of `seq` against
+`quick`, the `seq` rows ran last in each group. At 512 Hz x 8 channels,
+`seq` then showed a median of 138 µs against 97 µs. With `seq` first, both
+gave 91 µs, and the p99 values were 188 µs and 190 µs. A difference at a low
+rate is thus not a result until it stays after a change of order.
+
+On the branch `feat/seq`, the `seq/1` feature does not change the latency
+or the CPU at 4000 Hz x 64 channels:
+
+| outlet -> inlet | load | p50 µs | p99 µs | CPU outlet % | CPU inlet % |
+|---|---|---|---|---|---|
+| quick -> quick | 4000 Hz x 64, chunk 1 | 73 (72-73) | 103 (101-104) | 20.7 | 17.5 |
+| seq -> seq | 4000 Hz x 64, chunk 1 | 73 (72-75) | 99 (97-113) | 20.5 | 17.7 |
+| quick -> quick | 4000 Hz x 64, chunk 32 | 356 (348-366) | 711 (677-712) | 3.3 | 2.4 |
+| seq -> seq | 4000 Hz x 64, chunk 32 | 350 (332-352) | 648 (609-654) | 3.2 | 2.3 |
+
 ## What this benchmark does not measure
 
 - **Two machines.** All results come from the loopback interface.
