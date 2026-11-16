@@ -218,18 +218,21 @@ impl Leg {
             for a in crate::local_ipv4_addresses() {
                 if let Ok(s) = UdpSocket::bind((a, 0)) {
                     let _ = s.set_broadcast(true);
-                    let _ = s.set_multicast_ttl_v4(1);
+                    let _ = s.set_multicast_ttl_v4(cfg.multicast_ttl);
                     let _ = s.set_multicast_loop_v4(true);
                     senders.push(s);
                 }
             }
         }
+        // The query reaches as far as the scope of the configuration. liblsl
+        // sets the same value (`src/resolve_attempt_udp.cpp:45`).
         let one = UdpSocket::bind((any, 0))?;
         if v6 {
             let _ = one.set_multicast_loop_v6(true);
+            let _ = socket2::SockRef::from(&one).set_multicast_hops_v6(cfg.multicast_ttl);
         } else {
             one.set_broadcast(true)?;
-            let _ = one.set_multicast_ttl_v4(1);
+            let _ = one.set_multicast_ttl_v4(cfg.multicast_ttl);
             let _ = one.set_multicast_loop_v4(true);
         }
         senders.push(one);
@@ -1049,5 +1052,20 @@ mod tests {
         let mut out = Vec::new();
         assert!(decode_buffered(&codec, &mut carry, &mut deducer, &mut out).is_err());
         assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn a_query_socket_takes_the_multicast_ttl_of_the_configuration() {
+        let leg = match Leg::open(false) {
+            Ok(l) => l,
+            Err(_) => {
+                eprintln!("no local network; skipping");
+                return;
+            }
+        };
+        let want = config::get().multicast_ttl;
+        for s in &leg.senders {
+            assert_eq!(s.multicast_ttl_v4().unwrap(), want);
+        }
     }
 }
