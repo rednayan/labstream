@@ -5,16 +5,19 @@
 //! the reporting tier and not to the merge gate. A failure here can come from
 //! the machine.
 //!
-//! The inlet side is not wired yet. Each test therefore opens the feed by
-//! hand and reads the bytes as an inlet does.
+//! The first tests open the feed by hand and read the bytes as an inlet
+//! does. The dropout tests at the end use a real inlet behind a proxy that
+//! can cut the connection.
 
-use labstream_net::{Outlet, StreamInfo};
+use labstream_net::{Inlet, Outlet, StreamInfo};
 use labstream_proto::features::{self, ResumeParam, Token};
 use labstream_proto::feed::{FeedClient, FeedParams, TestPatternError};
 use labstream_proto::seq::{self, Next};
 use labstream_wire::{Codec, Format, Sample, TimestampDeducer, Value, DEDUCED_TIMESTAMP};
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const RATE: f64 = 1000.0;
@@ -276,4 +279,229 @@ fn a_blocking_outlet_gets_no_resume() {
     let a = Feed::open(&out, offer(None));
     assert!(features::has(&a.answer, features::SEQ, 1));
     assert_eq!(features::resume_answer(&a.answer), None);
+}
+
+/// A TCP proxy that forwards each connection to `target`, and can cut them.
+struct Proxy {
+    port: u16,
+    accepted: Arc<Mutex<Vec<TcpStream>>>,
+    /// While true, the proxy closes each new connection at once.
+    paused: Arc<AtomicBool>,
+}
+
+impl Proxy {
+    fn start(target: u16) -> Option<Proxy> {
+        let listener = TcpListener::bind("127.0.0.1:0").ok()?;
+        let port = listener.local_addr().ok()?.port();
+        let accepted = Arc::new(Mutex::new(Vec::new()));
+        let list = Arc::clone(&accepted);
+        let paused = Arc::new(AtomicBool::new(false));
+        let hold = Arc::clone(&paused);
+        std::thread::spawn(move || {
+            for client in listener.incoming().flatten() {
+                if hold.load(Ordering::SeqCst) {
+                    let _ = client.shutdown(Shutdown::Both);
+                    continue;
+                }
+                let server = match TcpStream::connect(("127.0.0.1", target)) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                list.lock().unwrap().push(client.try_clone().unwrap());
+                pipe(client.try_clone().unwrap(), server.try_clone().unwrap());
+                pipe(server, client);
+            }
+        });
+        Some(Proxy {
+            port,
+            accepted,
+            paused,
+        })
+    }
+
+    /// Cut each connection, and refuse new ones for `time`.
+    fn cut_for(&self, time: Duration) {
+        self.paused.store(true, Ordering::SeqCst);
+        for s in self.accepted.lock().unwrap().drain(..) {
+            let _ = s.shutdown(Shutdown::Both);
+        }
+        std::thread::sleep(time);
+        self.paused.store(false, Ordering::SeqCst);
+    }
+}
+
+fn pipe(mut from: TcpStream, mut to: TcpStream) {
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 65536];
+        while let Ok(n) = from.read(&mut buf) {
+            if n == 0 || to.write_all(&buf[..n]).is_err() {
+                break;
+            }
+        }
+        let _ = to.shutdown(Shutdown::Both);
+        let _ = from.shutdown(Shutdown::Both);
+    });
+}
+
+/// The value of a sample of a dropout test: channel 0 holds the index.
+fn index(s: &Sample) -> usize {
+    match &s.values[0] {
+        Value::F32(v) => *v as usize,
+        Value::Str(b) => String::from_utf8_lossy(b).parse().unwrap(),
+        _ => panic!("wrong format"),
+    }
+}
+
+/// Pull until a sample with the index `last` arrives, or the time runs out.
+fn pull_until(inlet: &mut Inlet, got: &mut Vec<Sample>, last: usize, within: Duration) {
+    let end = Instant::now() + within;
+    while Instant::now() < end && got.last().map(index) != Some(last) {
+        let _ = inlet.pull_chunk(got, 1_000_000, Duration::from_millis(20));
+    }
+}
+
+/// One dropout test. The outlet pushes chunks of `chunk` samples at `rate`,
+/// and the proxy cuts the connection for 3 s. The inlet behind the proxy
+/// must get each sample once, in order, with the same values and
+/// timestamps as an inlet that connects directly. `docs/extensions.md`,
+/// conformance item 9.
+fn dropout(name: &str, format: Format, channels: usize, rate: f64, chunk: usize) {
+    let mut info = StreamInfo::new(name, "ResumeTest", channels as u32, format, rate);
+    info.source_id = format!("{name}_src");
+    let out = match Outlet::new(info) {
+        Ok(o) => Arc::new(o),
+        Err(_) => {
+            eprintln!("no local network; skipping");
+            return;
+        }
+    };
+    let real = out.info().clone();
+    let proxy = match Proxy::start(real.v4data_port) {
+        Some(p) => p,
+        None => {
+            eprintln!("no local network; skipping");
+            return;
+        }
+    };
+    let mut via_proxy = real.clone();
+    via_proxy.v4address = "127.0.0.1".to_string();
+    via_proxy.v4data_port = proxy.port;
+    let mut cut = Inlet::open_recovering(&via_proxy, Duration::from_secs(5), 1_000_000)
+        .expect("the inlet connects through the proxy");
+    let mut direct = Inlet::open_recovering(&real, Duration::from_secs(5), 1_000_000)
+        .expect("the inlet connects directly");
+    let start = Instant::now();
+    while out.consumer_count() < 2 && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        cut.samples_resent(),
+        Some(0),
+        "the connection uses resume/1"
+    );
+
+    // The source pushes one chunk each `chunk / rate` seconds. A rate of 0
+    // is a marker stream, with one marker each 5 ms.
+    let pushed = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let source = {
+        let (out, pushed, stop) = (Arc::clone(&out), Arc::clone(&pushed), Arc::clone(&stop));
+        std::thread::spawn(move || {
+            let period = if rate > 0.0 {
+                Duration::from_secs_f64(chunk as f64 / rate)
+            } else {
+                Duration::from_millis(5)
+            };
+            let mut k = 0;
+            while !stop.load(Ordering::SeqCst) {
+                let block: Vec<Sample> = (k..k + chunk)
+                    .map(|i| Sample {
+                        timestamp: 0.0,
+                        values: (0..channels)
+                            .map(|c| match format {
+                                Format::String => Value::Str(
+                                    if c == 0 {
+                                        i.to_string()
+                                    } else {
+                                        format!("m{i}")
+                                    }
+                                    .into_bytes(),
+                                ),
+                                _ => Value::F32(if c == 0 { i as f32 } else { c as f32 }),
+                            })
+                            .collect(),
+                    })
+                    .collect();
+                out.push_chunk(&block, 0.0);
+                k += chunk;
+                pushed.store(k, Ordering::SeqCst);
+                std::thread::sleep(period);
+            }
+        })
+    };
+
+    let mut got = Vec::new();
+    let mut reference = Vec::new();
+    std::thread::sleep(Duration::from_millis(500));
+    let _ = cut.pull_chunk(&mut got, 1_000_000, Duration::from_millis(20));
+    assert!(!got.is_empty(), "samples arrive before the cut");
+    proxy.cut_for(Duration::from_secs(3));
+    std::thread::sleep(Duration::from_millis(500));
+    stop.store(true, Ordering::SeqCst);
+    source.join().unwrap();
+    let last = pushed.load(Ordering::SeqCst) - 1;
+    pull_until(&mut cut, &mut got, last, Duration::from_secs(15));
+    pull_until(&mut direct, &mut reference, last, Duration::from_secs(5));
+
+    assert!(cut.recoveries() >= 1, "the inlet connected again");
+    let first = index(&got[0]);
+    let indices: Vec<usize> = got.iter().map(index).collect();
+    assert_eq!(
+        indices,
+        (first..=last).collect::<Vec<_>>(),
+        "each sample once, in order"
+    );
+    assert_eq!(cut.samples_lost(), Some(0));
+    assert_eq!(cut.samples_dropped(), 0);
+    let resent = cut.samples_resent().expect("the connection uses resume/1");
+    // The cut lasts 3 s. At least 2 s of samples must come from the
+    // history. A marker stream pushes 200 markers each second.
+    let at_least = 2.0 * if rate > 0.0 { rate } else { 200.0 };
+    assert!(
+        resent as f64 >= at_least,
+        "the history gave the samples of the dropout: {resent}"
+    );
+    println!(
+        "{name}: {} samples, {resent} resent, {} recoveries",
+        got.len(),
+        cut.recoveries()
+    );
+
+    // The same values and timestamps as the direct inlet, bit for bit.
+    let offset = first - index(&reference[0]);
+    for (a, b) in got.iter().zip(&reference[offset..]) {
+        assert_eq!(index(a), index(b));
+        assert_eq!(a.values, b.values, "sample {}", index(a));
+        assert_eq!(
+            a.timestamp.to_bits(),
+            b.timestamp.to_bits(),
+            "sample {}",
+            index(a)
+        );
+    }
+}
+
+#[test]
+fn a_dropout_of_3_s_at_512_hz_loses_nothing() {
+    dropout("ResumeDrop1", Format::Float32, 8, 512.0, 8);
+}
+
+#[test]
+fn a_dropout_of_3_s_at_4000_hz_and_64_channels_loses_nothing() {
+    dropout("ResumeDrop2", Format::Float32, 64, 4000.0, 40);
+}
+
+#[test]
+fn a_dropout_of_3_s_on_a_marker_stream_loses_nothing() {
+    dropout("ResumeDrop3", Format::String, 2, 0.0, 1);
 }

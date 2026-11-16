@@ -330,17 +330,30 @@ fn a_gap_shows_at_once_on_a_quiet_stream() {
     std::thread::sleep(Duration::from_millis(300));
     proxy.paused.store(false, Ordering::SeqCst);
 
-    // No sample goes out after this point.
+    // No sample goes out after this point. With `resume/1`, the outlet sends
+    // the 20 samples again, and nothing is lost. Without it, the first record
+    // of the new connection shows the 20 samples as lost. A configuration
+    // file with `labstream.Features = {seq}` runs the second case.
     let end = Instant::now() + Duration::from_secs(10);
-    while inlet.samples_lost() != Some(20) && Instant::now() < end {
+    let done = |inlet: &Inlet| match inlet.samples_resent() {
+        Some(n) => n == 20,
+        None => inlet.samples_lost() == Some(20),
+    };
+    while !done(&inlet) && Instant::now() < end {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(inlet.recoveries() >= 1, "the inlet connected again");
-    assert_eq!(
-        inlet.samples_lost(),
-        Some(20),
-        "the gap shows with no new sample"
-    );
+    if inlet.samples_resent().is_some() {
+        assert_eq!(inlet.samples_resent(), Some(20), "the history gave the gap");
+        assert_eq!(inlet.samples_lost(), Some(0));
+        assert_eq!(pull_until(&mut inlet, 29, Duration::from_secs(5)).len(), 20);
+    } else {
+        assert_eq!(
+            inlet.samples_lost(),
+            Some(20),
+            "the gap shows with no new sample"
+        );
+    }
 }
 
 #[test]

@@ -370,6 +370,11 @@ struct ConnState {
     numbered: AtomicBool,
     /// The samples that never arrived, from the `seq/1` numbers.
     lost: AtomicU64,
+    /// True when the current connection uses `resume/1`. `docs/extensions.md`,
+    /// section `resume`.
+    resumed: AtomicBool,
+    /// The samples that came from the history of an outlet.
+    resent: AtomicU64,
 }
 
 /// How long without data before the reader treats the source as gone.
@@ -419,9 +424,10 @@ impl Inlet {
         buffer_samples: i32,
         recover: bool,
     ) -> std::io::Result<Self> {
-        let (stream, client, buf) = handshake(info, timeout, buffer_samples)?;
+        let (stream, client, buf) = handshake(info, timeout, buffer_samples, None)?;
         debug_assert_eq!(client.state(), State::Streaming);
         let numbered = uses_seq(&client);
+        let resume = features::resume_answer(client.features());
 
         // The queue holds what the application has not pulled yet. Its size is
         // the value that went out in `Max-Buffer-Length`, which is a count of
@@ -446,6 +452,8 @@ impl Inlet {
             info: Mutex::new(info.clone()),
             numbered: AtomicBool::new(numbered),
             lost: AtomicU64::new(0),
+            resumed: AtomicBool::new(resume.is_some()),
+            resent: AtomicU64::new(0),
         });
 
         // One thread owns the connection for its whole life: it reads, and when
@@ -457,7 +465,17 @@ impl Inlet {
             let state = Arc::clone(&conn);
             let codec = *client.codec().expect("the handshake set the codec");
             std::thread::spawn(move || {
-                read_and_recover(stream, buf, codec, q, done, clk, state, buffer_samples);
+                read_and_recover(
+                    stream,
+                    buf,
+                    codec,
+                    q,
+                    done,
+                    clk,
+                    state,
+                    buffer_samples,
+                    resume,
+                );
             });
         }
 
@@ -612,6 +630,24 @@ impl Inlet {
         }
     }
 
+    /// How many samples came from the history of the outlet, since the
+    /// inlet opened.
+    ///
+    /// After a lost connection, an outlet with the `resume/1` feature sends
+    /// the samples of the dropout again (`docs/extensions.md`, section
+    /// `resume`). These samples arrive late, with their original
+    /// timestamps. [`Inlet::samples_lost`] does not count them.
+    ///
+    /// The value is `None` when the current connection does not use
+    /// `resume/1`. `None` means unknown, not zero.
+    pub fn samples_resent(&self) -> Option<u64> {
+        if self.conn.resumed.load(Ordering::SeqCst) {
+            Some(self.conn.resent.load(Ordering::SeqCst))
+        } else {
+            None
+        }
+    }
+
     /// The size of the queue, in samples.
     pub fn buffer_capacity(&self) -> usize {
         self.queue.capacity()
@@ -646,6 +682,7 @@ fn read_and_recover(
     clock: Arc<ClockState>,
     conn: Arc<ConnState>,
     buffer_samples: i32,
+    resume: Option<features::ResumeParam>,
 ) {
     let mut tmp = vec![0u8; 65536];
     let mut batch: Vec<Sample> = Vec::new();
@@ -662,6 +699,13 @@ fn read_and_recover(
     // after a reconnect to the same outlet shows the gap.
     let mut counter = labstream_proto::seq::Counter::new();
 
+    // The `resume/1` state. The epoch identifies the run of the outlet, and
+    // `until` is the first live number of the current connection. A sample
+    // below it came from the history. `docs/extensions.md`, section `resume`.
+    let mut epoch = resume.map(|p| p.epoch);
+    let mut until = resume.map(|p| p.number);
+    let mut resent: u64 = 0;
+
     loop {
         if queue.is_closed() {
             break;
@@ -675,9 +719,11 @@ fn read_and_recover(
             &mut carry,
             &mut deducer,
             numbered.then_some(&mut counter),
+            until.map(|n| (n, &mut resent)),
             &mut batch,
         );
         conn.lost.store(counter.lost(), Ordering::SeqCst);
+        conn.resent.store(resent, Ordering::SeqCst);
         if !batch.is_empty() {
             last_data = Instant::now();
             queue.push_owned(&mut batch);
@@ -754,7 +800,14 @@ fn read_and_recover(
             // connects again to the same endpoint after an error
             // (`src/data_receiver.cpp:331-345`).
             if ending == Ending::Closed {
-                if let Ok((s, c, rest)) = handshake(&known, Duration::from_secs(1), buffer_samples)
+                // With `resume/1`, the request asks for the samples from the
+                // number that the count expects. `docs/extensions.md`,
+                // negotiation rule 5.
+                let from = epoch
+                    .zip(counter.expected())
+                    .map(|(epoch, number)| features::ResumeParam { epoch, number });
+                if let Ok((s, c, rest)) =
+                    handshake(&known, Duration::from_secs(1), buffer_samples, from)
                 {
                     if trace {
                         eprintln!("TRACE recover: connected again to {}", known.uid);
@@ -763,6 +816,26 @@ fn read_and_recover(
                     sock = s;
                     carry = rest;
                     codec = *c.codec().expect("the handshake set the codec");
+                    let answer = features::resume_answer(c.features());
+                    // A new epoch is a new run of the outlet with the old
+                    // instance identifier. Its counter, its timestamps, and
+                    // its clock offset are new. `docs/extensions.md`,
+                    // negotiation rule 8.
+                    if let (Some(old), Some(a)) = (epoch, answer) {
+                        if old != a.epoch {
+                            if trace {
+                                eprintln!("TRACE recover: a new run of the outlet");
+                            }
+                            counter.restart();
+                            deducer = labstream_wire::TimestampDeducer::new(known.nominal_srate);
+                            clock.reset_offset();
+                        }
+                    }
+                    if let Some(a) = answer {
+                        epoch = Some(a.epoch);
+                    }
+                    until = answer.map(|a| a.number);
+                    conn.resumed.store(answer.is_some(), Ordering::SeqCst);
                     conn.numbered.store(uses_seq(&c), Ordering::SeqCst);
                     conn.recoveries.fetch_add(1, Ordering::SeqCst);
                     conn.connected.store(true, Ordering::SeqCst);
@@ -777,7 +850,7 @@ fn read_and_recover(
             }
             match found {
                 Found::Moved(fresh) => {
-                    match handshake(&fresh, Duration::from_secs(5), buffer_samples) {
+                    match handshake(&fresh, Duration::from_secs(5), buffer_samples, None) {
                         Ok((s, c, rest)) => {
                             let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
                             sock = s;
@@ -794,8 +867,12 @@ fn read_and_recover(
                             }
                             clock.reset_offset();
                             deducer = labstream_wire::TimestampDeducer::new(fresh.nominal_srate);
-                            // A new outlet has a new counter.
+                            // A new outlet has a new counter and a new epoch.
                             counter.restart();
+                            let answer = features::resume_answer(c.features());
+                            epoch = answer.map(|a| a.epoch);
+                            until = answer.map(|a| a.number);
+                            conn.resumed.store(answer.is_some(), Ordering::SeqCst);
                             conn.numbered.store(uses_seq(&c), Ordering::SeqCst);
                             *conn.info.lock().unwrap() = *fresh;
                             conn.recoveries.fetch_add(1, Ordering::SeqCst);
@@ -837,11 +914,16 @@ fn read_and_recover(
 /// buffer size, and a burst of data fills the buffer.
 ///
 /// The bytes of a sample that is not complete stay in `carry`.
+///
+/// `resent` holds `N`, the first live number of a `resume/1` connection, and
+/// the count of samples below it. A numbered sample below `N` came from the
+/// history of the outlet.
 fn decode_buffered(
     codec: &labstream_wire::Codec,
     carry: &mut Vec<u8>,
     deducer: &mut labstream_wire::TimestampDeducer,
     mut counter: Option<&mut labstream_proto::seq::Counter>,
+    mut resent: Option<(u64, &mut u64)>,
     out: &mut Vec<Sample>,
 ) -> Result<(), labstream_wire::Error> {
     use labstream_proto::seq::{peek, Next, RECORD_LEN};
@@ -866,6 +948,11 @@ fn decode_buffered(
                 sample.timestamp = deducer.apply(sample.timestamp);
                 out.push(sample);
                 if let Some(c) = counter.as_deref_mut() {
+                    if let (Some(number), Some((until, n))) = (c.expected(), resent.as_mut()) {
+                        if number < *until {
+                            **n += 1;
+                        }
+                    }
                     c.sample();
                 }
             }
@@ -964,10 +1051,14 @@ fn uses_seq(client: &FeedClient) -> bool {
 ///
 /// The reader thread calls this again after a recovery, so it lives outside
 /// [`Inlet`] and holds no state of its own.
+///
+/// `resume_from` is the epoch and the number for a `resume/1` request, or
+/// `None` for a request with no parameter.
 fn handshake(
     info: &StreamInfo,
     timeout: Duration,
     buffer_samples: i32,
+    resume_from: Option<features::ResumeParam>,
 ) -> std::io::Result<(TcpStream, FeedClient, Vec<u8>)> {
     let addr = data_endpoint(info)?;
     let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
@@ -983,7 +1074,9 @@ fn handshake(
 
     // A labstream outlet answers the offer, and any other outlet ignores it.
     // `docs/extensions.md`.
-    let offer = features::offer(&crate::config::get().features);
+    let allowed = &crate::config::get().features;
+    let mut offer = features::offer(allowed);
+    offer.extend(features::offer_resume(allowed, resume_from));
     let (mut client, request) =
         FeedClient::start_with(params, info.format, info.channel_count as usize, offer);
     stream.write_all(&request)?;
@@ -1091,7 +1184,7 @@ mod tests {
         let mut from = 0;
         for &to in cuts.iter().chain(std::iter::once(&bytes.len())) {
             carry.extend_from_slice(&bytes[from..to]);
-            decode_buffered(codec, &mut carry, &mut deducer, None, &mut out).unwrap();
+            decode_buffered(codec, &mut carry, &mut deducer, None, None, &mut out).unwrap();
             from = to;
         }
         assert!(carry.is_empty(), "no byte stays behind at the end");
@@ -1117,6 +1210,7 @@ mod tests {
                 &mut carry,
                 &mut deducer,
                 Some(&mut counter),
+                None,
                 &mut out,
             )
             .unwrap();
@@ -1124,6 +1218,41 @@ mod tests {
         }
         assert!(carry.is_empty(), "no byte stays behind at the end");
         (out, counter)
+    }
+
+    #[test]
+    fn a_sample_below_the_first_live_number_counts_as_resent() {
+        use labstream_proto::seq::{write_record, Counter};
+        let codec = Codec::new(Format::Float32, 3, ByteOrder::native());
+        let (samples, _) = stream(&codec, 10);
+        // The history gives 20..26, and the first live number is 27. A
+        // record then shows a drop in the queue, from 27 to 29.
+        let mut bytes = Vec::new();
+        write_record(&mut bytes, 20);
+        for s in &samples[..7] {
+            codec.encode(s, &mut bytes).unwrap();
+        }
+        write_record(&mut bytes, 29);
+        for s in &samples[7..] {
+            codec.encode(s, &mut bytes).unwrap();
+        }
+        let mut carry = bytes;
+        let mut deducer = TimestampDeducer::new(100.0);
+        let mut counter = Counter::new();
+        let mut resent = 0u64;
+        let mut out = Vec::new();
+        decode_buffered(
+            &codec,
+            &mut carry,
+            &mut deducer,
+            Some(&mut counter),
+            Some((27, &mut resent)),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 10);
+        assert_eq!(resent, 7);
+        assert_eq!(counter.lost(), 2);
     }
 
     #[test]
@@ -1205,7 +1334,7 @@ mod tests {
         let mut carry = bytes;
         let mut deducer = TimestampDeducer::new(100.0);
         let mut out = Vec::new();
-        assert!(decode_buffered(&codec, &mut carry, &mut deducer, None, &mut out).is_err());
+        assert!(decode_buffered(&codec, &mut carry, &mut deducer, None, None, &mut out).is_err());
         assert_eq!(out.len(), 2);
     }
 
