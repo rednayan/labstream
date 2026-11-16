@@ -188,6 +188,10 @@ pub struct Config {
     pub allow_ipv4: bool,
     /// True when an outlet binds an IPv6 stack. `ports.IPv6`.
     pub allow_ipv6: bool,
+    /// The labstream features that this process can use, for example `seq`.
+    /// `labstream.Features`. liblsl does not read this key. The value `{}`
+    /// turns every feature off. `docs/extensions.md`.
+    pub features: Vec<String>,
     /// Where the values came from, for a report.
     pub source: String,
 }
@@ -273,6 +277,7 @@ impl Config {
             port_range: ini.int("ports.PortRange", 32) as u16,
             session_id: ini.text("lab.SessionID", "default"),
             known_peers: ini.set("lab.KnownPeers", "{}"),
+            features: ini.set("labstream.Features", "{seq}"),
             multicast_addresses: addresses,
             multicast_ttl: ttl,
             watchdog_time_threshold: ini.float("tuning.WatchdogTimeThreshold", 15.0),

@@ -4,8 +4,10 @@ use crate::info::StreamInfo;
 use crate::queue::{Fanout, SampleQueue};
 use crate::{clock, config};
 use labstream_proto::discovery;
+use labstream_proto::features;
 use labstream_proto::header::parse_block;
 use labstream_proto::negotiate::{negotiate, FeedRequest, Outcome, ServerStream, LITTLE};
+use labstream_proto::seq::Numbering;
 use labstream_proto::timesync;
 use labstream_wire::{Codec, Sample, TEST_PATTERN_OFFSETS};
 use std::io::{Read, Write};
@@ -25,7 +27,7 @@ struct Shared {
     /// One queue per connected consumer. SPEC.md 8.8.
     fanout: Fanout,
     /// The consumers of a blocking outlet, which holds no queue at all.
-    sync: Mutex<Vec<SyncConsumer>>,
+    sync: Mutex<SyncSet>,
     /// True when this outlet writes each sample before the push returns.
     sync_mode: bool,
     stop: Mutex<bool>,
@@ -38,6 +40,17 @@ struct Shared {
 struct SyncConsumer {
     stream: TcpStream,
     codec: Codec,
+    /// The record state, when the consumer agreed to `seq/1`.
+    numbering: Option<Numbering>,
+}
+
+/// The consumers of a blocking outlet, and the number of the next sample.
+///
+/// One lock holds both, so the numbers follow the order of the writes.
+#[derive(Default)]
+struct SyncSet {
+    list: Vec<SyncConsumer>,
+    next: u64,
 }
 
 /// A stream outlet.
@@ -139,7 +152,7 @@ impl Outlet {
         let shared = Arc::new(Shared {
             info: Mutex::new(info.clone()),
             fanout: Fanout::new(),
-            sync: Mutex::new(Vec::new()),
+            sync: Mutex::new(SyncSet::default()),
             sync_mode,
             stop: Mutex::new(false),
         });
@@ -193,7 +206,7 @@ impl Outlet {
         if self.shared.sync_mode {
             // A blocking outlet registers its consumers with the writer rather
             // than with the queue. `src/stream_outlet_impl.cpp:176-179`.
-            return self.shared.sync.lock().unwrap().len();
+            return self.shared.sync.lock().unwrap().list.len();
         }
         self.shared.fanout.count()
     }
@@ -255,24 +268,21 @@ impl Outlet {
 /// A consumer whose socket fails is dropped. Nothing is queued, so a consumer
 /// that reads slowly holds up the caller. That is the whole point of the mode.
 fn write_blocking(shared: &Shared, sample: &Sample) {
-    let mut out = Vec::new();
-    let mut consumers = shared.sync.lock().unwrap();
-    consumers.retain_mut(|c| {
-        out.clear();
-        if c.codec.encode(sample, &mut out).is_err() {
-            return false;
-        }
-        c.stream.write_all(&out).is_ok() && c.stream.flush().is_ok()
-    });
+    write_blocking_many(shared, std::slice::from_ref(sample));
 }
 
 /// Write several samples to every consumer, with one write for each consumer.
 fn write_blocking_many(shared: &Shared, samples: &[Sample]) {
     let mut out = Vec::new();
-    let mut consumers = shared.sync.lock().unwrap();
-    consumers.retain_mut(|c| {
+    let mut set = shared.sync.lock().unwrap();
+    let first = set.next;
+    set.next = first.wrapping_add(samples.len() as u64);
+    set.list.retain_mut(|c| {
         out.clear();
-        for s in samples {
+        for (i, s) in samples.iter().enumerate() {
+            if let Some(n) = c.numbering.as_mut() {
+                n.before(first.wrapping_add(i as u64), &mut out);
+            }
             if c.codec.encode(s, &mut out).is_err() {
                 return false;
             }
@@ -611,9 +621,17 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         return Ok(());
     }
 
+    // A labstream inlet offers its features in one more header. An inlet
+    // that sent none gets the plain answer. `docs/extensions.md`.
+    let answered = headers
+        .get(features::HEADER_KEY)
+        .map(|v| features::answer(&features::parse(v), &config::get().features));
+    let numbered = answered
+        .as_deref()
+        .is_some_and(|a| features::has(a, features::SEQ, 1));
     stream.write_all(
         accepted
-            .to_wire(srv.configured_version, &info.uid)
+            .to_wire_with(srv.configured_version, &info.uid, answered.as_deref())
             .as_bytes(),
     )?;
 
@@ -657,11 +675,11 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         if trace {
             eprintln!("TRACE handing the socket to the blocking writer");
         }
-        shared
-            .sync
-            .lock()
-            .unwrap()
-            .push(SyncConsumer { stream, codec });
+        shared.sync.lock().unwrap().list.push(SyncConsumer {
+            stream,
+            codec,
+            numbering: numbered.then(Numbering::new),
+        });
         return Ok(());
     }
 
@@ -681,7 +699,15 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
     };
 
     let stop = || *shared.stop.lock().unwrap();
-    let sent = feed(&queue, &codec, &mut stream, max_chunk, &stop, trace);
+    let sent = feed(
+        &queue,
+        &codec,
+        &mut stream,
+        max_chunk,
+        numbered,
+        &stop,
+        trace,
+    );
     if trace {
         eprintln!("TRACE session over after {sent} samples");
     }
@@ -702,15 +728,22 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
 /// as the push-through flag. When the writer is slower than the source, one
 /// write can carry more than one push call. No sample waits for a later push.
 ///
+/// When `numbered` is true, the consumer agreed to `seq/1`. A numbering
+/// record then goes before the first sample, and before each sample whose
+/// number does not follow the one before it. A record does not count toward
+/// the chunk size. `docs/extensions.md`.
+///
 /// The result is the number of samples written.
 fn feed<W: Write>(
     queue: &SampleQueue,
     codec: &Codec,
     out: &mut W,
     max_chunk: usize,
+    numbered: bool,
     stop: &dyn Fn() -> bool,
     trace: bool,
 ) -> usize {
+    let mut numbering = numbered.then(Numbering::new);
     let mut batch: Vec<Sample> = Vec::new();
     let mut pending: Vec<u8> = Vec::new();
     let mut count = 0usize;
@@ -736,10 +769,15 @@ fn feed<W: Write>(
             break;
         }
         batch.clear();
-        if queue.pop_many(&mut batch, usize::MAX, Duration::from_millis(200)) == 0 {
+        let (taken, first) =
+            queue.pop_many_numbered(&mut batch, usize::MAX, Duration::from_millis(200));
+        if taken == 0 {
             continue;
         }
-        for s in &batch {
+        for (i, s) in batch.iter().enumerate() {
+            if let Some(n) = numbering.as_mut() {
+                n.before(first.wrapping_add(i as u64), &mut pending);
+            }
             if codec.encode(s, &mut pending).is_err() {
                 return sent;
             }
@@ -892,7 +930,7 @@ mod tests {
         let once = AtomicBool::new(false);
         // The first call to `stop` lets one round run. The second one stops.
         let stop = || once.swap(true, Ordering::SeqCst);
-        let sent = feed(queue, &codec, &mut out, max_chunk, &stop, false);
+        let sent = feed(queue, &codec, &mut out, max_chunk, false, &stop, false);
         (sent, out)
     }
 
@@ -924,6 +962,65 @@ mod tests {
         let (sent, out) = run(&q, 16);
         assert_eq!(sent, 1);
         assert_eq!(out.writes, 1);
+    }
+
+    /// Feed a numbered queue once, and read the records and samples back.
+    fn run_numbered(
+        queue: &SampleQueue,
+        max_chunk: usize,
+        order: ByteOrder,
+    ) -> (Vec<Sample>, Vec<u64>, Counting) {
+        use labstream_proto::seq::{peek, Next, RECORD_LEN};
+        let codec = Codec::new(Format::Float32, 2, order);
+        let mut out = Counting::default();
+        let once = AtomicBool::new(false);
+        let stop = || once.swap(true, Ordering::SeqCst);
+        feed(queue, &codec, &mut out, max_chunk, true, &stop, false);
+        let mut pos = 0;
+        let (mut got, mut records) = (Vec::new(), Vec::new());
+        while pos < out.bytes.len() {
+            if let Next::Record(n) = peek(&out.bytes[pos..]) {
+                records.push(n);
+                pos += RECORD_LEN;
+                continue;
+            }
+            let (s, used) = codec.decode(&out.bytes[pos..]).unwrap();
+            got.push(s);
+            pos += used;
+        }
+        (got, records, out)
+    }
+
+    #[test]
+    fn a_numbered_feed_starts_with_a_record() {
+        for order in [ByteOrder::Little, ByteOrder::Big] {
+            let q = SampleQueue::with_first_number(1000, 500);
+            let sent = samples(20);
+            q.push_many(&sent);
+            let (got, records, _) = run_numbered(&q, usize::MAX, order);
+            assert_eq!(got, sent);
+            assert_eq!(records, vec![500], "one record, at the start");
+        }
+    }
+
+    #[test]
+    fn a_full_queue_shows_as_a_gap_in_the_numbers() {
+        // A queue of 4 that gets 10 samples keeps numbers 106 to 109.
+        let q = SampleQueue::with_first_number(4, 100);
+        q.push_many(&samples(10));
+        let (got, records, _) = run_numbered(&q, usize::MAX, ByteOrder::native());
+        assert_eq!(got.len(), 4);
+        assert_eq!(records, vec![106]);
+    }
+
+    #[test]
+    fn a_record_does_not_count_toward_the_chunk_size() {
+        let q = SampleQueue::with_first_number(1000, 7);
+        q.push_many(&samples(32));
+        let (got, records, out) = run_numbered(&q, 16, ByteOrder::native());
+        assert_eq!(got.len(), 32);
+        assert_eq!(records, vec![7]);
+        assert_eq!(out.writes, 2, "16 samples in each write, the record extra");
     }
 
     #[test]

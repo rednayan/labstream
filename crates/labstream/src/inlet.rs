@@ -229,6 +229,20 @@ impl Inlet {
         self.inner.samples_dropped()
     }
 
+    /// How many samples never reached this inlet, since it opened.
+    ///
+    /// Two labstream peers number their samples (the `seq/1` feature of
+    /// `docs/extensions.md`). The count shows a sample that the outlet
+    /// dropped because this inlet read too slowly, and the samples that went
+    /// out while the connection was lost. [`Inlet::dropped`] counts the
+    /// samples that this inlet dropped itself. The total loss is the sum.
+    ///
+    /// The value is `None` when the source does not number its samples, for
+    /// example a liblsl outlet. `None` means unknown, not zero.
+    pub fn lost(&self) -> Option<u64> {
+        self.inner.samples_lost()
+    }
+
     /// True when the source ended and the program read every sample.
     ///
     /// An inlet that recovers reconnects on its own, so this stays false while

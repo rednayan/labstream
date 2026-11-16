@@ -536,7 +536,9 @@ mod tests {
             max_chunk_length: 0,
         };
         assert_eq!(a.to_wire_with(110, "u", None), a.to_wire(110, "u"));
-        assert!(a.to_wire_with(110, "u", Some(&[])).contains("Labstream-Features: \r\n"));
+        assert!(a
+            .to_wire_with(110, "u", Some(&[]))
+            .contains("Labstream-Features: \r\n"));
     }
 
     #[test]

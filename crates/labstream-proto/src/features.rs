@@ -60,7 +60,9 @@ impl Token {
             return None;
         }
         let param = match param {
-            Some(p) if !p.is_empty() && p.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) => {
+            Some(p)
+                if !p.is_empty() && p.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) =>
+            {
                 Some(p.to_string())
             }
             Some(_) => return None,
@@ -84,7 +86,10 @@ impl Token {
 
 /// Read a header value. A token with a bad form is left out.
 pub fn parse(value: &str) -> Vec<Token> {
-    value.split_ascii_whitespace().filter_map(Token::parse).collect()
+    value
+        .split_ascii_whitespace()
+        .filter_map(Token::parse)
+        .collect()
 }
 
 /// Write a whole header line, with its line end.
@@ -145,7 +150,9 @@ pub fn agreed(offered: &[Token], answered: &[Token]) -> Vec<Token> {
 
 /// True when the list holds the feature at this version.
 pub fn has(tokens: &[Token], name: &str, version: u32) -> bool {
-    tokens.iter().any(|t| t.name == name && t.version == version)
+    tokens
+        .iter()
+        .any(|t| t.name == name && t.version == version)
 }
 
 #[cfg(test)]
