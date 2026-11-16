@@ -7,6 +7,13 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `docs/latency.md` and `conformance/oracle/latency.py`, with
+  `conformance/oracle/latency.c`. They measure the time from a push to a pull,
+  and the CPU of each side, for liblsl and labstream.
+- `docs/extensions.md`, a proposal for a feature header between two labstream
+  peers. Nothing in it is implemented.
+- `conformance/oracle/headerprobe.py`. It makes sure that an outlet ignores
+  the proposed header.
 - `docs/repository.md`. It gives the layout of the repository, how the
   workspace joins the crates, the daily commands, CI, and the dependency
   updates.
