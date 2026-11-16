@@ -618,7 +618,8 @@ fn read_and_recover(
     conn: Arc<ConnState>,
     buffer_samples: i32,
 ) {
-    let mut tmp = [0u8; 65536];
+    let mut tmp = vec![0u8; 65536];
+    let mut batch: Vec<Sample> = Vec::new();
     let _ = sock.set_read_timeout(Some(Duration::from_millis(200)));
     let mut last_data = Instant::now();
 
@@ -633,28 +634,20 @@ fn read_and_recover(
             break;
         }
 
-        // Decode everything already buffered before reading more.
-        let mut decoded_any = false;
-        loop {
-            match codec.decode(&carry) {
-                Ok((mut sample, used)) => {
-                    carry.drain(..used);
-                    sample.timestamp = deducer.apply(sample.timestamp);
-                    queue.push(sample);
-                    decoded_any = true;
-                }
-                Err(labstream_wire::Error::Truncated) => break,
-                Err(_) => {
-                    // A stream that cannot be decoded is not worth recovering.
-                    // The bytes are wrong, not missing.
-                    done.store(true, Ordering::SeqCst);
-                    queue.close();
-                    return;
-                }
-            }
-        }
-        if decoded_any {
+        // Decode everything already buffered before reading more. The whole
+        // read goes into the queue with one lock.
+        let decoded = decode_buffered(&codec, &mut carry, &mut deducer, &mut batch);
+        if !batch.is_empty() {
             last_data = Instant::now();
+            queue.push_owned(&mut batch);
+        }
+        if decoded.is_err() {
+            // A stream that cannot be decoded is not worth recovering.
+            // The bytes are wrong, not missing.
+            done.store(true, Ordering::SeqCst);
+            clock.stop();
+            queue.close();
+            return;
         }
 
         let ended = match sock.read(&mut tmp) {
@@ -791,6 +784,35 @@ fn read_and_recover(
     // No new offset can matter now. A stop also ends a wait for the first one.
     clock.stop();
     queue.close();
+}
+
+/// Decode every whole sample in `carry` and add it to `out`.
+///
+/// The bytes of the decoded samples leave `carry` with one move at the end.
+/// A move after each sample costs time in proportion to the square of the
+/// buffer size, and a burst of data fills the buffer.
+///
+/// The bytes of a sample that is not complete stay in `carry`.
+fn decode_buffered(
+    codec: &labstream_wire::Codec,
+    carry: &mut Vec<u8>,
+    deducer: &mut labstream_wire::TimestampDeducer,
+    out: &mut Vec<Sample>,
+) -> Result<(), labstream_wire::Error> {
+    let mut pos = 0;
+    let result = loop {
+        match codec.decode(&carry[pos..]) {
+            Ok((mut sample, used)) => {
+                pos += used;
+                sample.timestamp = deducer.apply(sample.timestamp);
+                out.push(sample);
+            }
+            Err(labstream_wire::Error::Truncated) => break Ok(()),
+            Err(e) => break Err(e),
+        }
+    };
+    carry.drain(..pos);
+    result
 }
 
 /// Why the reader stopped reading the current connection.
@@ -948,5 +970,84 @@ impl Inlet {
     /// name and the source identifier stay.
     pub fn current_info(&self) -> StreamInfo {
         self.conn.info.lock().unwrap().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use labstream_wire::{ByteOrder, Codec, Format, TimestampDeducer, Value, DEDUCED_TIMESTAMP};
+
+    fn stream(codec: &Codec, n: usize) -> (Vec<Sample>, Vec<u8>) {
+        let mut bytes = Vec::new();
+        let samples: Vec<Sample> = (0..n)
+            .map(|k| Sample {
+                timestamp: if k % 5 == 0 {
+                    100.0 + k as f64
+                } else {
+                    DEDUCED_TIMESTAMP
+                },
+                values: vec![Value::F32(k as f32), Value::F32(-1.0), Value::F32(2.5)],
+            })
+            .collect();
+        for s in &samples {
+            codec.encode(s, &mut bytes).unwrap();
+        }
+        (samples, bytes)
+    }
+
+    /// Decode the bytes that arrive in reads of the given sizes.
+    fn decode_in_reads(codec: &Codec, bytes: &[u8], cuts: &[usize]) -> Vec<Sample> {
+        let mut carry = Vec::new();
+        let mut deducer = TimestampDeducer::new(100.0);
+        let mut out = Vec::new();
+        let mut from = 0;
+        for &to in cuts.iter().chain(std::iter::once(&bytes.len())) {
+            carry.extend_from_slice(&bytes[from..to]);
+            decode_buffered(codec, &mut carry, &mut deducer, &mut out).unwrap();
+            from = to;
+        }
+        assert!(carry.is_empty(), "no byte stays behind at the end");
+        out
+    }
+
+    #[test]
+    fn a_cut_at_any_byte_gives_the_same_samples() {
+        let codec = Codec::new(Format::Float32, 3, ByteOrder::native());
+        let (_, bytes) = stream(&codec, 40);
+        let whole = decode_in_reads(&codec, &bytes, &[]);
+        assert_eq!(whole.len(), 40);
+        for cut in 1..bytes.len() {
+            assert_eq!(
+                decode_in_reads(&codec, &bytes, &[cut]),
+                whole,
+                "a cut at {cut}"
+            );
+        }
+        // Many small reads, three bytes each.
+        let cuts: Vec<usize> = (3..bytes.len()).step_by(3).collect();
+        assert_eq!(decode_in_reads(&codec, &bytes, &cuts), whole);
+    }
+
+    #[test]
+    fn the_deduced_timestamps_follow_the_rate() {
+        let codec = Codec::new(Format::Float32, 3, ByteOrder::native());
+        let (_, bytes) = stream(&codec, 6);
+        let got = decode_in_reads(&codec, &bytes, &[]);
+        assert_eq!(got[0].timestamp, 100.0);
+        assert!((got[1].timestamp - 100.01).abs() < 1e-9);
+        assert_eq!(got[5].timestamp, 105.0);
+    }
+
+    #[test]
+    fn a_bad_tag_is_an_error_and_keeps_the_good_samples() {
+        let codec = Codec::new(Format::Float32, 3, ByteOrder::native());
+        let (_, mut bytes) = stream(&codec, 2);
+        bytes.push(0xEE);
+        let mut carry = bytes;
+        let mut deducer = TimestampDeducer::new(100.0);
+        let mut out = Vec::new();
+        assert!(decode_buffered(&codec, &mut carry, &mut deducer, &mut out).is_err());
+        assert_eq!(out.len(), 2);
     }
 }
