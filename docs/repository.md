@@ -291,6 +291,8 @@ release of a new crate therefore goes by hand, with a token.
 | `docs/releasing.md` | how to release to crates.io and to GitHub, and how to recover |
 | `docs/versioning.md` | what a version number means, and the rule for each change |
 | `docs/conformance.md` | what was measured against liblsl, how, and the result |
+| `docs/latency.md` | how to measure the latency and the CPU, and the results |
+| `docs/extensions.md` | a proposal for features between two labstream peers |
 | `SPEC.md` | the protocol, with a citation for every claim |
 | `CONTRIBUTING.md` | the rules for a change, and the style of the documents |
 | `CHANGELOG.md` | what changed in each version |
