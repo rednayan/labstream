@@ -42,6 +42,22 @@ pub fn update_min_probes() -> usize {
 /// (`src/stream_inlet_impl.h:44`).
 pub const FIRST_OFFSET_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The gap between two probes while no offset exists.
+///
+/// The first burst sends its probes close together, so the first offset
+/// arrives in tens of milliseconds and not in a whole burst of
+/// [`probe_interval()`] slots. The kept estimate is still the one with the
+/// lowest round-trip time. The later bursts use the configured cadence.
+/// This is a local choice: the outlet answers each probe as it comes.
+pub const FIRST_PROBE_INTERVAL: Duration = Duration::from_millis(4);
+
+/// The wait before the next burst when a burst found no first offset.
+///
+/// A burst without enough answers tries again after this time and not after
+/// a full [`update_interval()`]. The wait keeps an outlet that does not answer
+/// from a flood of probes.
+pub const FIRST_RETRY: Duration = Duration::from_millis(250);
+
 /// The published result of the most recent burst.
 #[derive(Debug)]
 pub struct ClockState {
@@ -214,6 +230,39 @@ fn probe_socket(target: SocketAddr) -> Option<UdpSocket> {
     Some(sock)
 }
 
+/// Read answers into `burst` until `end`, or until it holds `enough` answers.
+///
+/// Each read waits only for the time that is left. A fixed read timeout
+/// would end the slot early, or hold a short slot open for too long.
+fn collect(sock: &UdpSocket, burst: &mut Burst, end: Instant, enough: Option<usize>) {
+    let mut buf = [0u8; 4096];
+    loop {
+        if enough.is_some_and(|n| burst.accepted() >= n) {
+            return;
+        }
+        let left = end.saturating_duration_since(Instant::now());
+        // A read timeout of zero is an error, so the slot ends here.
+        if left < Duration::from_micros(100) {
+            return;
+        }
+        let _ = sock.set_read_timeout(Some(left));
+        match sock.recv_from(&mut buf) {
+            Ok((n, _)) => {
+                let t3 = crate::clock();
+                if let Some(a) = timesync::parse_answer(&buf[..n]) {
+                    burst.accept(&a, t3);
+                }
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            // An ICMP error from an earlier probe can show as a read error.
+            // The slot then waits out its time with a short pause.
+            Err(_) => std::thread::sleep(left.min(Duration::from_millis(5))),
+        }
+    }
+}
+
 /// Start a thread that keeps the offset up to date.
 ///
 /// The thread sends one burst every [`update_interval()`]. A burst that collects
@@ -260,8 +309,16 @@ pub fn start(target: SocketAddr, state: Arc<ClockState>, rng: Arc<Mutex<u64>>) {
                 (*r as u32 as i32).abs()
             };
             let mut burst = Burst::new(wave_id);
-            let burst_end =
-                Instant::now() + probe_interval() * probe_count() as u32 + probe_max_rtt();
+            // Without an offset, the burst is a fast one. A reset or a new
+            // target clears the offset, so a recovery also gets a fast burst.
+            let fast = state.offset().is_none();
+            let gap = if fast {
+                FIRST_PROBE_INTERVAL.min(probe_interval())
+            } else {
+                probe_interval()
+            };
+            let burst_start = Instant::now();
+            let burst_end = burst_start + gap * probe_count() as u32 + probe_max_rtt();
 
             for _ in 0..probe_count() {
                 if state.stop.load(Ordering::SeqCst) {
@@ -272,34 +329,13 @@ pub fn start(target: SocketAddr, state: Arc<ClockState>, rng: Arc<Mutex<u64>>) {
                 let _ = sock.send_to(&msg, target);
 
                 // Collect whatever arrives before the next probe goes out.
-                let slot_end = Instant::now() + probe_interval();
-                let mut buf = [0u8; 4096];
-                while Instant::now() < slot_end {
-                    match sock.recv_from(&mut buf) {
-                        Ok((n, _)) => {
-                            let t3 = crate::clock();
-                            if let Some(a) = timesync::parse_answer(&buf[..n]) {
-                                burst.accept(&a, t3);
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
+                collect(&sock, &mut burst, Instant::now() + gap, None);
             }
 
-            // Drain the tail of the burst.
-            let mut buf = [0u8; 4096];
-            while Instant::now() < burst_end {
-                match sock.recv_from(&mut buf) {
-                    Ok((n, _)) => {
-                        let t3 = crate::clock();
-                        if let Some(a) = timesync::parse_answer(&buf[..n]) {
-                            burst.accept(&a, t3);
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
+            // Collect the late answers. A fast burst stops when each probe
+            // has its answer.
+            let all = if fast { Some(probe_count()) } else { None };
+            collect(&sock, &mut burst, burst_end, all);
 
             if std::env::var_os("LSL_TRACE_CLOCK").is_some() {
                 eprintln!(
@@ -319,10 +355,12 @@ pub fn start(target: SocketAddr, state: Arc<ClockState>, rng: Arc<Mutex<u64>>) {
                 }
             }
 
-            // Wait out the rest of the interval.
-            let rest = update_interval()
-                .saturating_sub(probe_interval() * probe_count() as u32 + probe_max_rtt());
-            let wake = Instant::now() + rest;
+            // Wait out the rest of the interval. Without an offset, try again
+            // soon.
+            let mut wake = burst_start + update_interval();
+            if state.offset().is_none() {
+                wake = wake.min(Instant::now() + FIRST_RETRY);
+            }
             while Instant::now() < wake {
                 if state.stop.load(Ordering::SeqCst) {
                     return;
