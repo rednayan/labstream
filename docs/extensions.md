@@ -53,7 +53,8 @@ Labstream-Features: seq/1 shm/1
 ```
 
 The name of the header is `Labstream-Features`. This name is final. A later
-version of labstream must not change it, because released peers send it.
+version of labstream must not change it, because peers of different versions
+must agree on it.
 
 The value is a list of tokens with one space between two tokens. Each token
 has this form:
