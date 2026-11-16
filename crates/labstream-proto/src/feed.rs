@@ -3,6 +3,7 @@
 //! The machine takes bytes and returns bytes. It opens no socket and reads no
 //! clock, so a test drives every state with a byte slice.
 
+use crate::features::{self, Token};
 use crate::header::{parse_block, Error, Headers, StatusLine};
 use crate::negotiate::{BIG, LITTLE};
 use labstream_wire::{ByteOrder, Codec, Format, Sample, TEST_PATTERN_OFFSETS};
@@ -99,6 +100,20 @@ impl FeedParams {
         s.push_str("\r\n");
         s.into_bytes()
     }
+
+    /// Write the request with a `Labstream-Features` line, after the fields
+    /// of liblsl. With no tokens, the request is the same as
+    /// [`FeedParams::to_wire`]. `docs/extensions.md`.
+    pub fn to_wire_with(&self, features: &[Token]) -> Vec<u8> {
+        let mut bytes = self.to_wire();
+        if !features.is_empty() {
+            // Put the line before the empty line that ends the block.
+            bytes.truncate(bytes.len() - 2);
+            bytes.extend_from_slice(features::header_line(features).as_bytes());
+            bytes.extend_from_slice(b"\r\n");
+        }
+        bytes
+    }
 }
 
 /// The parameters that the answer settled.
@@ -135,12 +150,29 @@ pub struct FeedClient {
     state: State,
     agreement: Option<FeedAgreement>,
     codec: Option<Codec>,
+    /// The features that the request offered.
+    offer: Vec<Token>,
+    /// The features that are on, once the headers arrive.
+    features: Vec<Token>,
 }
 
 impl FeedClient {
     /// Build a client and return the bytes to send.
     pub fn start(params: FeedParams, format: Format, channels: usize) -> (Self, Vec<u8>) {
-        let bytes = params.to_wire();
+        Self::start_with(params, format, channels, Vec::new())
+    }
+
+    /// Build a client that offers features, and return the bytes to send.
+    ///
+    /// With no tokens, this is the same as [`FeedClient::start`].
+    /// `docs/extensions.md`.
+    pub fn start_with(
+        params: FeedParams,
+        format: Format,
+        channels: usize,
+        offer: Vec<Token>,
+    ) -> (Self, Vec<u8>) {
+        let bytes = params.to_wire_with(&offer);
         (
             FeedClient {
                 params,
@@ -149,9 +181,17 @@ impl FeedClient {
                 state: State::AwaitingHeaders,
                 agreement: None,
                 codec: None,
+                offer,
+                features: Vec::new(),
             },
             bytes,
         )
+    }
+
+    /// The features that are on for this connection. Empty until the headers
+    /// arrive, and empty when the outlet gave no answer for them.
+    pub fn features(&self) -> &[Token] {
+        &self.features
     }
 
     /// The current state.
@@ -201,6 +241,13 @@ impl FeedClient {
         };
 
         let agreement = self.read_answer(&headers)?;
+        // An outlet that does not know the header sends no answer for it, so
+        // no feature is on.
+        let answered = headers
+            .get(features::HEADER_KEY)
+            .map(features::parse)
+            .unwrap_or_default();
+        self.features = features::agreed(&self.offer, &answered);
         let order = agreement.order;
         self.codec = Some(
             Codec::new(self.format, self.channels, order)
@@ -353,7 +400,7 @@ pub enum TestPatternError {
 mod tests {
     use super::*;
     use crate::header::parse_block;
-    use crate::negotiate::{negotiate, FeedRequest, Outcome, ServerStream};
+    use crate::negotiate::{negotiate, Accepted, FeedRequest, Outcome, ServerStream};
 
     fn handshake(
         format: Format,
@@ -416,6 +463,80 @@ mod tests {
         }
         assert!(text.starts_with("LSL:streamfeed/110 abc\r\n"));
         assert!(text.ends_with("\r\n\r\n"));
+    }
+
+    /// Run the feature exchange through both header parsers, as the outlet
+    /// and the inlet do. `answer_features` is the server side decision.
+    fn feature_handshake(offer: Vec<Token>, allowed: &[String]) -> FeedClient {
+        let p = FeedParams::new("uid-1", Format::Float32);
+        let (mut client, request) = FeedClient::start_with(p, Format::Float32, 2, offer);
+        let block_start = request.iter().position(|&b| b == b'\n').unwrap() + 1;
+        let (headers, _) = parse_block(&request[block_start..]).expect("a block");
+        let srv = ServerStream::new("uid-1", Format::Float32, LITTLE, 1000.0);
+        let req = FeedRequest::from_headers(110, "uid-1", &headers, srv.channel_bytes);
+        let accepted = match negotiate(&req, &srv) {
+            Outcome::Accept(a) => a,
+            Outcome::Refuse(s) => panic!("refused: {}", s.code),
+        };
+        let answered = headers
+            .get(features::HEADER_KEY)
+            .map(|v| features::answer(&features::parse(v), allowed));
+        let answer = accepted.to_wire_with(110, "uid-1", answered.as_deref());
+        client.on_headers(answer.as_bytes()).expect("headers");
+        client
+    }
+
+    #[test]
+    fn a_request_with_no_offer_is_the_plain_request() {
+        let p = FeedParams::new("abc", Format::Float32);
+        assert_eq!(p.to_wire_with(&[]), p.to_wire());
+    }
+
+    #[test]
+    fn the_offer_goes_last_in_the_block() {
+        let p = FeedParams::new("abc", Format::Float32);
+        let text = String::from_utf8(p.to_wire_with(&[Token::new("seq", 1)])).unwrap();
+        assert!(text.ends_with("Session-Id: default\r\nLabstream-Features: seq/1\r\n\r\n"));
+        assert!(text.starts_with(&String::from_utf8(p.to_wire()).unwrap()[..40]));
+    }
+
+    #[test]
+    fn two_labstream_peers_agree_on_seq() {
+        let all = vec![features::SEQ.to_string()];
+        let c = feature_handshake(features::offer(&all), &all);
+        assert!(features::has(c.features(), features::SEQ, 1));
+    }
+
+    #[test]
+    fn an_outlet_that_allows_nothing_turns_seq_off() {
+        let all = vec![features::SEQ.to_string()];
+        let c = feature_handshake(features::offer(&all), &[]);
+        assert!(c.features().is_empty());
+    }
+
+    #[test]
+    fn an_answer_with_no_feature_line_turns_seq_off() {
+        // A liblsl outlet and an older labstream outlet answer this way.
+        let all = vec![features::SEQ.to_string()];
+        let p = FeedParams::new("uid-1", Format::Float32);
+        let (mut c, _) = FeedClient::start_with(p, Format::Float32, 2, features::offer(&all));
+        c.on_headers(b"LSL/110 200 OK\r\nUID: uid-1\r\nByte-Order: 1234\r\nSuppress-Subnormals: 0\r\nData-Protocol-Version: 110\r\n\r\n")
+            .expect("headers");
+        assert!(c.features().is_empty());
+    }
+
+    #[test]
+    fn an_answer_with_no_request_line_has_no_feature_line() {
+        let a = Accepted {
+            data_protocol_version: 110,
+            byte_order: LITTLE,
+            reverse_byte_order: false,
+            suppress_subnormals: false,
+            max_buffer_length: 360,
+            max_chunk_length: 0,
+        };
+        assert_eq!(a.to_wire_with(110, "u", None), a.to_wire(110, "u"));
+        assert!(a.to_wire_with(110, "u", Some(&[])).contains("Labstream-Features: \r\n"));
     }
 
     #[test]

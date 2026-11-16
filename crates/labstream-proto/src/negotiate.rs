@@ -176,6 +176,26 @@ impl Accepted {
         s.push_str("\r\n");
         s
     }
+
+    /// Write the answer with a `Labstream-Features` line.
+    ///
+    /// `features` is `None` when the request had no such header. The answer
+    /// is then the same as [`Accepted::to_wire`]. A request with the header
+    /// gets the line, also when no feature is on. `docs/extensions.md`.
+    pub fn to_wire_with(
+        &self,
+        configured_version: i32,
+        uid: &str,
+        features: Option<&[crate::features::Token]>,
+    ) -> String {
+        let mut s = self.to_wire(configured_version, uid);
+        if let Some(tokens) = features {
+            s.truncate(s.len() - 2);
+            s.push_str(&crate::features::header_line(tokens));
+            s.push_str("\r\n");
+        }
+        s
+    }
 }
 
 /// True when the format carries a subnormal value.

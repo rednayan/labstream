@@ -1,8 +1,8 @@
 # Proposal: feature negotiation between two labstream peers
 
-**Status:** proposal. Nothing on this page is implemented. The wire format does
-not change until a feature section below is accepted and SPEC.md gets a
-section for it.
+**Status:** proposal. The header and the `seq` feature are implemented on
+the branch `feat/seq`. The other features are not implemented. SPEC.md gets
+a section for a feature only after the feature is accepted.
 
 ## The purpose
 
@@ -88,8 +88,11 @@ most one version.
 5. A feature is on only when the inlet offered it and the outlet answered it.
 6. If the answer has no `Labstream-Features` line, no feature is on. A liblsl
    outlet and an older labstream outlet give this result.
-7. A configuration key can remove a feature from the offer and from the
-   answer. The name of the key is an open question.
+7. The configuration key `labstream.Features` lists the features that this
+   process can use, for example `{seq}`. The default lists every feature that
+   the library has. An inlet offers only the listed features, and an outlet
+   answers only the listed features. The value `{}` turns every feature off.
+   liblsl does not read this key.
 
 ## Where the framing changes
 
@@ -119,16 +122,81 @@ negotiation.
 
 ### `seq`: sequence numbers
 
-The outlet gives each sample a number when the application pushes it. One
-counter serves the whole outlet, not one counter for each connection.
+**Status:** implemented on the branch `feat/seq`
+(`crates/labstream-proto/src/seq.rs`). The token is `seq/1`.
 
-This rule is necessary. The two real causes of loss are a full consumer
-queue (SPEC.md 8.7) and the gap between a lost connection and the next one.
-A counter for each connection starts again after a recovery, so it shows
-neither cause.
+#### The purpose
 
-The inlet reports the number of samples that it did not receive. The counter
-also shows a repeated sample and a sample out of order.
+LSL has no sign of a lost sample (SPEC.md 8.7). An application can only
+guess a loss from a gap in the timestamps. `seq` gives each sample a number,
+so the inlet can count the samples that it did not receive.
+
+#### The numbers
+
+1. The outlet gives each pushed sample the next number of one counter. The
+   counter starts at 0 when the outlet opens.
+2. One counter serves the whole outlet, not one counter for each connection.
+   A sample that the outlet pushes with no consumer also takes a number.
+3. The two real causes of loss are a full consumer queue in the outlet
+   (SPEC.md 8.7) and the gap between a lost connection and the next one. A
+   counter for each connection starts again after a recovery, so it shows
+   neither cause. That is the reason for rule 2.
+
+#### The record
+
+When `seq/1` is on, a numbering record can stand between two samples. It
+has 9 bytes:
+
+```
+u8  tag      0xFE
+u64 number   little-endian, the number of the next sample
+```
+
+1. The tag values 1 and 2 start a sample (`src/sample.h:19-20`, SPEC.md
+   7.1). The tag `0xFE` is not a sample tag, so a reader can tell a record
+   from a sample by its first byte.
+2. The number is always little-endian. The `Byte-Order` of the connection
+   does not apply to it.
+3. On each connection, the first record comes directly after the second test
+   pattern sample. Each connection thus starts with an absolute number.
+4. After that, the outlet writes a record only before a sample whose number
+   is not one more than the number of the sample before it. A connection
+   with no loss carries one record and no more.
+5. A record is not a sample. It does not count toward `Max-Chunk-Length`.
+6. A record that is cut at the end of a read is not an error. The reader
+   waits for the rest of the bytes, as for a cut sample.
+
+#### The count
+
+The inlet keeps the number that it expects next.
+
+1. The first record after the inlet opens sets the expected number, and
+   counts no loss. The inlet has no number from before that point.
+2. A later record with a number above the expected number adds the
+   difference to the count of lost samples.
+3. A later record with a number below the expected number counts no loss.
+   The inlet adds one to a separate count of numbers that went back, and
+   takes the new number. The arithmetic must not underflow.
+4. Each sample adds one to the expected number.
+5. A recovery to the same outlet (the same `uid`) keeps the expected number.
+   The first record of the new connection then shows the gap.
+6. A recovery to a new outlet (a new `uid`) starts again at rule 1, because
+   the new outlet has a new counter.
+
+#### What the inlet reports
+
+- `Inlet::samples_lost()` in `labstream-net` and `Inlet::lost()` in
+  `labstream` give the count of lost samples since the inlet opened.
+- The value is `None` when the current connection does not use `seq`. A
+  liblsl outlet gives this result. `None` means "unknown". It does not mean
+  "no loss".
+- Version 1 gives a count only. It does not give the position of each gap.
+  An application that must place a gap still uses the timestamps.
+- The inlet queue also drops the oldest sample when the application reads
+  too slowly. This drop happens after the count, so `seq` does not see it.
+  `Inlet::samples_dropped()` in `labstream-net` and `Inlet::dropped()` in
+  `labstream` report it, as before. The total loss is the sum
+  of the two values.
 
 ### `shm`: shared memory on one machine
 
@@ -197,6 +265,4 @@ the stored data, and it does not describe one connection.
 ## Open questions
 
 - The final name of the header.
-- The name of the configuration key from rule 7.
 - The API that reports the features of the current connection.
-- The exact bytes of the `seq` framing. This belongs to the `seq` section.

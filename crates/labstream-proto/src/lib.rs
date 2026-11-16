@@ -24,9 +24,11 @@
 
 pub mod canon;
 pub mod discovery;
+pub mod features;
 pub mod feed;
 pub mod header;
 pub mod negotiate;
+pub mod seq;
 pub mod timesync;
 
 pub use header::{Error, Headers, StatusAction, StatusLine};
