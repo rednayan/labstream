@@ -19,6 +19,7 @@ pub mod config;
 pub mod desc;
 pub mod info;
 pub mod inlet;
+mod keepalive;
 pub mod outlet;
 pub mod queue;
 pub mod resolver;

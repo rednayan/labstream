@@ -660,10 +660,7 @@ fn read_and_recover(
                 last_data = Instant::now();
                 None
             }
-            Err(ref e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
-            {
+            Err(ref e) if read_timed_out(e) => {
                 // A source that stopped without closing looks exactly like a
                 // quiet one. The watchdog is what tells them apart.
                 if last_data.elapsed() > watchdog_threshold() {
@@ -862,6 +859,21 @@ fn find_again(known: &StreamInfo) -> Found {
     Found::Moved(Box::new(found.into_iter().next().unwrap()))
 }
 
+/// True when a read ended because its read timeout ran out.
+///
+/// On Unix, a read timeout gives `EAGAIN` (`WouldBlock`). `ETIMEDOUT`
+/// (`TimedOut`) there means that the kernel ended the connection, for example
+/// after keepalive probes got no answer. That is a lost connection, not a
+/// quiet one. Windows gives `WSAETIMEDOUT` for a read timeout, so on Windows
+/// both kinds mean a quiet connection.
+fn read_timed_out(e: &std::io::Error) -> bool {
+    match e.kind() {
+        std::io::ErrorKind::WouldBlock => true,
+        std::io::ErrorKind::TimedOut => cfg!(not(unix)),
+        _ => false,
+    }
+}
+
 /// Ask a data port for the whole description.
 ///
 /// The exchange is one line out and a document back. The sender closes the
@@ -896,6 +908,7 @@ fn handshake(
     let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(timeout))?;
+    crate::keepalive::enable(&stream);
 
     let mut params = FeedParams::new(&info.uid, info.format);
     params.hostname = crate::info::hostname();
@@ -1054,6 +1067,17 @@ mod tests {
         let mut out = Vec::new();
         assert!(decode_buffered(&codec, &mut carry, &mut deducer, &mut out).is_err());
         assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn a_kernel_timeout_is_a_lost_connection_on_unix() {
+        use std::io::{Error, ErrorKind};
+        assert!(read_timed_out(&Error::from(ErrorKind::WouldBlock)));
+        assert_eq!(
+            read_timed_out(&Error::from(ErrorKind::TimedOut)),
+            cfg!(not(unix))
+        );
+        assert!(!read_timed_out(&Error::from(ErrorKind::ConnectionReset)));
     }
 
     #[test]

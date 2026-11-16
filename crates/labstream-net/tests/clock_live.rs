@@ -249,3 +249,28 @@ fn a_retarget_moves_the_probes_to_another_outlet() {
     state.stop();
     drop(b);
 }
+
+/// The first offset decides when the first sample can leave the
+/// post-processor, so its delay is a start-up delay of every inlet.
+#[test]
+fn the_first_offset_arrives_quickly() {
+    let (_outlet, inlet) = match pair("ClkLiveFast") {
+        Some(p) => p,
+        None => {
+            eprintln!("no local network; skipping");
+            return;
+        }
+    };
+    let t = std::time::Instant::now();
+    let got = inlet.wait_for_time_correction(Duration::from_secs(5));
+    let took = t.elapsed();
+    println!("first offset after {took:?}");
+    assert!(got.is_some(), "an offset arrives");
+    // The first burst sends its probes 4 ms apart, so on this machine the
+    // offset arrives in about 40 ms. A burst at the regular cadence takes
+    // more than 300 ms. The bound is wide, for a slow test machine.
+    assert!(
+        took < Duration::from_millis(250),
+        "the first offset took {took:?}"
+    );
+}
