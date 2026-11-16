@@ -658,11 +658,11 @@ fn read_and_recover(
         }
 
         let ended = match sock.read(&mut tmp) {
-            Ok(0) => true,
+            Ok(0) => Some(Ending::Closed),
             Ok(n) => {
                 carry.extend_from_slice(&tmp[..n]);
                 last_data = Instant::now();
-                false
+                None
             }
             Err(ref e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
@@ -670,26 +670,26 @@ fn read_and_recover(
             {
                 // A source that stopped without closing looks exactly like a
                 // quiet one. The watchdog is what tells them apart.
-                last_data.elapsed() > watchdog_threshold()
+                if last_data.elapsed() > watchdog_threshold() {
+                    Some(Ending::Quiet)
+                } else {
+                    None
+                }
             }
-            Err(_) => true,
+            Err(_) => Some(Ending::Closed),
         };
 
-        if !ended {
-            continue;
-        }
+        let ending = match ended {
+            Some(e) => e,
+            None => continue,
+        };
         let trace = std::env::var_os("LSL_TRACE_RECOVER").is_some();
         if trace {
-            eprintln!(
-                "TRACE recover: the connection ended, recover={}",
-                conn.recover
-            );
+            eprintln!("TRACE recover: {ending:?}, recover={}", conn.recover);
         }
         if !conn.recover {
             break;
         }
-
-        conn.connected.store(false, Ordering::SeqCst);
         let known = conn.info.lock().unwrap().clone();
         if trace {
             eprintln!(
@@ -703,40 +703,86 @@ fn read_and_recover(
             // so liblsl refuses to recover. SPEC.md 10.1.
             break;
         }
-
-        let attempt = find_again(&known);
-        if trace {
-            eprintln!(
-                "TRACE recover: found {:?}",
-                attempt.as_ref().map(|f| &f.uid)
-            );
+        if ending == Ending::Closed {
+            conn.connected.store(false, Ordering::SeqCst);
         }
-        match attempt {
-            Some(fresh) => {
-                match handshake(&fresh, Duration::from_secs(5), buffer_samples) {
-                    Ok((s, c, rest)) => {
-                        let _ = &c;
-                        let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
-                        sock = s;
-                        carry = rest;
-                        codec = *c.codec().expect("the handshake set the codec");
-                        // The old fit and the old offset describe a process
-                        // that has gone. SPEC.md 8.5.
-                        if fresh.uid != known.uid {
-                            // The old fit, the old offset, and the timestamp
-                            // accumulator all describe a process that has gone.
-                            clock.mark_reset();
-                            deducer = labstream_wire::TimestampDeducer::new(fresh.nominal_srate);
-                        }
-                        *conn.info.lock().unwrap() = fresh;
-                        conn.recoveries.fetch_add(1, Ordering::SeqCst);
-                        conn.connected.store(true, Ordering::SeqCst);
-                        last_data = Instant::now();
+
+        // Try until a connection exists again, or the inlet closes.
+        loop {
+            if queue.is_closed() {
+                conn.connected.store(false, Ordering::SeqCst);
+                done.store(true, Ordering::SeqCst);
+                clock.stop();
+                return;
+            }
+
+            // A closed connection to an outlet that still runs is the usual
+            // case after a network fault. The handshake sends the old
+            // instance identifier, and the outlet answers with its own, so a
+            // different outlet on the same port cannot attach. liblsl
+            // connects again to the same endpoint after an error
+            // (`src/data_receiver.cpp:331-345`).
+            if ending == Ending::Closed {
+                if let Ok((s, c, rest)) = handshake(&known, Duration::from_secs(1), buffer_samples)
+                {
+                    if trace {
+                        eprintln!("TRACE recover: connected again to {}", known.uid);
                     }
-                    Err(_) => std::thread::sleep(Duration::from_millis(500)),
+                    let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
+                    sock = s;
+                    carry = rest;
+                    codec = *c.codec().expect("the handshake set the codec");
+                    conn.recoveries.fetch_add(1, Ordering::SeqCst);
+                    conn.connected.store(true, Ordering::SeqCst);
+                    last_data = Instant::now();
+                    break;
                 }
             }
-            None => std::thread::sleep(Duration::from_millis(500)),
+
+            let found = find_again(&known);
+            if trace {
+                eprintln!("TRACE recover: found {found:?}");
+            }
+            match found {
+                Found::Moved(fresh) => {
+                    match handshake(&fresh, Duration::from_secs(5), buffer_samples) {
+                        Ok((s, c, rest)) => {
+                            let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
+                            sock = s;
+                            carry = rest;
+                            codec = *c.codec().expect("the handshake set the codec");
+                            // The old offset, the old fit, and the timestamp
+                            // accumulator all describe a process that has
+                            // gone. The probes go to the new service port
+                            // (`src/time_receiver.cpp:26-33`).
+                            clock.reset_offset();
+                            if let Some(target) = service_endpoint(&fresh) {
+                                clock.retarget(target);
+                            }
+                            deducer = labstream_wire::TimestampDeducer::new(fresh.nominal_srate);
+                            *conn.info.lock().unwrap() = fresh;
+                            conn.recoveries.fetch_add(1, Ordering::SeqCst);
+                            conn.connected.store(true, Ordering::SeqCst);
+                            last_data = Instant::now();
+                            break;
+                        }
+                        Err(_) => std::thread::sleep(Duration::from_millis(500)),
+                    }
+                }
+                Found::Same | Found::Nothing if ending == Ending::Quiet => {
+                    // The socket is still open. liblsl does nothing in this
+                    // case and continues to read (`src/inlet_connection.cpp:187-188`).
+                    // The next check comes after one more watchdog period.
+                    last_data = Instant::now();
+                    break;
+                }
+                Found::Same | Found::Nothing => {
+                    // Wait a little so that the outlet does not see a flood of
+                    // connections. liblsl waits the same time
+                    // (`src/data_receiver.cpp:345`).
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
         }
     }
 
@@ -747,26 +793,46 @@ fn read_and_recover(
     queue.close();
 }
 
+/// Why the reader stopped reading the current connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// The outlet closed the connection, or the socket reported an error.
+    Closed,
+    /// No data arrived for one watchdog period. The socket is still open.
+    Quiet,
+}
+
+/// The result of a search for a lost stream.
+#[derive(Debug)]
+enum Found {
+    /// The stream with the old instance identifier is still visible.
+    Same,
+    /// Exactly one stream matches, and it has a new instance identifier.
+    Moved(StreamInfo),
+    /// No stream matches, or more than one does.
+    Nothing,
+}
+
 /// Find the stream again after its source restarted.
 ///
 /// The query comes from [`StreamInfo::recovery_query`]. liblsl accepts the
 /// result only when exactly one stream matches, because a source identifier
 /// that is not unique would otherwise attach the inlet to the wrong stream
 /// (`src/inlet_connection.cpp:188-192`).
-fn find_again(known: &StreamInfo) -> Option<StreamInfo> {
-    let found = resolve(&known.recovery_query(), 1, Duration::from_secs(2)).ok()?;
-    if found.is_empty() {
-        return None;
-    }
-    // A result that still carries the old identifier means the source never
-    // went away, so there is nothing to recover.
+fn find_again(known: &StreamInfo) -> Found {
+    let found = match resolve(&known.recovery_query(), 1, Duration::from_secs(2)) {
+        Ok(f) => f,
+        Err(_) => return Found::Nothing,
+    };
+    // A result that still carries the old identifier means that the source
+    // did not go away (`src/inlet_connection.cpp:186-188`).
     if found.iter().any(|f| f.uid == known.uid) {
-        return None;
+        return Found::Same;
     }
     if found.len() != 1 {
-        return None;
+        return Found::Nothing;
     }
-    Some(found.into_iter().next().unwrap())
+    Found::Moved(found.into_iter().next().unwrap())
 }
 
 /// Ask a data port for the whole description.
