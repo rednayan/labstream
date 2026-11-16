@@ -10,7 +10,8 @@
 //! faster than the reader consumed them, delivered sample 0 and then samples
 //! 500 to 599. The writer never waited.
 
-use labstream_wire::Sample;
+use crate::history::{History, HistoryLimits};
+use labstream_wire::{Sample, TimestampDeducer, IRREGULAR_RATE};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -303,25 +304,122 @@ impl SampleQueue {
 ///
 /// liblsl calls this the send buffer (`src/send_buffer.h`). Each consumer holds
 /// its own queue, so a slow consumer loses only its own samples. SPEC.md 8.8.
+///
+/// The fanout also holds the history of the `resume` feature, and the
+/// timestamp deducer that gives the history its full timestamps.
+/// `docs/extensions.md`, section `resume`.
 #[derive(Debug, Default)]
 pub struct Fanout {
     consumers: Mutex<Consumers>,
 }
 
-/// The queues of a fanout, and the number of the next pushed sample.
+/// The queues of a fanout, the number of the next pushed sample, and the
+/// history.
 ///
-/// One lock holds both, so a new queue starts at the number that the next
-/// push gives, and every queue sees the same numbers.
-#[derive(Debug, Default)]
+/// One lock holds all of them, so a new queue starts at the number that the
+/// next push gives, every queue sees the same numbers, and the history holds
+/// the same numbers.
+#[derive(Debug)]
 struct Consumers {
     list: Vec<Arc<SampleQueue>>,
     next: u64,
+    /// Calculates the full timestamp of each pushed sample, in the order of
+    /// the numbers. It runs also when there is no history, so that a history
+    /// that starts in the middle of a chunk gets correct timestamps.
+    deducer: TimestampDeducer,
+    srate: f64,
+    limits: HistoryLimits,
+    /// `None` until the first consumer agrees to `resume/1`.
+    history: Option<History>,
+}
+
+impl Default for Consumers {
+    fn default() -> Self {
+        Consumers {
+            list: Vec::new(),
+            next: 0,
+            deducer: TimestampDeducer::new(IRREGULAR_RATE),
+            srate: IRREGULAR_RATE,
+            limits: HistoryLimits::DEFAULT,
+            history: None,
+        }
+    }
+}
+
+impl Consumers {
+    /// Give one sample its number, its full timestamp, and its place in the
+    /// history.
+    fn record(&mut self, s: &Sample) {
+        let full = self.deducer.apply(s.timestamp);
+        if let Some(h) = self.history.as_mut() {
+            debug_assert_eq!(h.next(), self.next);
+            h.push(Sample {
+                timestamp: full,
+                values: s.values.clone(),
+            });
+        }
+        self.next = self.next.wrapping_add(1);
+    }
 }
 
 impl Fanout {
-    /// Build an empty set.
+    /// Build an empty set for a stream with an irregular rate and the
+    /// default history limits.
     pub fn new() -> Self {
         Fanout::default()
+    }
+
+    /// Build an empty set for a stream with the nominal rate `srate`.
+    ///
+    /// The rate gives the deduced timestamps and the time limit of the
+    /// history.
+    pub fn with_rate(srate: f64, limits: HistoryLimits) -> Self {
+        Fanout {
+            consumers: Mutex::new(Consumers {
+                deducer: TimestampDeducer::new(srate),
+                srate,
+                limits,
+                ..Consumers::default()
+            }),
+        }
+    }
+
+    /// Start the history, if the limits allow it. The result is true when
+    /// the history is on.
+    ///
+    /// The history holds each sample that the outlet pushes from this point.
+    /// A second call changes nothing. `docs/extensions.md`, history rule 3.
+    pub fn start_history(&self) -> bool {
+        let mut set = self.consumers.lock().unwrap();
+        if set.history.is_none() && set.limits.allow_history() {
+            let h = History::new(set.limits, set.srate, set.next);
+            set.history = Some(h);
+        }
+        set.history.is_some()
+    }
+
+    /// How many samples the history holds. Zero when it is off.
+    pub fn history_len(&self) -> usize {
+        let set = self.consumers.lock().unwrap();
+        set.history.as_ref().map_or(0, History::len)
+    }
+
+    /// Copy at most `max` samples of the history to the end of `out`, from
+    /// the number `from`, and below the number `until`. Each sample has its
+    /// full timestamp.
+    ///
+    /// The call takes the lock of the set one time. A push thus waits for at
+    /// most the copy of `max` samples. [`History::read`] gives the rules and
+    /// the result.
+    pub fn read_history(
+        &self,
+        from: u64,
+        until: u64,
+        max: usize,
+        out: &mut Vec<Sample>,
+    ) -> Option<(u64, usize)> {
+        let set = self.consumers.lock().unwrap();
+        set.history.as_ref()?.read(from, until, max, out)
     }
 
     /// Add a consumer with its own queue.
@@ -357,7 +455,7 @@ impl Fanout {
     /// waits, whatever any consumer is doing.
     pub fn push(&self, s: &Sample) {
         let mut set = self.consumers.lock().unwrap();
-        set.next = set.next.wrapping_add(1);
+        set.record(s);
         set.list.retain(|q| !q.is_closed());
         for q in set.list.iter() {
             q.push(s.clone());
@@ -373,7 +471,9 @@ impl Fanout {
             return;
         }
         let mut set = self.consumers.lock().unwrap();
-        set.next = set.next.wrapping_add(samples.len() as u64);
+        for s in samples {
+            set.record(s);
+        }
         set.list.retain(|q| !q.is_closed());
         for q in set.list.iter() {
             q.push_many(samples);
@@ -723,5 +823,148 @@ mod tests {
         out.clear();
         assert_eq!(b.pop_many_numbered(&mut out, 100, Duration::ZERO), (2, 5));
         assert_eq!(index(&out[0]), 5);
+    }
+
+    /// A chunk as `Outlet::push_chunk` makes it: a timestamp on the first
+    /// sample, and the deduced tag on the others. SPEC.md 9.2.
+    fn chunk(first: i32, len: i32, t: f64) -> Vec<Sample> {
+        (first..first + len)
+            .map(|i| Sample {
+                timestamp: if i == first {
+                    t
+                } else {
+                    labstream_wire::DEDUCED_TIMESTAMP
+                },
+                values: vec![Value::I32(i)],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_history_is_off_until_a_consumer_asks_for_it() {
+        let f = Fanout::with_rate(100.0, HistoryLimits::DEFAULT);
+        let q = f.add(100);
+        f.push_many(&chunk(0, 10, 1.0));
+        assert_eq!(f.history_len(), 0);
+        assert_eq!(f.read_history(0, 10, 256, &mut Vec::new()), None);
+
+        assert!(f.start_history());
+        assert!(f.start_history(), "a second call changes nothing");
+        assert_eq!(
+            f.history_len(),
+            0,
+            "the history holds no sample from before"
+        );
+
+        // The history holds the samples that no consumer gets.
+        f.remove(&q);
+        f.push_many(&chunk(10, 5, 2.0));
+        f.push(&sample(15));
+        assert_eq!(f.history_len(), 6);
+        let mut out = Vec::new();
+        assert_eq!(
+            f.read_history(0, f.next_number(), 256, &mut out),
+            Some((10, 6))
+        );
+        assert_eq!(
+            out.iter().map(index).collect::<Vec<_>>(),
+            (10..16).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn limits_that_turn_the_history_off_keep_it_off() {
+        let f = Fanout::with_rate(100.0, HistoryLimits::OFF);
+        assert!(!f.start_history());
+        f.push(&sample(0));
+        assert_eq!(f.history_len(), 0);
+    }
+
+    #[test]
+    fn the_history_and_the_queues_use_the_same_numbers() {
+        let f = Fanout::with_rate(100.0, HistoryLimits::DEFAULT);
+        f.push_many(&chunk(0, 7, 1.0));
+        f.start_history();
+        let q = f.add(100);
+        f.push_many(&chunk(7, 20, 2.0));
+        let mut live = Vec::new();
+        let (_, first) = q.pop_many_numbered(&mut live, 100, Duration::ZERO);
+        assert_eq!(first, 7);
+        let mut old = Vec::new();
+        assert_eq!(
+            f.read_history(first, u64::MAX / 4, 256, &mut old),
+            Some((7, 20))
+        );
+        let a: Vec<i32> = live.iter().map(index).collect();
+        let b: Vec<i32> = old.iter().map(index).collect();
+        assert_eq!(a, b);
+        // A resend stops below the first number of the new queue, so no
+        // sample goes to the consumer twice.
+        assert_eq!(f.read_history(0, first, 256, &mut Vec::new()), None);
+        let q2 = f.add(100);
+        let n = f.next_number();
+        f.push_many(&chunk(27, 5, 3.0));
+        let mut resent = Vec::new();
+        assert_eq!(f.read_history(10, n, 256, &mut resent), Some((10, 17)));
+        assert_eq!(index(resent.last().unwrap()) as u64, n - 1);
+        let mut live = Vec::new();
+        assert_eq!(q2.pop_many_numbered(&mut live, 100, Duration::ZERO), (5, n));
+    }
+
+    #[test]
+    fn the_history_holds_the_timestamps_that_an_inlet_calculates() {
+        // A rate with no exact binary form, so that each addition rounds.
+        let srate = 300.0;
+        let f = Fanout::with_rate(srate, HistoryLimits::DEFAULT);
+        // Push the first part of a chunk, then start the history in the
+        // middle of the next chunk.
+        let mut pushed = chunk(0, 9, 1.234_567);
+        pushed.extend(chunk(9, 9, 1.5));
+        let second = chunk(18, 9, 2.0);
+        f.push_many(&pushed);
+        f.push_many(&second[..4]);
+        f.start_history();
+        f.push_many(&second[4..]);
+        f.push(&sample(27));
+        pushed.extend(second);
+        pushed.push(sample(27));
+
+        // An inlet with no dropout reads every sample of the connection.
+        let mut inlet = TimestampDeducer::new(srate);
+        let want: Vec<u64> = pushed
+            .iter()
+            .map(|s| inlet.apply(s.timestamp).to_bits())
+            .collect();
+
+        let mut got = Vec::new();
+        assert_eq!(f.read_history(0, 28, 256, &mut got), Some((22, 6)));
+        assert_eq!(got.len(), 6);
+        for s in &got {
+            assert_ne!(s.timestamp, labstream_wire::DEDUCED_TIMESTAMP);
+            let i = index(s) as usize;
+            assert_eq!(s.timestamp.to_bits(), want[i], "sample {i}");
+        }
+    }
+
+    #[test]
+    fn a_read_takes_one_block() {
+        let f = Fanout::with_rate(1000.0, HistoryLimits::DEFAULT);
+        f.start_history();
+        for i in 0..1000 {
+            f.push(&sample(i));
+        }
+        let mut out = Vec::new();
+        let mut from = 0;
+        let mut blocks = 0;
+        while let Some((first, count)) = f.read_history(from, 1000, 256, &mut out) {
+            from = first + count as u64;
+            blocks += 1;
+        }
+        assert_eq!(blocks, 4);
+        assert_eq!(out.len(), 1000);
+        assert_eq!(
+            out.iter().map(index).collect::<Vec<_>>(),
+            (0..1000).collect::<Vec<_>>()
+        );
     }
 }

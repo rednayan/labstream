@@ -17,6 +17,7 @@
 pub mod clock;
 pub mod config;
 pub mod desc;
+pub mod history;
 pub mod info;
 pub mod inlet;
 mod keepalive;

@@ -192,6 +192,13 @@ pub struct Config {
     /// `labstream.Features`. liblsl does not read this key. The value `{}`
     /// turns every feature off. `docs/extensions.md`.
     pub features: Vec<String>,
+    /// The time limit of the `resume` history, in seconds.
+    /// `labstream.ResumeSeconds`. The value 0 turns the history off.
+    /// `docs/extensions.md`, section `resume`.
+    pub resume_seconds: f64,
+    /// The memory limit of the `resume` history, in MiB.
+    /// `labstream.ResumeMemory`.
+    pub resume_memory_mib: f64,
     /// Where the values came from, for a report.
     pub source: String,
 }
@@ -203,6 +210,20 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The limits of the `resume` history from `labstream.ResumeSeconds`
+    /// and `labstream.ResumeMemory`.
+    pub fn history_limits(&self) -> crate::history::HistoryLimits {
+        let bytes = self.resume_memory_mib * (1u64 << 20) as f64;
+        crate::history::HistoryLimits {
+            seconds: self.resume_seconds,
+            bytes: if bytes >= usize::MAX as f64 {
+                usize::MAX
+            } else {
+                bytes as usize
+            },
+        }
+    }
+
     /// Read a configuration out of a file that was already parsed.
     pub fn from_ini(ini: &Ini, source: &str) -> Config {
         // The scope decides which groups a query reaches, and the hop count.
@@ -278,6 +299,8 @@ impl Config {
             session_id: ini.text("lab.SessionID", "default"),
             known_peers: ini.set("lab.KnownPeers", "{}"),
             features: ini.set("labstream.Features", "{seq}"),
+            resume_seconds: ini.float("labstream.ResumeSeconds", 10.0).max(0.0),
+            resume_memory_mib: ini.float("labstream.ResumeMemory", 64.0).max(0.0),
             multicast_addresses: addresses,
             multicast_ttl: ttl,
             watchdog_time_threshold: ini.float("tuning.WatchdogTimeThreshold", 15.0),
@@ -439,6 +462,25 @@ mod tests {
         assert_eq!(c.smoothing_halftime, 90.0);
         assert!(!c.force_default_timestamps);
         assert_eq!(c.use_protocol_version, 110);
+    }
+
+    #[test]
+    fn the_resume_limits_have_defaults_and_a_file_sets_them() {
+        let c = Config::from_ini(&Ini::default(), "test");
+        assert_eq!(c.history_limits(), crate::history::HistoryLimits::DEFAULT);
+        let set =
+            Ini::parse("[labstream]\nResumeSeconds = 2.5\nResumeMemory = 1\n").expect("a file");
+        let limits = Config::from_ini(&set, "test").history_limits();
+        assert_eq!(limits.seconds, 2.5);
+        assert_eq!(limits.bytes, 1 << 20);
+        let off = Ini::parse("[labstream]\nResumeSeconds = 0\n").expect("a file");
+        assert!(!Config::from_ini(&off, "test")
+            .history_limits()
+            .allow_history());
+        let negative = Ini::parse("[labstream]\nResumeMemory = -5\n").expect("a file");
+        assert!(!Config::from_ini(&negative, "test")
+            .history_limits()
+            .allow_history());
     }
 
     #[test]

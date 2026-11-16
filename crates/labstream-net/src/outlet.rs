@@ -151,7 +151,7 @@ impl Outlet {
 
         let shared = Arc::new(Shared {
             info: Mutex::new(info.clone()),
-            fanout: Fanout::new(),
+            fanout: Fanout::with_rate(info.nominal_srate, config::get().history_limits()),
             sync: Mutex::new(SyncSet::default()),
             sync_mode,
             stop: Mutex::new(false),
