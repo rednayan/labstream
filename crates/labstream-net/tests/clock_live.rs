@@ -203,3 +203,49 @@ fn a_deduced_timestamp_is_rebuilt_from_the_rate() {
     }
     println!("rebuilt {got:?}");
 }
+
+#[test]
+fn a_retarget_moves_the_probes_to_another_outlet() {
+    use labstream_net::clock::{self, ClockState};
+    use std::sync::{Arc, Mutex};
+    let make = |name: &str| {
+        let mut i = labstream_net::StreamInfo::new(
+            name,
+            "ClockTest",
+            1,
+            labstream_wire::Format::Float32,
+            100.0,
+        );
+        i.source_id = format!("{name}_src");
+        labstream_net::Outlet::new(i)
+    };
+    let (a, b) = match (make("RetargetA"), make("RetargetB")) {
+        (Ok(a), Ok(b)) => (a, b),
+        _ => {
+            eprintln!("no local network; skipping");
+            return;
+        }
+    };
+    let port = |o: &labstream_net::Outlet| -> std::net::SocketAddr {
+        format!("127.0.0.1:{}", o.info().v4service_port)
+            .parse()
+            .unwrap()
+    };
+    let state = Arc::new(ClockState::default());
+    clock::start(port(&a), Arc::clone(&state), Arc::new(Mutex::new(7)));
+    assert!(
+        state.wait(Duration::from_secs(5)).is_some(),
+        "outlet A answers"
+    );
+
+    state.retarget(port(&b));
+    state.reset_offset();
+    // Only outlet B can answer now. A value proves that the probes moved.
+    drop(a);
+    assert!(
+        state.wait(Duration::from_secs(5)).is_some(),
+        "outlet B answers after the retarget"
+    );
+    state.stop();
+    drop(b);
+}

@@ -751,10 +751,12 @@ fn read_and_recover(
                             // accumulator all describe a process that has
                             // gone. The probes go to the new service port
                             // (`src/time_receiver.cpp:26-33`).
-                            clock.reset_offset();
+                            // The new target goes in first, so that a burst to
+                            // the old target cannot publish after the reset.
                             if let Some(target) = service_endpoint(&fresh) {
                                 clock.retarget(target);
                             }
+                            clock.reset_offset();
                             deducer = labstream_wire::TimestampDeducer::new(fresh.nominal_srate);
                             *conn.info.lock().unwrap() = *fresh;
                             conn.recoveries.fetch_add(1, Ordering::SeqCst);

@@ -16,8 +16,8 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `Outlet::push_samples`, which sends a block with one timestamp for each
   sample.
 - `SampleQueue::push_owned`, which moves a block into a queue with no copy.
-- `ClockState::reset_offset`, `ClockState::retarget`, and
-  `ClockState::is_running`.
+- `ClockState::reset_offset`, `ClockState::retarget`, `ClockState::is_running`,
+  and `clock::FIRST_OFFSET_TIMEOUT`.
 
 ### Fixed
 
