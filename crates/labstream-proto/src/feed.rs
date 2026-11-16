@@ -508,6 +508,45 @@ mod tests {
     }
 
     #[test]
+    fn two_labstream_peers_agree_on_resume_with_a_parameter() {
+        let all = vec![features::SEQ.to_string(), features::RESUME.to_string()];
+        let asked = features::ResumeParam {
+            epoch: 0x9c3e_51a0_d2b7_f4e8,
+            number: 0x1f4a0,
+        };
+        let mut offer = features::offer(&all);
+        offer.extend(features::offer_resume(&all, Some(asked)));
+
+        let p = FeedParams::new("uid-1", Format::Float32);
+        let (mut client, request) = FeedClient::start_with(p, Format::Float32, 2, offer);
+        let block_start = request.iter().position(|&b| b == b'\n').unwrap() + 1;
+        let (headers, _) = parse_block(&request[block_start..]).expect("a block");
+        let srv = ServerStream::new("uid-1", Format::Float32, LITTLE, 1000.0);
+        let req = FeedRequest::from_headers(110, "uid-1", &headers, srv.channel_bytes);
+        let accepted = match negotiate(&req, &srv) {
+            Outcome::Accept(a) => a,
+            Outcome::Refuse(s) => panic!("refused: {}", s.code),
+        };
+
+        // The outlet side: the request survives the header parser, which
+        // converts the line to lowercase.
+        let offered = features::parse(headers.get(features::HEADER_KEY).unwrap());
+        let mut answered = features::answer(&offered, &all);
+        let request = features::resume_request(&offered, &answered, &all);
+        assert_eq!(request, Some(features::ResumeRequest::From(asked)));
+        let given = features::ResumeParam {
+            epoch: asked.epoch,
+            number: 0x20000,
+        };
+        answered.push(given.token());
+
+        let answer = accepted.to_wire_with(110, "uid-1", Some(&answered));
+        client.on_headers(answer.as_bytes()).expect("headers");
+        assert!(features::has(client.features(), features::SEQ, 1));
+        assert_eq!(features::resume_answer(client.features()), Some(given));
+    }
+
+    #[test]
     fn an_outlet_that_allows_nothing_turns_seq_off() {
         let all = vec![features::SEQ.to_string()];
         let c = feature_handshake(features::offer(&all), &[]);
