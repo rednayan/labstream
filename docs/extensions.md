@@ -298,7 +298,8 @@ connection and the start of the next. liblsl has no history for each outlet.
    hold.
 7. A `Value` takes 32 bytes today. At 4000 Hz x 64 channels, one second of
    history takes about 8 MB, so 64 MiB holds about 8 s. The flat sample
-   store of `docs/roadmap.md` (the flat typed API step) decreases this cost by about 8 times.
+   store of `docs/roadmap.md` (the flat typed API step) decreases this cost
+   by about 8 times.
 
 #### The resend
 
@@ -320,7 +321,40 @@ oldest number in the history, and `N` the number that the next push gets.
 6. The queue keeps its size from `Max-Buffer-Length`. If the resend is
    longer than the queue, the queue drops the oldest samples, as in SPEC.md
    8.7. The `seq` record before the next sample shows this drop as a gap.
-7. A resent sample keeps its original timestamp.
+7. A resent sample keeps its original timestamp. The next section gives
+   the rules.
+
+#### The timestamps of a resend
+
+An outlet sends a chunk with one timestamp. Only the first sample of the
+chunk carries timestamp bytes. Each later sample carries the deduced tag
+(SPEC.md 9.2, `chunk_timestamps` in `crates/labstream-net/src/outlet.rs`).
+The inlet calculates a deduced timestamp from the sample before it
+(SPEC.md 8.1). A resend can start in the middle of a chunk. The inlet then
+has no correct sample before the first resent sample.
+
+1. The history holds a full timestamp for each sample. It holds no deduced
+   tag.
+2. The outlet calculates the full timestamp at the push, in the order of
+   the `seq` numbers. It uses `TimestampDeducer` in
+   `crates/labstream-wire/src/lib.rs`. The inlet uses the same code, so the
+   two results are equal bit for bit.
+3. One deducer serves the whole outlet. It starts when the outlet opens, as
+   the `seq` counter does. It also runs before the history starts (history
+   rule 3). Otherwise a history that starts in the middle of a chunk holds
+   wrong timestamps. The cost is one addition for each sample. A blocking
+   outlet has no history and needs no deducer.
+4. Each resent sample carries its full timestamp on the wire (tag 2 of
+   SPEC.md 7.1). A resent sample thus has 8 more bytes than a deduced
+   sample.
+5. The live samples after the resend keep their tags. The first live sample
+   can carry a deduced tag. The inlet calculates its timestamp from the last
+   resent sample, which is correct.
+6. The live path does not change. A connection with no resend carries the
+   same bytes as with `seq/1` only.
+7. A connection that starts in the middle of a chunk gets wrong deduced
+   timestamps until the next chunk starts. liblsl has the same behavior
+   (SPEC.md 8.4). A resend does not have this fault.
 
 The framing does not change. The `seq` record and the sample encoding of
 SPEC.md 7 carry the resend.
@@ -350,10 +384,15 @@ SPEC.md 7 carry the resend.
 6. **The resend rules.** Write a unit test for each case of the resend: `R`
    in the history, `R` below it, `R` above `N`, and an empty history. One
    more test sends a resend that is longer than `Max-Buffer-Length`.
+   One more test starts a resend in the middle of a chunk. Each resent
+   sample must carry tag 2, and each timestamp must be equal bit for bit to
+   the timestamp that an inlet with no dropout calculates.
 7. **A live dropout.** The outlet ends each consumer connection, and pushes
    for 3 s. The inlet must get each sample one time, in order, and
    `Inlet::lost()` must give 0. Run at 512 Hz x 8 channels and at
    4000 Hz x 64 channels. The test must fail with `resume` off.
+   The outlet pushes chunks of more than one sample. A second inlet with no
+   dropout must get the same values and the same timestamps, bit for bit.
    Run the same test on a marker stream with string values and an irregular
    rate.
 8. **A dropout longer than the history.** Set `labstream.ResumeSeconds` to
