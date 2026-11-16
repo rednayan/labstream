@@ -398,10 +398,12 @@ has no correct sample before the first resent sample.
    wrong timestamps. The cost is one addition for each sample. A blocking
    outlet has no history and needs no deducer.
 5. When `resume/1` is on, the connection writes the full timestamp (tag 2
-   of SPEC.md 7.1) for the first sample after a gap in the numbers. The
-   start of the connection, a resend, a drop in the queue, and the change
-   from the history to the queue each count as a gap. Each resent sample
-   also carries its full timestamp.
+   of SPEC.md 7.1) for the first sample of the connection, and for each
+   sample whose number is not one more than the number before it. A drop
+   in the queue, or a sample that leaves the history during a resend,
+   gives such a gap. Each resent sample also carries its full timestamp.
+   The change from the history to the queue is not a gap when no number
+   is missing, because the deduced timestamp is then correct.
 6. Each other sample keeps the tag of its push. A connection with no gap
    carries the same bytes as with `seq/1` only.
 7. Thus a deduced timestamp always follows the sample with the number
