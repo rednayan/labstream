@@ -482,6 +482,7 @@ fn tcp_loop(listener: TcpListener, shared: Arc<Shared>) {
 fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<()> {
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    crate::keepalive::enable(&stream);
 
     // Read the request line first. Only a feed request carries a header block,
     // so a read that waits for the empty line would hang on the other two.
