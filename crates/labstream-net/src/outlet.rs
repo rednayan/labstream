@@ -208,6 +208,13 @@ impl Outlet {
         self.multicast_bound
     }
 
+    /// How many samples the `resume` history holds. Zero when the history
+    /// is off, which is the case until a consumer agrees to `resume/1`.
+    /// `docs/extensions.md`, section `resume`.
+    pub fn history_len(&self) -> usize {
+        self.shared.fanout.history_len()
+    }
+
     /// The number of connected consumers.
     pub fn consumer_count(&self) -> usize {
         if self.shared.sync_mode {
