@@ -30,6 +30,9 @@ The user made these decisions on 2026-11-16:
 9. Step 1 also adds a C function for the `seq` loss count.
 10. `resume/1` carries a random epoch of the outlet, so a new outlet with
     an old `uid` gets no resend.
+11. The default of `labstream.ResumeSeconds` is 30 s, not 10 s. The user
+    decided this on 2026-11-21, after the cut of 10 s in step 0 lost
+    samples with the first default. The memory limit stays at 64 MiB.
 
 ## The map
 
@@ -190,7 +193,11 @@ lossy, or cut link", gives the results.
   of the cut. The gap of about 11.8 s is longer than the default history of
   10 s, so 457 to 960 samples are lost. liblsl loses none, but it waits
   about 13.1 s. With `labstream.ResumeSeconds = 30`, labstream loses none,
-  and waits about 11.9 s. The open questions give the decision.
+  and waits about 11.9 s.
+- After this result, the user set the default of
+  `labstream.ResumeSeconds` to 30 s on 2026-11-21 (decision 11). With the
+  new default, the cut of 10 s loses no sample. `docs/latency.md` gives
+  the runs.
 
 ### Step 1: `resume/1`
 
@@ -519,6 +526,3 @@ example, a shared trigger) measures the error.
   plain UDP.
 - If the relay is a program, a library call, or both.
 - If the loss-aware dejitter is on by default when `seq/1` is on.
-- The default of `labstream.ResumeSeconds`. A cut of 10 s plus the time to
-  connect again does not fit in 10 s. A default of 30 s costs about 3 times
-  the memory: at 512 Hz x 8 channels, about 4.3 MB.

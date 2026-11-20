@@ -193,7 +193,8 @@ pub struct Config {
     /// turns every feature off. `docs/extensions.md`.
     pub features: Vec<String>,
     /// The time limit of the `resume` history, in seconds.
-    /// `labstream.ResumeSeconds`. The value 0 turns the history off.
+    /// `labstream.ResumeSeconds`, 30 s by default. The value 0 turns the
+    /// history off.
     /// `docs/extensions.md`, section `resume`.
     pub resume_seconds: f64,
     /// The memory limit of the `resume` history, in MiB.
@@ -299,7 +300,7 @@ impl Config {
             session_id: ini.text("lab.SessionID", "default"),
             known_peers: ini.set("lab.KnownPeers", "{}"),
             features: ini.set("labstream.Features", "{seq, resume}"),
-            resume_seconds: ini.float("labstream.ResumeSeconds", 10.0).max(0.0),
+            resume_seconds: ini.float("labstream.ResumeSeconds", 30.0).max(0.0),
             resume_memory_mib: ini.float("labstream.ResumeMemory", 64.0).max(0.0),
             multicast_addresses: addresses,
             multicast_ttl: ttl,

@@ -312,7 +312,7 @@ connection and the start of the next. liblsl has no history for each outlet.
 4. Two limits set the size of the history. The outlet removes the oldest
    sample when it reaches a limit:
    - `labstream.ResumeSeconds`: the time of samples at the nominal rate.
-     The default is 10 s. A stream with an irregular rate uses the memory
+     The default is 30 s. A stream with an irregular rate uses the memory
      limit only. The value 0 turns the history off, and the outlet does not
      answer `resume/1`.
    - `labstream.ResumeMemory`: the memory in MiB. The default is 64 MiB.
@@ -323,21 +323,23 @@ connection and the start of the next. liblsl has no history for each outlet.
 6. Each outlet has its own history. A process with 10 outlets that each
    reach the memory limit holds 640 MiB. An application with many outlets
    must set a lower `labstream.ResumeMemory`.
-7. The default of 10 s covers the detection of a half-open connection. On Linux, the
-   keepalive of labstream ends such a connection after 6 s
-   (`crates/labstream-net/src/keepalive.rs:29`). The resolve of a recovery
-   then takes up to 2 s (`find_again` in `crates/labstream-net/src/inlet.rs`).
-   The lossy-link benchmark of `docs/roadmap.md`, step 0, shows the limit.
-   A cut of 10 s, plus about 1.8 s to connect again, gives a gap of about
-   11.8 s, so the default loses the oldest samples of the gap. The default
-   is an open question of the roadmap.
+7. The default of 30 s covers a cut of 10 s. On Linux, the keepalive of
+   labstream ends a half-open connection after 6 s
+   (`crates/labstream-net/src/keepalive.rs:29`). The inlet then tries to
+   connect again until the link works. In the lossy-link benchmark of
+   `docs/roadmap.md`, step 0, a cut of 10 s gave a gap of about 11.8 s. The
+   first default of 10 s lost the oldest samples of that gap, so the user
+   set the default to 30 s on 2026-11-21.
 8. The liblsl watchdog waits 15 s by default (`src/api_config.cpp:303`). A
    dropout that only the watchdog detects is longer than the default
    history. The `seq` count then shows the samples that the history did not
    hold.
 9. At 4000 Hz x 64 channels, one second of history takes about 8 MB, so
-   64 MiB holds about 8 s. The flat sample store of `docs/roadmap.md` (the
-   flat typed API step) decreases this cost by about 8 times.
+   64 MiB holds about 8 s. At this load, the memory limit acts before the
+   time limit. At 512 Hz x 8 channels, 30 s takes about 4.2 MB, and the
+   time limit acts first. The flat sample store of `docs/roadmap.md` (the
+   flat typed API step) decreases the cost of each sample by about 8
+   times.
 
 #### The resend
 

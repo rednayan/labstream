@@ -30,9 +30,13 @@ pub struct HistoryLimits {
 }
 
 impl HistoryLimits {
-    /// The defaults of `docs/extensions.md`: 10 s and 64 MiB.
+    /// The defaults of `docs/extensions.md`: 30 s and 64 MiB.
+    ///
+    /// A cut of 10 s, plus the time to connect again, gave a gap of about
+    /// 11.8 s in the lossy-link benchmark (`docs/roadmap.md`, step 0). A
+    /// default of 10 s lost the oldest samples of that gap.
     pub const DEFAULT: HistoryLimits = HistoryLimits {
-        seconds: 10.0,
+        seconds: 30.0,
         bytes: 64 << 20,
     };
 
@@ -397,6 +401,22 @@ mod tests {
         out.clear();
         assert_eq!(h.read(start - 3, 5, 2, &mut out), Some((start, 2)));
         assert_eq!(numbers(&out), vec![0, 1]);
+    }
+
+    #[test]
+    fn the_default_history_holds_30_s() {
+        assert_eq!(HistoryLimits::DEFAULT.seconds, 30.0);
+        assert_eq!(HistoryLimits::DEFAULT.bytes, 64 << 20);
+        // At 512 Hz x 8 channels, the time limit acts first.
+        let mut h = History::new(HistoryLimits::DEFAULT, 512.0, 0);
+        let s = Sample {
+            timestamp: 1.0,
+            values: vec![Value::F32(0.0); 8],
+        };
+        for _ in 0..40 * 512 {
+            h.push(s.clone());
+        }
+        assert_eq!(h.len(), 30 * 512);
     }
 
     #[test]

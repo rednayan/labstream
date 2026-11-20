@@ -196,11 +196,21 @@ for liblsl and for labstream `main` at `081f7fa`:
   the data arrives about 13.1 s after the start of the cut. No sample is
   lost. labstream closes the connection after about 6 s, and connects again
   about 1.8 s after the end of the cut. The gap is then about 11.8 s,
-  longer than the default history of 10 s. The oldest samples of the gap
-  are lost. With a history of 30 s, nothing is lost, and the longest wait
-  is 11.9 s.
-- **Not explained.** With the default history, the median of the cut of
-  10 s is 0.5 s to 0.9 s. With a history of 30 s, it is 0.2 ms.
+  longer than the first default history of 10 s. The oldest samples of the
+  gap are lost. With a history of 30 s, nothing is lost, and the longest
+  wait is 11.9 s. After this result, the default became 30 s.
+- **Not explained.** With a history of 10 s, the median of the cut of 10 s
+  is 0.5 s to 0.9 s. With a history of 30 s, it is 0.2 ms.
+- **The new default.** A second run of the cut of 10 s, with the default of
+  30 s and no change to the configuration:
+
+  | library | p50 ms | p99 ms | max ms | lost in each run |
+  |---|---|---|---|---|
+  | liblsl | 1310.0 (982.0-1359.4) | 12942.0 (12633.7-12980.2) | 13220.4 | 0, 0, 0 |
+  | labstream | 0.2 (0.2-0.2) | 11593.7 (11554.4-11615.4) | 11855.5 | 0, 0, 0 |
+
+  The median of liblsl moved from about 3.5 s to about 1.3 s between the
+  two runs. Its longest wait stayed at about 13 s.
 
 ## What this benchmark does not measure
 

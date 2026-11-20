@@ -46,7 +46,7 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   A 3 s cut at 512 Hz x 8 channels, at 4000 Hz x 64 channels, or on a
   marker stream loses no sample. The feature needs `seq/1`, and a liblsl
   peer or an older labstream peer gives plain LSL.
-- The configuration keys `labstream.ResumeSeconds` (default 10 s, 0 turns
+- The configuration keys `labstream.ResumeSeconds` (default 30 s, 0 turns
   the history off) and `labstream.ResumeMemory` (default 64 MiB). The
   default of `labstream.Features` is now `{seq, resume}`.
 - `Inlet::resent` in `labstream`, `Inlet::samples_resent` in
