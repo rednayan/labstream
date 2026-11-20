@@ -323,10 +323,14 @@ connection and the start of the next. liblsl has no history for each outlet.
 6. Each outlet has its own history. A process with 10 outlets that each
    reach the memory limit holds 640 MiB. An application with many outlets
    must set a lower `labstream.ResumeMemory`.
-7. The default of 10 s covers a half-open connection. On Linux, the
+7. The default of 10 s covers the detection of a half-open connection. On Linux, the
    keepalive of labstream ends such a connection after 6 s
    (`crates/labstream-net/src/keepalive.rs:29`). The resolve of a recovery
    then takes up to 2 s (`find_again` in `crates/labstream-net/src/inlet.rs`).
+   The lossy-link benchmark of `docs/roadmap.md`, step 0, shows the limit.
+   A cut of 10 s, plus about 1.8 s to connect again, gives a gap of about
+   11.8 s, so the default loses the oldest samples of the gap. The default
+   is an open question of the roadmap.
 8. The liblsl watchdog waits 15 s by default (`src/api_config.cpp:303`). A
    dropout that only the watchdog detects is longer than the default
    history. The `seq` count then shows the samples that the history did not

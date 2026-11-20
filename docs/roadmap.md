@@ -130,6 +130,68 @@ It reports p50, p99, and loss for liblsl and labstream with these rules:
 The cut also gives the time to detect a half-open connection with the
 keepalive of #10.
 
+**The method.** `conformance/oracle/lossylink.py` runs the measurement. It
+needs no root:
+
+1. The script starts itself again in a new user namespace and network
+   namespace (`unshare -Urn`). There it has the rights of root, but only
+   for its own namespaces. The interfaces of the host do not change.
+2. It makes a second network namespace inside the first one, and joins
+   the two with a `veth` pair: `10.77.0.1` for the outlet, and `10.77.0.2`
+   for the inlet.
+3. It puts one `netem` rule on each end of the pair. Each rule applies to
+   the packets that leave that end, so each direction gets the same rule.
+   With a delay of 20 ms, the round trip is thus 40 ms.
+4. It runs `oracle/latency.c` as the outlet in the first namespace, and as
+   the inlet in the second one. Discovery uses `lab.KnownPeers` with the
+   two addresses.
+5. For a cut, it changes both rules to a loss of 100 %, then back. No
+   packet arrives, and no socket closes. This is a half-open connection,
+   as with a Wi-Fi dropout.
+
+**The rules.** Each rule applies in both directions. The load is
+512 Hz x 8 channels with one sample for each push, which fits in
+1 Mbit/s:
+
+| Name | Rule | Run |
+|---|---|---|
+| `clean` | none | 10 s |
+| `delay` | 20 ms delay | 10 s |
+| `loss` | 20 ms delay, 1 % loss | 10 s |
+| `rate` | 1 Mbit/s | 10 s |
+| `cut3` | a cut of 3 s after 5 s | 15 s |
+| `cut10` | a cut of 10 s after 5 s | 25 s |
+
+A cut of 3 s is shorter than the keepalive limit of #10 (6 s on Linux,
+`crates/labstream-net/src/keepalive.rs:29`), so TCP must carry the
+connection through it. The cut of 10 s is longer than that limit and
+shorter than the liblsl watchdog of 15 s. It shows the difference between
+the two libraries.
+
+**The control.** The `delay` rule must add 20 ms to the median, within
+2 ms, for both libraries. If it does not, the instrument is wrong.
+
+**The order.** Each cell runs 3 times. The runs alternate the order of
+the two libraries, because the order can move a result at a low rate.
+
+**The result.** For each rule and each library: p50, p99, the longest
+latency, and the count of lost samples. For the cuts, the longest latency
+is the time that the inlet waited for data. The result is a baseline. No
+rule has a pass value, except the control and step 1 criterion 4.
+
+**Status:** complete on 2026-11-21. `docs/latency.md`, section "A slow,
+lossy, or cut link", gives the results.
+
+- The control passes: 20.0 ms for both libraries.
+- Step 1 criterion 4 passes: the cut of 3 s loses no sample. TCP carries
+  the connection through the cut, so `resume/1` does not act.
+- The cut of 10 s found a fault in the defaults. labstream closes the
+  connection after about 6 s, and connects again about 1.8 s after the end
+  of the cut. The gap of about 11.8 s is longer than the default history of
+  10 s, so 457 to 960 samples are lost. liblsl loses none, but it waits
+  about 13.1 s. With `labstream.ResumeSeconds = 30`, labstream loses none,
+  and waits about 11.9 s. The open questions give the decision.
+
 ### Step 1: `resume/1`
 
 After a lost connection, a liblsl inlet connects again to the same outlet.
@@ -457,3 +519,6 @@ example, a shared trigger) measures the error.
   plain UDP.
 - If the relay is a program, a library call, or both.
 - If the loss-aware dejitter is on by default when `seq/1` is on.
+- The default of `labstream.ResumeSeconds`. A cut of 10 s plus the time to
+  connect again does not fit in 10 s. A default of 30 s costs about 3 times
+  the memory: at 512 Hz x 8 channels, about 4.3 MB.

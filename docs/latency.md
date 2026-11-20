@@ -153,15 +153,63 @@ is the first build. `fixed` is the build with the queues first.
 - **A peer without `resume/1`.** The outlet keeps no history. The rows of
   `seq` against the first build stayed in the range of `seq` against `seq`.
 
+## A slow, lossy, or cut link
+
+`conformance/oracle/lossylink.py` runs the same program over a `veth` pair
+between two network namespaces, with one `netem` rule on each end. It needs
+no root, and it does not change the interfaces of the host.
+`docs/roadmap.md`, step 0, gives the method and the rules. Each rule applies
+in both directions. The load is 512 Hz x 8 channels, one sample for each
+push. Each cell is the median of 3 runs, with the range in brackets. The
+runs alternate the order of the two libraries. The results of 2026-11-21,
+for liblsl and for labstream `main` at `081f7fa`:
+
+| rule | library | p50 ms | p99 ms | max ms | lost in each run |
+|---|---|---|---|---|---|
+| clean | liblsl | 0.1 (0.1-0.1) | 0.3 (0.3-1.3) | 6.0 | 0, 0, 0 |
+| clean | labstream | 0.1 (0.1-0.1) | 0.2 (0.2-0.2) | 2.9 | 0, 0, 0 |
+| delay 20 ms | liblsl | 20.1 (20.1-20.1) | 20.2 (20.2-20.2) | 23.5 | 0, 0, 0 |
+| delay 20 ms | labstream | 20.1 (20.1-20.1) | 20.2 (20.2-20.5) | 30.4 | 0, 0, 0 |
+| delay 20 ms, loss 1 % | liblsl | 22.2 (22.2-22.9) | 71.0 (69.4-71.1) | 117.7 | 0, 0, 0 |
+| delay 20 ms, loss 1 % | labstream | 22.2 (21.6-22.4) | 67.1 (66.2-71.0) | 90.5 | 0, 0, 0 |
+| 1 Mbit/s | liblsl | 1.1 (1.1-1.1) | 1.4 (1.2-1.4) | 1.9 | 0, 0, 0 |
+| 1 Mbit/s | labstream | 0.9 (0.9-0.9) | 1.0 (1.0-1.1) | 1.7 | 0, 0, 0 |
+| cut of 3 s | liblsl | 1.1 (1.1-1.1) | 3061.7 (3011.7-3065.4) | 3179.7 | 0, 0, 0 |
+| cut of 3 s | labstream | 1.0 (0.9-1.0) | 3017.5 (3008.8-3031.5) | 3147.4 | 0, 0, 0 |
+| cut of 10 s | liblsl | 3485.4 (3375.4-3530.0) | 13135.7 (13026.5-13204.8) | 13396.0 | 0, 0, 0 |
+| cut of 10 s | labstream | 715.6 (532.8-895.0) | 9838.8 (9832.1-9844.0) | 10065.3 | 697, 457, 960 |
+| cut of 10 s, `ResumeSeconds = 30` | labstream | 0.2 (0.2-0.4) | 11602.9 (11572.1-11612.4) | 11852.5 | 0, 0, 0 |
+
+- **The control.** The rule of 20 ms adds 20.0 ms to the median of both
+  libraries.
+- **Loss of 1 %.** TCP sends each lost packet again, so no sample is lost.
+  Each lost packet holds back the samples after it. The p99 grows from
+  20 ms to about 70 ms for both libraries.
+- **1 Mbit/s.** The load needs about 0.2 Mbit/s, so it fits. The time to
+  send each packet adds about 1 ms.
+- **The cut of 3 s.** The keepalive limit is 6 s, so no library closes the
+  connection. TCP sends the data again after the cut. No sample is lost,
+  and the longest wait is about 3.1 s. `resume/1` does not act, because the
+  connection does not end.
+- **The cut of 10 s.** liblsl does not see the cut, because its watchdog
+  waits 15 s. TCP waits longer between two attempts after each failure, so
+  the data arrives about 13.1 s after the start of the cut. No sample is
+  lost. labstream closes the connection after about 6 s, and connects again
+  about 1.8 s after the end of the cut. The gap is then about 11.8 s,
+  longer than the default history of 10 s. The oldest samples of the gap
+  are lost. With a history of 30 s, nothing is lost, and the longest wait
+  is 11.9 s.
+- **Not explained.** With the default history, the median of the cut of
+  10 s is 0.5 s to 0.9 s. With a history of 30 s, it is 0.2 ms.
+
 ## What this benchmark does not measure
 
 - **Two machines.** All results come from the loopback interface.
-- **A slow or lossy network.** Do not add a `tc netem` rule to the `lo`
-  interface of a shared machine. The rule delays every program on the machine.
-  Use a network namespace instead. Make two namespaces with a `veth` pair,
-  add the `netem` rule inside one of them, and run the outlet and the inlet in
-  different namespaces. Discovery then needs the namespace addresses in
-  `lab.KnownPeers` of the configuration. This procedure was not run yet.
+- **A real wireless link.** `netem` gives loss and delay with a fixed
+  rule. A Wi-Fi link changes its rate, and loses packets in bursts. Do not
+  add a `tc netem` rule to the `lo` interface of a shared machine, because
+  the rule delays every program on the machine. `lossylink.py` uses its own
+  namespaces instead.
 - **The application.** Phasic and other programs pull in their own loop. Their
   poll interval adds to these numbers.
 - **The first offset and the recovery.** The live tests in

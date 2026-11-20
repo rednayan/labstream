@@ -61,6 +61,9 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `docs/roadmap.md`, the order of the labstream-only features.
 - `conformance/oracle/resumeprobe.py`. It cuts the connection of an inlet
   against outlets of each version.
+- `conformance/oracle/lossylink.py`. It measures the latency over a slow,
+  lossy, or cut link between two network namespaces, with no root.
+  `oracle/latency.c` has a new option `--timeout` for the inlet.
 
 ### Fixed
 

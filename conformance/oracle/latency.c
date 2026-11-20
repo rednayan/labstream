@@ -141,7 +141,7 @@ static int run_outlet(const char *name, int channels, double rate, int chunk, do
 }
 
 static int run_inlet(const char *name, int channels, double rate, double seconds,
-	double warmup) {
+	double warmup, double timeout) {
 	lsl_streaminfo found[1];
 	if (lsl_resolve_byprop(found, 1, "name", name, 1, 20.0) < 1) {
 		fprintf(stderr, "ERROR the stream %s was not found\n", name);
@@ -166,9 +166,9 @@ static int run_inlet(const char *name, int channels, double rate, double seconds
 	double cpu0 = 0, t0 = 0;
 
 	for (;;) {
-		double ts = lsl_pull_sample_f(in, buf, channels, 3.0, &ec);
+		double ts = lsl_pull_sample_f(in, buf, channels, timeout, &ec);
 		double t = now();
-		if (ts == 0.0 || ec) break; /* no sample in 3 s: the outlet is gone */
+		if (ts == 0.0 || ec) break; /* no sample in `timeout`: the outlet is gone */
 		if (got == 0) {
 			cpu0 = cpu_seconds();
 			t0 = t;
@@ -222,6 +222,7 @@ int main(int argc, char **argv) {
 	double seconds = 10.0;
 	double warmup = 1.0;
 	double offset_us = 0.0;
+	double timeout = 3.0;
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "outlet") || !strcmp(argv[i], "inlet")) {
 			role = argv[i];
@@ -238,6 +239,7 @@ int main(int argc, char **argv) {
 		else if (!strcmp(argv[i], "--seconds")) seconds = atof(argv[++i]);
 		else if (!strcmp(argv[i], "--warmup")) warmup = atof(argv[++i]);
 		else if (!strcmp(argv[i], "--offset-us")) offset_us = atof(argv[++i]);
+		else if (!strcmp(argv[i], "--timeout")) timeout = atof(argv[++i]);
 		else {
 			fprintf(stderr, "unknown option %s\n", argv[i]);
 			return 2;
@@ -245,9 +247,9 @@ int main(int argc, char **argv) {
 	}
 	if (!role || channels < 1 || rate <= 0 || chunk < 1 || seconds <= 0) {
 		fprintf(stderr, "usage: latency outlet|inlet [--name N] [--channels C] [--rate R] "
-						"[--chunk K] [--seconds S] [--warmup S] [--offset-us U]\n");
+						"[--chunk K] [--seconds S] [--warmup S] [--offset-us U] [--timeout S]\n");
 		return 2;
 	}
 	if (!strcmp(role, "outlet")) return run_outlet(name, channels, rate, chunk, seconds, offset_us);
-	return run_inlet(name, channels, rate, seconds, warmup);
+	return run_inlet(name, channels, rate, seconds, warmup, timeout);
 }
