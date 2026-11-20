@@ -486,6 +486,53 @@ has no correct sample before the first resent sample.
 14. **Latency and CPU.** Run `latency.py` with `resume` on against the
     `seq` build. The history adds one copy for each push.
 
+#### The status of the conformance plan
+
+The status on the branch `feat/resume`, at `0ab7768`, on 2026-11-20:
+
+1. **Done.** `oracle/headerprobe.py` passes for liblsl, labstream 0.1.2,
+   the `seq` build, and the `resume` build. The `resume` build answers
+   `resume/1` with its own epoch and `seq/1`.
+2. **Partly done.** A unit test shows that the history stays off until a
+   consumer agrees to `resume/1`. No live test with a liblsl inlet reads
+   the size of the history.
+3. **Done.** `oracle/interop.py` with 0.1.2 as the second peer: 28 of 28
+   cells, and 24 of 24 cells with chunks of 16 and in the blocking mode.
+   `oracle/resumeprobe.py` against a 0.1.2 outlet: the inlet loses the
+   dropout, and both counts are unknown.
+4. **Done.** The same interop runs with the `seq` build pass. Against a
+   `seq` outlet, `oracle/resumeprobe.py` shows 1832 missing samples and a
+   loss count of 1832. The resend count is unknown.
+5. **Partly done.** Unit tests cover `{resume}` without `seq`, and the
+   limits with `ResumeSeconds = 0`. No live test runs these
+   configurations.
+6. **Done.** The unit tests in `features.rs`.
+7. **Done, with one change.** The resend does not go through the consumer
+   queue, so `Max-Buffer-Length` does not limit it. The live samples wait
+   in the queue during the resend. A unit test drops samples from that
+   queue, and one more test removes history samples during a resend.
+8. **Done.** The unit tests in `outlet.rs` compare each timestamp bit for
+   bit.
+9. **Done, except the post-processing.** Three live tests in
+   `resume_live.rs` cut the connection for 3 s: 512 Hz x 8 channels,
+   4000 Hz x 64 channels, and a marker stream. With
+   `labstream.Features = {seq}` they fail. The tests compare the raw
+   timestamps, not the timestamps after post-processing.
+10. **Partly done.** A live test shows that an outlet sends nothing again
+    for a different epoch. No live test opens a new outlet with an old
+    `uid` against a running inlet.
+11. **Not done as a live test.** A unit test shows that a resend starts at
+    the oldest sample, and the first record gives the exact gap.
+12. **Not measured.** The resend reads blocks of 256 samples, which is
+    about 0.5 ms of copy for each block.
+13. **Done.** Against liblsl: 28 of 28 cells, 24 of 24 with chunks, and 24
+    of 24 in the blocking mode.
+14. **Done.** The first build added about 80 µs to the median at
+    4000 Hz x 64 channels, chunk 32. The fix gives the queues each sample
+    before the history copy. The latency is now in the range of the `seq`
+    build. The outlet CPU is about 1.5 points higher. `docs/latency.md`
+    gives the runs.
+
 #### Open questions
 
 - The final names of the Rust API and the C API for the resend count.
