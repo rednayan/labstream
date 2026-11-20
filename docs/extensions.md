@@ -1,7 +1,9 @@
 # Proposal: feature negotiation between two labstream peers
 
 **Status:** proposal. The header and the `seq` feature are implemented on
-the branch `feat/seq`. The other features are not implemented. SPEC.md gets
+`main`. The `resume` section is a spec with no code. The
+other features are not implemented. `docs/roadmap.md` gives the order of
+the features. SPEC.md gets
 a section for a feature only after the feature is accepted.
 
 ## The purpose
@@ -78,8 +80,9 @@ A labstream outlet that reads the request header adds one line to its answer:
 Labstream-Features: seq/1
 ```
 
-The answer holds only tokens from the request. For each name, it holds at
-most one version.
+The answer holds only tokens whose name and version come from the request.
+For each name, it holds at most one version. A feature can define a
+parameter for its answer token. The `resume` section gives an example.
 
 ### The rules
 
@@ -126,7 +129,7 @@ negotiation.
 
 ### `seq`: sequence numbers
 
-**Status:** implemented on the branch `feat/seq`
+**Status:** implemented on `main`
 (`crates/labstream-proto/src/seq.rs`). The token is `seq/1`.
 
 #### The purpose
@@ -207,6 +210,339 @@ The inlet keeps the number that it expects next.
   `labstream` report it, as before. The total loss is the sum
   of the two values.
 
+### `resume`: send the samples of a dropout again
+
+**Status:** proposal, not implemented. The token is `resume/1`.
+`docs/roadmap.md` gives the success criterion.
+
+#### The purpose
+
+A connection can end while the outlet stays alive. Examples are a cable
+pull, a Wi-Fi dropout, or a reset of a switch. The inlet then connects again
+to the same outlet. Each sample that the outlet pushed between the two
+connections is lost. `seq` counts this loss. `resume` prevents it.
+
+#### What liblsl does
+
+These facts come from `conformance/liblsl/` at `e651023c`.
+
+1. The outlet makes a new consumer queue for each feed connection, after
+   the headers (`src/tcp_server.cpp:746`).
+2. A new consumer queue is empty. Its constructor registers it with the send
+   buffer (`src/consumer_queue.cpp:10-20`).
+3. A push goes only to the queues that are registered at that time
+   (`src/send_buffer.cpp:20-23`).
+4. The destructor of a consumer queue removes it from the send buffer
+   (`src/consumer_queue.cpp:22-24`).
+
+Thus no queue holds a sample that the outlet pushes between the end of one
+connection and the start of the next. liblsl has no history for each outlet.
+
+#### The scope
+
+1. `resume` covers a lost connection to a live outlet. The outlet has the
+   same `uid` before and after the dropout.
+2. `resume` does not cover a restart of the outlet. A liblsl outlet gets a
+   new `uid` when it starts (`src/tcp_server.cpp:329`). A labstream outlet
+   makes a new `uid` when the description has none
+   (`crates/labstream-net/src/outlet.rs:142-143`).
+3. A feed request with a wrong `uid` gets `404 Not found`
+   (`src/tcp_server.cpp:585-588`). Thus a resume request cannot reach a
+   different outlet.
+4. An application can start a new labstream outlet with an old `uid`. A
+   relay or a replay of a recording can do this. The new outlet has a new
+   epoch, so negotiation rule 8 detects the new run.
+
+#### The rules for the negotiation
+
+1. `resume/1` is on only when `seq/1` is also on for the same connection.
+   The numbers of `seq` identify the samples to send again.
+2. Each outlet makes an epoch when it opens: 64 random bits from the
+   random source of the operating system (`random_bytes` in
+   `crates/labstream-net/src/lib.rs`). The epoch identifies one run of the
+   outlet. A new outlet with an old `uid` gets a new epoch.
+3. The parameter of `resume/1` has two parts with no separator: the epoch
+   in exactly 16 hexadecimal digits, then a sample number in 1 to 16
+   hexadecimal digits. Example: `resume/1=9c3e51a0d2b7f4e81f4a0` gives the
+   epoch `9c3e51a0d2b7f4e8` and the number `1f4a0`. A parameter thus has
+   17 to 32 digits, and the number always fits in 64 bits.
+4. On the first connection, the inlet offers `resume/1` with no parameter.
+5. On a recovery to the same `uid`, the inlet offers
+   `resume/1=<epoch><R>`. The epoch comes from the last answer. `R` is the
+   next number that the `seq` count expects. Example:
+   `Labstream-Features: seq/1 resume/1=9c3e51a0d2b7f4e81f4a0`.
+6. If the inlet has no epoch, or the `seq` count has no expected number, it
+   offers `resume/1` with no parameter. A recovery to a new `uid` also
+   offers no parameter (`seq` count rule 6).
+7. The outlet answers `resume/1=<epoch><N>`. The epoch is its own epoch.
+   `N` is the number of the first live sample of the connection. The
+   answer always holds both parts, also for an offer with no parameter.
+8. If the inlet knows an epoch, and the answer gives a different epoch,
+   the outlet is a new run. The inlet then resets the `seq` count (`seq`
+   count rule 6), the timestamp deducer, and the clock offset, as for a
+   new `uid`. If the inlet knows no epoch, it cannot see a new run, and it
+   keeps its state, as with `seq/1` only. The inlet keeps the epoch of
+   each answer for the next recovery.
+9. The outlet ignores a `resume/1` token with a parameter of fewer than 17
+   or more than 32 digits. If the offer holds more than one `resume/1`
+   token, the outlet ignores all of them. The connection then has no
+   `resume`, and `seq` can stay on.
+10. If the answer holds `resume/1` with no parameter, or with a parameter
+    that rule 3 does not allow, the inlet sets `resume` off for that
+    connection.
+11. A blocking outlet (`transp_sync_blocking`) has no queue and no history.
+    It does not answer `resume/1`.
+12. Today `answer()` in `crates/labstream-proto/src/features.rs` ignores
+    each offered token with a parameter, and the answer copies the offered
+    token. For `resume`, the outlet accepts a parameter, and the answer
+    holds a different parameter. `agreed()` already compares only the name
+    and the version. The other features keep the current rules.
+
+#### The history
+
+1. The outlet keeps one history for the whole outlet, not one history for
+   each connection. The history holds the last samples, with their `seq`
+   numbers, in the order of the pushes.
+2. The history also holds a sample that the outlet pushes with no consumer.
+   The dropout is the time with no consumer.
+3. The outlet starts the history when the first consumer agrees to
+   `resume/1`. Before that point, the history costs nothing. An outlet that
+   serves only liblsl inlets never keeps a history. The history then stays
+   until the outlet closes.
+4. Two limits set the size of the history. The outlet removes the oldest
+   sample when it reaches a limit:
+   - `labstream.ResumeSeconds`: the time of samples at the nominal rate.
+     The default is 10 s. A stream with an irregular rate uses the memory
+     limit only. The value 0 turns the history off, and the outlet does not
+     answer `resume/1`.
+   - `labstream.ResumeMemory`: the memory in MiB. The default is 64 MiB.
+5. The memory of one sample is 16 bytes (the timestamp and the number),
+   plus 32 bytes for each channel (the size of a `Value`), plus the bytes
+   of each string value. Thus a marker stream with long strings reaches
+   the memory limit before the time limit.
+6. Each outlet has its own history. A process with 10 outlets that each
+   reach the memory limit holds 640 MiB. An application with many outlets
+   must set a lower `labstream.ResumeMemory`.
+7. The default of 10 s covers a half-open connection. On Linux, the
+   keepalive of labstream ends such a connection after 6 s
+   (`crates/labstream-net/src/keepalive.rs:29`). The resolve of a recovery
+   then takes up to 2 s (`find_again` in `crates/labstream-net/src/inlet.rs`).
+8. The liblsl watchdog waits 15 s by default (`src/api_config.cpp:303`). A
+   dropout that only the watchdog detects is longer than the default
+   history. The `seq` count then shows the samples that the history did not
+   hold.
+9. At 4000 Hz x 64 channels, one second of history takes about 8 MB, so
+   64 MiB holds about 8 s. The flat sample store of `docs/roadmap.md` (the
+   flat typed API step) decreases this cost by about 8 times.
+
+#### The resend
+
+The outlet reads the epoch and the number `R` from the token. Let `O` be
+the oldest number in the history, and `N` the number that the next push
+gets.
+
+1. The outlet registers the new consumer queue before it writes the answer
+   headers, because the answer holds `N`. The registration is one step
+   under the lock of the fanout. The queue gets each live sample from `N`.
+   liblsl registers the queue later (`src/tcp_server.cpp:746`). A peer
+   cannot see this difference.
+2. If the epoch is the epoch of the outlet, and `O <= R < N`, the
+   connection sends the history samples from `R` to `N - 1`. Then it sends
+   the samples of the queue. If `R = N`, there is nothing to send again.
+3. If `R < O`, the resend starts at `O`. The first `seq` record gives `O`.
+   The inlet counts `O - R` lost samples, by `seq` count rule 2.
+4. If `R > N`, or the epoch is different, or the offer has no parameter,
+   or the history is empty, the outlet sends no history. The first `seq`
+   record gives `N`.
+5. The history holds numbers below `N`, and the queue holds numbers from
+   `N`. Thus no number repeats, and no number below `R` goes to the inlet.
+6. The connection reads the history in blocks of at most 256 samples. It
+   takes the lock of the history once for each block. A push thus waits
+   for at most the copy of one block, not for the whole resend. A copy of
+   one sample at 64 channels took about 1.9 us in a measurement on the
+   branch `perf/quick-wins`. Thus one block takes about 0.5 ms.
+7. The history can remove samples during a resend, because of its limits.
+   If the next number is no longer in the history, the connection
+   continues at the oldest number. The `seq` record before that sample
+   shows the gap.
+8. The queue keeps its size from `Max-Buffer-Length`. The live samples
+   wait in the queue during the resend. If the queue is full, it drops the
+   oldest samples, as in SPEC.md 8.7. The `seq` record before the next
+   sample shows this drop as a gap.
+9. A resent sample keeps its original timestamp. The next section gives
+   the rules.
+
+The framing does not change. The `seq` record and the sample encoding of
+SPEC.md 7 carry the resend.
+
+#### The timestamps of a resend
+
+An outlet sends a chunk with one timestamp. Only the first sample of the
+chunk carries timestamp bytes. Each later sample carries the deduced tag
+(SPEC.md 9.2, `chunk_timestamps` in `crates/labstream-net/src/outlet.rs`).
+The inlet calculates a deduced timestamp from the sample before it
+(SPEC.md 8.1). A resend can start in the middle of a chunk. The inlet then
+has no correct sample before the first resent sample.
+
+1. The history holds a full timestamp for each sample. It holds no deduced
+   tag.
+2. The fanout calculates the full timestamp under its lock, in the order of
+   the `seq` numbers. It uses `TimestampDeducer` in
+   `crates/labstream-wire/src/lib.rs`. The inlet uses the same code, so the
+   two results are equal bit for bit.
+3. Each push path goes through the fanout: `Outlet::push`,
+   `Outlet::push_many`, and the chunk functions of the C API, which make
+   their own deduced tags (`crates/labstream-capi/src/lib.rs:1301`).
+4. One deducer serves the whole outlet. It starts when the outlet opens, as
+   the `seq` counter does. It also runs before the history starts (history
+   rule 3). Otherwise a history that starts in the middle of a chunk holds
+   wrong timestamps. The cost is one addition for each sample. A blocking
+   outlet has no history and needs no deducer.
+5. When `resume/1` is on, the connection writes the full timestamp (tag 2
+   of SPEC.md 7.1) for the first sample of the connection, and for each
+   sample whose number is not one more than the number before it. A drop
+   in the queue, or a sample that leaves the history during a resend,
+   gives such a gap. Each resent sample also carries its full timestamp.
+   The change from the history to the queue is not a gap when no number
+   is missing, because the deduced timestamp is then correct.
+6. Each other sample keeps the tag of its push. A connection with no gap
+   carries the same bytes as with `seq/1` only.
+7. Thus a deduced timestamp always follows the sample with the number
+   before it. A connection with `seq/1` only can start in the middle of a
+   chunk, and then gets wrong deduced timestamps until the next chunk
+   (SPEC.md 8.4). With `resume/1`, this fault does not occur.
+
+#### The clock after a recovery
+
+1. A resend occurs only on a recovery to the same `uid` with the same
+   epoch. On this path, the inlet keeps its clock offset, its
+   post-processor, and its timestamp deducer
+   (`crates/labstream-net/src/inlet.rs:756-771`).
+2. The outlet is the same process, with the same clock. Thus the resent
+   samples get the same clock offset as the live samples.
+3. With the dejitter option, the resent samples close the gap in the
+   count of samples. The count of the dejitter filter then stays correct
+   (`samples_since_t0_++` in `src/time_postprocessor.cpp:119`).
+4. A different epoch resets the clock offset (negotiation rule 8). The
+   resent samples of a new run do not exist, so no resent sample gets the
+   offset of a different process.
+
+#### What the inlet reports
+
+- `Inlet::lost()` counts only the samples that the history did not hold.
+- `Inlet::resent()` in `labstream`, and `Inlet::samples_resent()` in
+  `labstream-net`, give the count of samples that came from a history since
+  the inlet opened. A sample came from the history when its number is
+  below the `N` of the answer.
+- The value is `None` when the current connection does not use `resume`.
+- The C API gets two functions, one for the lost count and one for the
+  resent count. Each returns a signed 64-bit value. The value -1 means
+  `None`. The names follow the names of the Rust API.
+
+#### The conformance plan
+
+1. **liblsl outlet with a parameter.** Extend `oracle/headerprobe.py` to
+   send `seq/1 resume/1=9c3e51a0d2b7f4e81f4a0`. Make sure that the answer
+   and the data bytes are the same as for a request with no header.
+2. **liblsl inlet.** Make sure that a labstream outlet keeps no history when
+   only liblsl inlets connect. A unit test reads the size of the history.
+3. **Released labstream 0.1.2.** Run it as a peer in both directions. Each
+   run must give plain LSL.
+4. **The `seq` build of #12.** Run it as a peer in both directions. It
+   answers `seq/1` and does not answer `resume/1`. Make sure that the inlet
+   counts the loss of a dropout and gets no resend.
+5. **The configuration.** `labstream.Features = {resume}` without `seq`
+   gives no resume, on the inlet and on the outlet.
+   `labstream.ResumeSeconds = 0` gives no answer `resume/1`.
+6. **The syntax.** Unit tests send a parameter of 16 and of 33 digits, an
+   offer with two `resume/1` tokens, and an answer with no parameter. Each
+   case must give a connection with `seq` and no `resume`.
+7. **The resend rules.** Write a unit test for each case of the resend: `R`
+   in the history, `R = N`, `R` below the history, `R` above `N`, a
+   different epoch, and an empty history. One more test sends a resend
+   that is longer than `Max-Buffer-Length`. One more test removes history
+   samples during a resend.
+8. **The timestamps.** A unit test starts a resend in the middle of a
+   chunk. Each resent sample must carry tag 2, and each timestamp must be
+   equal bit for bit to the timestamp that an inlet with no dropout
+   calculates.
+9. **A live dropout.** The outlet ends each consumer connection, and pushes
+   for 3 s. The inlet must get each sample one time, in order, and
+   `Inlet::lost()` must give 0. Run at 512 Hz x 8 channels and at
+   4000 Hz x 64 channels. The test must fail with `resume` off.
+   The outlet pushes chunks of more than one sample. A second inlet with no
+   dropout must get the same values and the same timestamps, bit for bit,
+   with all post-processing options on. Run the same test on a marker
+   stream with string values and an irregular rate.
+10. **A reused `uid`.** Close an outlet, and open a new outlet with the
+    same `uid`. The inlet must get no resend, must reset its `seq` count,
+    and must count no false loss.
+11. **A dropout longer than the history.** Set `labstream.ResumeSeconds`
+    to 1. The loss count must be exact.
+12. **The push delay.** At 4000 Hz x 64 channels, measure the longest push
+    during a resend of 8 s. It must stay below 2 ms.
+13. **The interop matrix.** `oracle/interop.py` must give the same result
+    as before, with `resume` on.
+14. **Latency and CPU.** Run `latency.py` with `resume` on against the
+    `seq` build. The history adds one copy for each push.
+
+#### The status of the conformance plan
+
+The status on the branch `feat/resume`, at `0ab7768`, on 2026-11-20:
+
+1. **Done.** `oracle/headerprobe.py` passes for liblsl, labstream 0.1.2,
+   the `seq` build, and the `resume` build. The `resume` build answers
+   `resume/1` with its own epoch and `seq/1`.
+2. **Partly done.** A unit test shows that the history stays off until a
+   consumer agrees to `resume/1`. No live test with a liblsl inlet reads
+   the size of the history.
+3. **Done.** `oracle/interop.py` with 0.1.2 as the second peer: 28 of 28
+   cells, and 24 of 24 cells with chunks of 16 and in the blocking mode.
+   `oracle/resumeprobe.py` against a 0.1.2 outlet: the inlet loses the
+   dropout, and both counts are unknown.
+4. **Done.** The same interop runs with the `seq` build pass. Against a
+   `seq` outlet, `oracle/resumeprobe.py` shows 1832 missing samples and a
+   loss count of 1832. The resend count is unknown.
+5. **Partly done.** Unit tests cover `{resume}` without `seq`, and the
+   limits with `ResumeSeconds = 0`. No live test runs these
+   configurations.
+6. **Done.** The unit tests in `features.rs`.
+7. **Done, with one change.** The resend does not go through the consumer
+   queue, so `Max-Buffer-Length` does not limit it. The live samples wait
+   in the queue during the resend. A unit test drops samples from that
+   queue, and one more test removes history samples during a resend.
+8. **Done.** The unit tests in `outlet.rs` compare each timestamp bit for
+   bit.
+9. **Done, except the post-processing.** Three live tests in
+   `resume_live.rs` cut the connection for 3 s: 512 Hz x 8 channels,
+   4000 Hz x 64 channels, and a marker stream. With
+   `labstream.Features = {seq}` they fail. The tests compare the raw
+   timestamps, not the timestamps after post-processing.
+10. **Partly done.** A live test shows that an outlet sends nothing again
+    for a different epoch. No live test opens a new outlet with an old
+    `uid` against a running inlet.
+11. **Not done as a live test.** A unit test shows that a resend starts at
+    the oldest sample, and the first record gives the exact gap.
+12. **Not measured.** The resend reads blocks of 256 samples, which is
+    about 0.5 ms of copy for each block.
+13. **Done.** Against liblsl: 28 of 28 cells, 24 of 24 with chunks, and 24
+    of 24 in the blocking mode.
+14. **Done.** The first build added about 80 µs to the median at
+    4000 Hz x 64 channels, chunk 32. The fix gives the queues each sample
+    before the history copy. The latency is now in the range of the `seq`
+    build. The outlet CPU is about 1.5 points higher. `docs/latency.md`
+    gives the runs.
+
+#### Open questions
+
+- The final names of the Rust API and the C API for the resend count.
+- An API that marks each resent sample. Version 1 gives a count only. The
+  health API step of `docs/roadmap.md` can add gap positions and resend
+  positions.
+- A request for the history on the first connection. A new viewer can then
+  show the last seconds at once. Version 1 sends a history only after a
+  recovery.
+
 ### `shm`: shared memory on one machine
 
 The hostname does not prove that the two processes share a machine. Two
@@ -255,7 +591,7 @@ the stored data, and it does not describe one connection.
 
 ## The conformance plan
 
-Each item gives its status on the branch `feat/seq`.
+Each item gives its status on `main`.
 
 1. **liblsl outlet, raw request.** Send a feed request with the header to the
    oracle outlet. Make sure that the answer and the data bytes are the same
