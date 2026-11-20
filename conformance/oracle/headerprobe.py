@@ -47,7 +47,17 @@ BASE_HEADERS = [
     "Source-Id: ",
     "Session-Id: default",
 ]
-EXTRA = "Labstream-Features: seq/1 shm/1=0a1b2c"
+# `resume/1` carries a parameter: an epoch in 16 hexadecimal digits, then a
+# sample number. This epoch belongs to no outlet, so a labstream outlet
+# answers with its own epoch and sends nothing again. `docs/extensions.md`,
+# section `resume`.
+EXTRA = "Labstream-Features: seq/1 resume/1=9c3e51a0d2b7f4e81f4a0 shm/1=0a1b2c"
+RESUME_PARAM = re.compile(r"[0-9a-f]{17,32}")
+
+
+def name_version(token: str) -> str:
+    """The name and the version of a token, with no parameter."""
+    return token.split("=", 1)[0]
 
 
 def build(lib_dir: Path, out: Path) -> None:
@@ -128,7 +138,15 @@ def probe(name: str, lib_dir: Path, work: Path) -> bool:
     answered = set(feature_lines[0].split(":", 1)[1].split()) if feature_lines else set()
     heads_same = plain_head == rest
     pattern_same = plain_pattern == with_pattern
-    answer_ok = len(feature_lines) <= 1 and answered <= offered
+    # The answer holds only offered names and versions. A `resume/1` answer
+    # has its own parameter, and it needs `seq/1`.
+    answer_ok = (len(feature_lines) <= 1
+                 and {name_version(t) for t in answered} <= {name_version(t) for t in offered})
+    for t in answered:
+        if name_version(t) == "resume/1":
+            param = t.partition("=")[2]
+            answer_ok = answer_ok and bool(RESUME_PARAM.fullmatch(param)) and "seq/1" in answered
+            answer_ok = answer_ok and param[:16] != "9c3e51a0d2b7f4e8"
     # A sample starts with tag 1 or 2 (SPEC.md 7.1). With seq/1 on, the data
     # starts with a numbering record, tag 0xFE. `docs/extensions.md`.
     plain_data_ok = plain_first in (1, 2)
