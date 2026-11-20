@@ -33,6 +33,15 @@ The user made these decisions on 2026-11-16:
 11. The default of `labstream.ResumeSeconds` is 30 s, not 10 s. The user
     decided this on 2026-11-21, after the cut of 10 s in step 0 lost
     samples with the first default. The memory limit stays at 64 MiB.
+12. Step 5 uses plain UDP, not QUIC. The token is `dgram/1`. The user
+    decided this on 2026-11-21. QUIC is UDP with encryption, a protocol
+    stack in user space, and an async runtime, so it cannot give a lower
+    latency than plain UDP. Its congestion control reads random Wi-Fi loss
+    as congestion and decreases the rate, which increases the p99 in the
+    case of 1 % loss. The repair of a lost sample is the work of labstream
+    with both. QUIC also needs Rust 1.85 and tokio (quinn 0.11), and
+    labstream supports Rust 1.75 with threads. The user accepted that cost
+    only for better performance, which QUIC cannot give here.
 
 ## The map
 
@@ -295,6 +304,9 @@ transport is negotiated, as `shm` is.
 latency is less than half the p99 of TCP. After the resend, `Inlet::lost()`
 gives 0.
 
+The transport is plain UDP (decision 12). The spec is `docs/extensions.md`,
+section `dgram`, which gives the criterion in detail.
+
 ### Step 6: channel and rate selection
 
 A liblsl outlet sends each channel at the full rate to each inlet. A viewer
@@ -522,7 +534,10 @@ example, a shared trigger) measures the error.
 
 - A new inlet can ask for the last seconds of the history when it opens.
   See `docs/extensions.md`, section `resume`, open questions.
-- The final name of the datagram transport token, and if it uses QUIC or
-  plain UDP.
+- Connection migration for wireless headsets. QUIC keeps a connection
+  when the address of a peer changes, for example when a laptop moves to a
+  different access point. `dgram/1` does not, and the TCP connection ends.
+  `resume/1` then fills the gap. A later version can add a migration of
+  its own, if a test with a real headset shows the need.
 - If the relay is a program, a library call, or both.
 - If the loss-aware dejitter is on by default when `seq/1` is on.
