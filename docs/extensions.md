@@ -97,7 +97,8 @@ parameter for its answer token. The `resume` section gives an example.
    outlet and an older labstream outlet give this result.
 7. The configuration key `labstream.Features` lists the features that this
    process can use, for example `{seq}`. The default lists every feature that
-   the library has. An inlet offers only the listed features, and an outlet
+   the library has, except a feature that its section names as off by
+   default (`dgram`). An inlet offers only the listed features, and an outlet
    answers only the listed features. The value `{}` turns every feature off.
    liblsl does not read this key.
 
@@ -609,11 +610,18 @@ These facts come from `conformance/liblsl/` at `e651023c`.
 #### The rules for the negotiation
 
 1. The inlet offers `dgram/1` with no parameter.
-2. The outlet answers `dgram/1` only if the answer also holds `seq/1` and
-   `resume/1`, and the outlet is not a blocking outlet. Otherwise it leaves
-   `dgram/1` out.
+2. The outlet answers `dgram/1` only if all of these are true. Otherwise it
+   leaves `dgram/1` out.
+   - The answer also holds `seq/1` and `resume/1`.
+   - The outlet is not a blocking outlet.
+   - The format is a string, or one sample takes at most 400 bytes. A
+     datagram then holds at least 3 samples, so the copies can work. A
+     stream with larger samples gets no gain from `dgram`, and stays on
+     TCP.
 3. The outlet opens one UDP socket for each connection. The socket uses
-   the address family of the TCP connection.
+   the address family of the TCP connection. Its port is in the range of
+   `ports.BasePort` and `ports.PortRange`, as the data port is, so that a
+   firewall rule for LSL covers it.
 4. The outlet answers `dgram/1=<port><cookie>`. The port is the UDP port of
    the outlet, in exactly 4 hexadecimal digits. The cookie is 64 random
    bits, in exactly 16 hexadecimal digits. Example:
@@ -685,6 +693,23 @@ u16 count    little-endian, the count of samples in the datagram
 5. The inlet ignores a datagram with a wrong cookie, or from an address
    that is not the address of the outlet.
 
+#### The idle datagram
+
+A loss shows at the inlet only when a later datagram arrives. On a marker
+stream, the next marker can come minutes later. An idle datagram gives the
+inlet the next number when no sample follows:
+
+```
+u8  type     3 (idle)
+u64 cookie   little-endian, from the answer
+u64 next     little-endian, the number that the next sample will get
+```
+
+1. While no sample follows, the outlet sends an idle datagram each 1 s.
+   These datagrams also keep the state of a NAT or a firewall open.
+2. When `next` is above the last number that the inlet has, the inlet has
+   a gap, and the resend rules apply.
+
 #### The copies
 
 1. The outlet first puts the new samples of a push into datagrams.
@@ -692,13 +717,18 @@ u16 count    little-endian, the count of samples in the datagram
    just before the new samples, newest first, so that the samples stay
    consecutive. Each sample goes into at most 3 datagrams: once as new,
    and as a copy in at most 2 later datagrams.
-3. Example: at 512 Hz x 8 channels of `float32`, a sample takes 41 bytes. A
-   datagram with one new sample has room for its 2 copies, so one lost
-   datagram costs no sample. The next datagram, about 2 ms later, carries
-   it.
-4. At 4000 Hz x 64 channels with chunks of 32, a sample takes 265 bytes,
-   and 4 samples fill a datagram. The new samples fill most datagrams, so
-   the copies are few. A lost datagram then needs a resend.
+3. If the outlet sends no data datagram for 5 ms after a data datagram, it
+   sends one repeat datagram: copies of the last samples, with no new
+   sample. A push of a chunk, and the last marker before a quiet time,
+   thus get their copies after 5 ms, not at the next push.
+4. Example: at 512 Hz x 8 channels of `float32`, a sample takes 41 bytes.
+   With one sample for each push, the next datagram comes about 2 ms later
+   and carries the copies. With chunks of 16, the repeat datagram carries
+   them after 5 ms.
+5. At 4000 Hz x 64 channels with chunks of 32, a sample takes 265 bytes,
+   and 4 samples fill a datagram. The new samples fill most datagrams, and
+   the repeat datagram holds only the last 4 samples. A lost datagram then
+   often needs a resend.
 
 #### The resend
 
@@ -706,7 +736,7 @@ u16 count    little-endian, the count of samples in the datagram
    application each sample in the order of the numbers, as with TCP.
 2. A sample above `E` waits in a buffer. A copy of a sample that the inlet
    already has goes away.
-3. If a gap at `E` stays for 2 datagram periods, or for 5 ms if that is
+3. If a gap at `E` stays for 2 datagram periods, or for 10 ms if that is
    longer, the inlet asks for the gap on TCP:
 
    ```
@@ -718,22 +748,60 @@ u16 count    little-endian, the count of samples in the datagram
 4. The outlet sends the samples of a request from the `resume` history on
    TCP, with their `seq` records, as for a resend after a recovery.
 5. If the history no longer holds a sample, the outlet sends the next one
-   that it holds. The `seq` record then shows the gap, and the inlet counts
-   the loss, by `seq` count rule 2.
+   that it holds. The inlet counts the samples between as lost.
 6. The inlet gives up a gap after 2 round trips with no answer, or after
    500 ms if that is longer. It counts the gap as lost, and gives the
    samples after it. A sample of the gap that arrives later goes away.
 
+#### The count on two paths
+
+The `seq` rules count one ordered byte stream. With `dgram`, samples
+arrive on two paths, and a TCP resend can carry a number below the numbers
+that UDP already gave.
+
+1. The inlet merges the two paths by number, before the count. The `seq`
+   count rules then apply to the merged stream: each sample that the inlet
+   gives to the application moves `E` by one.
+2. A `seq` record on TCP gives the number of the next sample on TCP only.
+   It does not move `E`, and it counts no loss by itself.
+3. A loss counts only in two cases: resend rule 5, and resend rule 6.
+   `Inlet::lost()` is thus the count of the numbers that the inlet never
+   gave.
+
 #### The fallback to TCP
 
-The outlet changes the connection back to TCP with a path record
-`path = 0` in these cases:
+A cut stops both paths, and a burst of Wi-Fi loss stops UDP for some
+milliseconds. Neither is a reason to leave UDP. A fallback is only for a
+UDP path that stays bad while data still arrives, or that stops while TCP
+works.
 
-1. The inlet asks for more than 5 % of the samples of the last second.
-2. The outlet cannot send a datagram (an error of the socket).
-3. A sample does not fit in one datagram 10 times in one second.
+1. **Heavy loss.** The inlet measures the loss after the copies: the
+   samples that it had to ask for, in each window of 1 s. A window counts
+   only if at least 10 datagrams arrived in it. If 3 windows in a row show
+   more than 5 %, the inlet writes a path request on TCP:
 
-After a fallback, the connection stays on TCP. A recovery negotiates again.
+   ```
+   u8  tag      0xFB
+   u8  path     0 (TCP)
+   u64 from     little-endian, the number that the inlet expects next
+   ```
+
+   The outlet then writes a path record `path = 0` with the number `from`,
+   and sends the samples from `from` on TCP, from the history and then
+   live.
+2. **A dead UDP path.** On the UDP path, the outlet sends a datagram at
+   least each 1 s (the idle rule). If no datagram arrives for 3 s while
+   TCP still works, the inlet writes the same path request.
+3. **An error of the socket.** If the outlet cannot send a datagram, it
+   writes a path record `path = 0` itself.
+4. **The way back.** 30 s after a fallback, the outlet tries UDP again: it
+   writes a path record `path = 1` and sends on UDP. The address of the
+   inlet stays the address of the accepted hello. If the path is still
+   bad, rule 1 or 2 gives the next fallback.
+
+With 3 copies, a raw loss of 30 % leaves about 0.3^3, that is 2.7 %, of the
+samples to ask for. Such a link thus stays on UDP. A raw loss of 50 %
+leaves about 12.5 %, and gives a fallback.
 
 #### What the inlet reports
 
@@ -749,17 +817,21 @@ After a fallback, the connection stays on TCP. A recovery negotiates again.
    the offer: liblsl, 0.1.2, the `seq` build, and the `resume` build answer
    no `dgram/1`, and nothing else changes.
 2. **The negotiation.** Unit tests: `dgram/1` without `seq/1` or
-   `resume/1`, a parameter of a wrong length, an offer with a parameter,
-   and a blocking outlet. Each gives a connection with no `dgram`.
+   `resume/1`, a parameter of a wrong length, an offer with a parameter, a
+   blocking outlet, and a stream with samples of more than 400 bytes. Each
+   gives a connection with no `dgram`. A live test: the UDP port is in the
+   range of `ports.BasePort` and `ports.PortRange`.
 3. **The encoding.** Unit tests: a data datagram reads back, a cut datagram
    is an error, and a datagram never has more than 1200 bytes.
 4. **The copies.** Unit tests: each sample goes into at most 3 datagrams,
    the samples of each datagram are consecutive, and one lost datagram of
    a 512 Hz x 8 channel stream costs no sample.
-5. **The order at the inlet.** Unit tests with each pattern of loss,
-   repeat, and reorder: the inlet gives each sample once, in order. A gap
-   past the time limit counts as lost, and a late sample of that gap goes
-   away.
+5. **The order and the count at the inlet.** Unit tests with each pattern
+   of loss, repeat, and reorder on UDP, mixed with resends on TCP: the
+   inlet gives each sample once, in order, and `Inlet::lost()` counts only
+   the numbers that it never gave. A gap past the time limit counts as
+   lost, and a late sample of that gap goes away. An idle datagram after a
+   lost last datagram starts a resend.
 6. **The hello.** Live tests: a wrong cookie gets no data. A hello from a
    different address gets no data. With no hello, the connection stays on
    TCP after 1 s, and loses no sample.
@@ -768,14 +840,25 @@ After a fallback, the connection stays on TCP. A recovery negotiates again.
 8. **Large samples.** A live test with string samples of 2000 bytes, mixed
    with small ones. The large ones go on TCP, and each sample arrives
    once, in order.
-9. **The fallback.** In the lossy-link benchmark, a loss of 30 % changes
-   the connection back to TCP, and `Inlet::lost()` gives 0.
-10. **The success criterion.** `oracle/lossylink.py` with `dgram/1` on:
-    - with 20 ms delay and 1 % loss, the p99 is less than 35 ms, and no
-      sample is lost,
-    - the rules `clean`, `delay`, and `rate` give a p99 no worse than TCP,
-      outside the range of the runs,
-    - the cut of 10 s loses no sample, and the longest wait is no longer
+9. **The fallback.** In the lossy-link benchmark:
+    - a loss of 30 % keeps the connection on UDP, with no lost sample,
+    - a loss of 50 % changes the connection to TCP, with no lost sample,
+    - 30 s later the connection tries UDP again,
+    - a UDP path that stops while TCP works (a rule that drops only UDP)
+      changes the connection to TCP within 4 s, with no lost sample.
+10. **The success criterion.** `oracle/lossylink.py` with `dgram/1` on.
+    The script needs options for the load and for a marker stream first.
+    - At 512 Hz x 8 channels, chunk 1, with 20 ms delay and 1 % loss: the
+      p99 is less than 35 ms, and no sample is lost.
+    - The same with chunks of 16, and on a marker stream with 200 markers
+      each second: the p99 is less than 35 ms, and no sample is lost.
+    - At 4000 Hz x 64 channels, chunk 32, with 20 ms delay and 1 % loss:
+      the p99 is no worse than with TCP, and no sample is lost.
+    - The rules `clean`, `delay`, and `rate` give a p99 no worse than TCP,
+      outside the range of the runs.
+    - The cut of 3 s loses no sample, and the connection is still on UDP
+      after the cut.
+    - The cut of 10 s loses no sample, and the longest wait is no longer
       than with TCP (about 11.9 s).
 11. **The interop matrix.** `oracle/interop.py` gives the same result as
     before, with `dgram` on.
