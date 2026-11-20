@@ -537,11 +537,14 @@ impl Fanout {
     /// waits, whatever any consumer is doing.
     pub fn push(&self, s: &Sample) {
         let mut set = self.consumers.lock().unwrap();
-        set.record(s);
+        // The consumers get the sample first, so that the copy into the
+        // history does not delay them. The lock holds both steps, so a new
+        // queue and the history still agree on each number.
         set.list.retain(|q| !q.is_closed());
         for q in set.list.iter() {
             q.push(s.clone());
         }
+        set.record(s);
     }
 
     /// Give several samples to every consumer, with one lock for the set.
@@ -553,12 +556,13 @@ impl Fanout {
             return;
         }
         let mut set = self.consumers.lock().unwrap();
-        for s in samples {
-            set.record(s);
-        }
+        // The consumers first, as in [`Fanout::push`].
         set.list.retain(|q| !q.is_closed());
         for q in set.list.iter() {
             q.push_many(samples);
+        }
+        for s in samples {
+            set.record(s);
         }
     }
 

@@ -122,6 +122,37 @@ or the CPU at 4000 Hz x 64 channels:
 | quick -> quick | 4000 Hz x 64, chunk 32 | 356 (348-366) | 711 (677-712) | 3.3 | 2.4 |
 | seq -> seq | 4000 Hz x 64, chunk 32 | 350 (332-352) | 648 (609-654) | 3.2 | 2.3 |
 
+## The cost of `resume/1`
+
+On the branch `feat/resume`, the outlet keeps a history when an inlet agrees
+to `resume/1`. Each push then copies each sample into the history. The
+first build copied the samples before it gave them to the consumer queues.
+At 4000 Hz x 64 channels, chunk 32, the median then grew from about 260 µs
+to about 340 µs, in both orders of the runs.
+
+The build that this page describes gives the samples to the queues first,
+then copies them into the history, under the same lock. The rows below come
+from two runs, one in each order. `seq` is `main` with `seq/1` only. `resume`
+is the first build. `fixed` is the build with the queues first.
+
+| outlet -> inlet | load | p50 µs | p99 µs | CPU outlet % | CPU inlet % |
+|---|---|---|---|---|---|
+| seq -> seq | 4000 Hz x 64, chunk 32 | 240 (216-268), 278 (278-293) | 580, 645 | 2.4, 2.8 | 1.9, 2.1 |
+| resume -> resume | 4000 Hz x 64, chunk 32 | 326 (324-352), 357 (350-366) | 661, 707 | 3.4, 3.8 | 2.0, 2.0 |
+| fixed -> fixed | 4000 Hz x 64, chunk 32 | 261 (249-281), 276 (274-294) | 609, 610 | 3.9, 4.3 | 1.9, 2.1 |
+| seq -> seq | 4000 Hz x 64, chunk 1 | 76 (75-78), 73 (72-77) | 114, 111 | 21.4, 20.4 | 18.4, 17.6 |
+| fixed -> fixed | 4000 Hz x 64, chunk 1 | 74 (70-76), 74 (70-76) | 109, 108 | 22.1, 21.1 | 17.4, 18.0 |
+
+- **Latency.** With the queues first, the latency of `fixed` stays in the
+  range of `seq`.
+- **CPU.** The copy into the history still costs the outlet about 1.5
+  points of one core at chunk 32, and about 0.7 points at chunk 1. One copy
+  of a sample at 64 channels takes about 1.9 µs. The flat typed API with
+  shared samples (`docs/roadmap.md`, step 8) removes this copy.
+- **512 Hz x 8 channels.** No difference stayed after a change of order.
+- **A peer without `resume/1`.** The outlet keeps no history. The rows of
+  `seq` against the first build stayed in the range of `seq` against `seq`.
+
 ## What this benchmark does not measure
 
 - **Two machines.** All results come from the loopback interface.
