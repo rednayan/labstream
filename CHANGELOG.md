@@ -25,9 +25,9 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `conformance/oracle/latency.c`. They measure the time from a push to a pull,
   and the CPU of each side, for liblsl and labstream.
 - `docs/extensions.md`, a proposal for a feature header between two labstream
-  peers. Nothing in it is implemented.
-- `conformance/oracle/headerprobe.py`. It makes sure that an outlet ignores
-  the proposed header.
+  peers, with the `seq` and `resume` features.
+- `conformance/oracle/headerprobe.py`. It makes sure that the header changes
+  nothing else on an outlet, also with a `resume/1` parameter.
 - `docs/repository.md`. It gives the layout of the repository, how the
   workspace joins the crates, the daily commands, CI, and the dependency
   updates.
@@ -40,6 +40,27 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `ClockState::reset_offset`, `ClockState::retarget`, `ClockState::is_running`,
   and `clock::FIRST_OFFSET_TIMEOUT`.
 - `clock::FIRST_PROBE_INTERVAL` and `clock::FIRST_RETRY`.
+- The `resume/1` feature between two labstream peers (`docs/extensions.md`,
+  section `resume`). After a lost connection, the outlet sends the samples
+  of the dropout again from a history, with their original timestamps.
+  A 3 s cut at 512 Hz x 8 channels, at 4000 Hz x 64 channels, or on a
+  marker stream loses no sample. The feature needs `seq/1`, and a liblsl
+  peer or an older labstream peer gives plain LSL.
+- The configuration keys `labstream.ResumeSeconds` (default 10 s, 0 turns
+  the history off) and `labstream.ResumeMemory` (default 64 MiB). The
+  default of `labstream.Features` is now `{seq, resume}`.
+- `Inlet::resent` in `labstream`, `Inlet::samples_resent` in
+  `labstream-net`, and `Outlet::history_len` in `labstream-net`.
+- Two C functions that liblsl does not have: `labstream_samples_lost` and
+  `labstream_samples_resent`. Each returns -1 when the count is unknown.
+- `labstream_proto::features::{ResumeParam, ResumeRequest, offer_resume,
+  resume_request, resume_answer}`, `labstream_net::history`,
+  `Fanout::with_rate`, `Fanout::start_history`, `Fanout::read_history`,
+  `Fanout::add_resumable`, `SampleQueue::with_deducer` and
+  `SampleQueue::pop_many_full`.
+- `docs/roadmap.md`, the order of the labstream-only features.
+- `conformance/oracle/resumeprobe.py`. It cuts the connection of an inlet
+  against outlets of each version.
 
 ### Fixed
 

@@ -1,7 +1,7 @@
 # Roadmap: features that liblsl does not have
 
-**Status:** approved by the user on 2026-11-16. Nothing on this page is
-implemented, except the items that give a pull request.
+**Status:** approved by the user on 2026-11-16. The gate and step 1 are
+complete. The other steps are not implemented.
 
 This page gives the order of the labstream-only features, the success
 criterion of each feature, and the dependencies. Each feature follows the
@@ -153,6 +153,16 @@ inlet gives.
    The CPU of the outlet increases by not more than the cost of one consumer.
 
 The spec is `docs/extensions.md`, section `resume`.
+
+**Status:** complete on 2026-11-20, and merged into `main`.
+
+- Criteria 1, 2, and 3 pass as live tests in `crates/labstream-net/tests/`.
+- Criterion 4 waits for step 0.
+- Criterion 5: the latency stays in the range of the `seq` build. The
+  outlet CPU is about 1.5 points of one core higher at 4000 Hz x 64
+  channels, chunk 32, because of the copy into the history. The cost of
+  one more consumer was not measured, so this part of the criterion is not
+  shown. Step 8 removes the copy. `docs/latency.md` gives the runs.
 
 ### Step 2: loss-aware dejitter
 
@@ -422,10 +432,11 @@ example, a shared trigger) measures the error.
 
 ## Where the work sits
 
-- This page and the `resume` spec are on the local branch `local/roadmap`.
-  They do not go to a remote.
-- The gate is complete. `main` holds #9 to #12. The development remote is
-  Forgejo, until GitHub CI works again.
+- This page and `docs/extensions.md` are on `main`, together with the code
+  that they describe.
+- The gate is complete. `main` holds #9 to #12, and step 1.
+- The development remote is Forgejo, until GitHub CI works again. GitHub
+  does not have these commits yet.
 - Each feature branch starts from `main`.
 
 ## The process for each feature

@@ -1,10 +1,9 @@
 # Proposal: feature negotiation between two labstream peers
 
-**Status:** proposal. The header and the `seq` feature are implemented on
-`main`. The `resume` section is a spec with no code. The
-other features are not implemented. `docs/roadmap.md` gives the order of
-the features. SPEC.md gets
-a section for a feature only after the feature is accepted.
+**Status:** proposal. The header, the `seq` feature, and the `resume`
+feature are implemented on `main`. The other features are not implemented.
+`docs/roadmap.md` gives the order of the features. SPEC.md gets a section
+for a feature only after the feature is accepted.
 
 ## The purpose
 
@@ -212,8 +211,9 @@ The inlet keeps the number that it expects next.
 
 ### `resume`: send the samples of a dropout again
 
-**Status:** proposal, not implemented. The token is `resume/1`.
-`docs/roadmap.md` gives the success criterion.
+**Status:** implemented on `main`. The token is `resume/1`. It is on by
+default: `labstream.Features` is `{seq, resume}`. `docs/roadmap.md` gives
+the success criterion.
 
 #### The purpose
 
@@ -488,14 +488,17 @@ has no correct sample before the first resent sample.
 
 #### The status of the conformance plan
 
-The status on the branch `feat/resume`, at `0ab7768`, on 2026-11-20:
+The status on 2026-11-20, at the merge of `feat/resume` into `main`. The
+live tests are in `crates/labstream-net/tests/`, in the files that start
+with `resume_`.
 
 1. **Done.** `oracle/headerprobe.py` passes for liblsl, labstream 0.1.2,
    the `seq` build, and the `resume` build. The `resume` build answers
-   `resume/1` with its own epoch and `seq/1`.
-2. **Partly done.** A unit test shows that the history stays off until a
-   consumer agrees to `resume/1`. No live test with a liblsl inlet reads
-   the size of the history.
+   `resume/1` with its own epoch and `seq/1`. Run the probe without
+   `LD_LIBRARY_PATH`. Otherwise each probe program loads liblsl.
+2. **Done.** `a_plain_request_starts_no_history`: a request with no header,
+   which is the request of liblsl, and an offer of `seq/1` only, start no
+   history. An offer of `resume/1` starts it.
 3. **Done.** `oracle/interop.py` with 0.1.2 as the second peer: 28 of 28
    cells, and 24 of 24 cells with chunks of 16 and in the blocking mode.
    `oracle/resumeprobe.py` against a 0.1.2 outlet: the inlet loses the
@@ -503,9 +506,9 @@ The status on the branch `feat/resume`, at `0ab7768`, on 2026-11-20:
 4. **Done.** The same interop runs with the `seq` build pass. Against a
    `seq` outlet, `oracle/resumeprobe.py` shows 1832 missing samples and a
    loss count of 1832. The resend count is unknown.
-5. **Partly done.** Unit tests cover `{resume}` without `seq`, and the
-   limits with `ResumeSeconds = 0`. No live test runs these
-   configurations.
+5. **Done.** `resume_config_no_seq.rs` and `resume_config_no_history.rs`.
+   Each runs as its own process, because the library reads its
+   configuration one time.
 6. **Done.** The unit tests in `features.rs`.
 7. **Done, with one change.** The resend does not go through the consumer
    queue, so `Max-Buffer-Length` does not limit it. The live samples wait
@@ -513,18 +516,26 @@ The status on the branch `feat/resume`, at `0ab7768`, on 2026-11-20:
    queue, and one more test removes history samples during a resend.
 8. **Done.** The unit tests in `outlet.rs` compare each timestamp bit for
    bit.
-9. **Done, except the post-processing.** Three live tests in
-   `resume_live.rs` cut the connection for 3 s: 512 Hz x 8 channels,
-   4000 Hz x 64 channels, and a marker stream. With
-   `labstream.Features = {seq}` they fail. The tests compare the raw
-   timestamps, not the timestamps after post-processing.
-10. **Partly done.** A live test shows that an outlet sends nothing again
-    for a different epoch. No live test opens a new outlet with an old
-    `uid` against a running inlet.
-11. **Not done as a live test.** A unit test shows that a resend starts at
-    the oldest sample, and the first record gives the exact gap.
-12. **Not measured.** The resend reads blocks of 256 samples, which is
-    about 0.5 ms of copy for each block.
+9. **Done, with one change.** Three live tests cut the connection for 3 s:
+   512 Hz x 8 channels, 4000 Hz x 64 channels, and a marker stream. Each
+   sample arrives once, in order, with the raw timestamp of a second inlet,
+   bit for bit. With `labstream.Features = {seq}`, these tests fail. With
+   post-processing on, two inlets do not agree bit for bit, because each
+   inlet measures its own clock offset. The test with post-processing thus
+   checks the time axis of one inlet: it never goes back, and no step
+   across the dropout is more than two sample periods.
+10. **Done.** `a_new_outlet_with_an_old_uid_gives_no_resend_and_no_false_loss`.
+    The new outlet has pushed 300 samples, and the inlet expects 100. The
+    inlet gets only the live samples, with no false loss.
+11. **Done.** `resume_short_history.rs`, with `ResumeSeconds = 1`: a 3 s
+    dropout at 512 Hz gave 1448 missing samples, a loss count of 1448, and
+    512 resent samples.
+12. **Done, as a measurement.** `the_longest_push_during_a_long_resend_stays_short`
+    is an ignored test. Run it with `cargo test --release -p labstream-net
+    --test resume_live -- --ignored`. A resend of about 7.6 s at
+    4000 Hz x 64 channels gave a longest push of 0.60, 0.62, and 0.81 ms in
+    three runs. The limit is 2 ms. A resend of 8 s does not fit in the
+    default memory limit at this load, so the cut is 7 s.
 13. **Done.** Against liblsl: 28 of 28 cells, 24 of 24 with chunks, and 24
     of 24 in the blocking mode.
 14. **Done.** The first build added about 80 µs to the median at
