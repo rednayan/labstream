@@ -77,10 +77,14 @@ static void print_library(void) {
 	printf("\"library\": \"%s\", \"library_info\": \"%s\"", library_path(), lsl_library_info());
 }
 
+/* With --irregular 1, the outlet gives a nominal rate of 0, as a marker
+ * stream does, and still pushes on the schedule of --rate. */
+static int irregular = 0;
+
 static int run_outlet(const char *name, int channels, double rate, int chunk, double seconds,
 	double offset_us) {
-	lsl_streaminfo info =
-		lsl_create_streaminfo(name, "Latency", channels, rate, cft_float32, name);
+	lsl_streaminfo info = lsl_create_streaminfo(name, "Latency", channels,
+		irregular ? 0.0 : rate, cft_float32, name);
 	lsl_outlet out = lsl_create_outlet(info, 0, 360);
 	if (!out) {
 		fprintf(stderr, "ERROR could not create the outlet\n");
@@ -240,6 +244,7 @@ int main(int argc, char **argv) {
 		else if (!strcmp(argv[i], "--warmup")) warmup = atof(argv[++i]);
 		else if (!strcmp(argv[i], "--offset-us")) offset_us = atof(argv[++i]);
 		else if (!strcmp(argv[i], "--timeout")) timeout = atof(argv[++i]);
+		else if (!strcmp(argv[i], "--irregular")) irregular = atoi(argv[++i]);
 		else {
 			fprintf(stderr, "unknown option %s\n", argv[i]);
 			return 2;
@@ -247,7 +252,7 @@ int main(int argc, char **argv) {
 	}
 	if (!role || channels < 1 || rate <= 0 || chunk < 1 || seconds <= 0) {
 		fprintf(stderr, "usage: latency outlet|inlet [--name N] [--channels C] [--rate R] "
-						"[--chunk K] [--seconds S] [--warmup S] [--offset-us U] [--timeout S]\n");
+						"[--chunk K] [--seconds S] [--warmup S] [--offset-us U] [--timeout S] [--irregular 0|1]\n");
 		return 2;
 	}
 	if (!strcmp(role, "outlet")) return run_outlet(name, channels, rate, chunk, seconds, offset_us);
