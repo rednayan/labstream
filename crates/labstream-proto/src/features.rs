@@ -25,6 +25,13 @@ pub const SEQ: &str = "seq";
 /// [`offer_resume`], [`resume_request`], and [`resume_answer`] handle it.
 pub const RESUME: &str = "resume";
 
+/// The name of the UDP transport. `docs/extensions.md`, section `dgram`.
+///
+/// `dgram` is not in [`SUPPORTED`], because its answer carries a parameter.
+/// [`offer_dgram`], [`dgram_request`], and [`dgram_answer`] handle it. It is
+/// off by default in version 1.
+pub const DGRAM: &str = "dgram";
+
 /// The features with no parameter that this library implements, each with
 /// its versions.
 pub const SUPPORTED: &[(&str, &[u32])] = &[(SEQ, &[1])];
@@ -294,6 +301,86 @@ pub fn resume_answer(agreed: &[Token]) -> Option<ResumeParam> {
     ResumeParam::parse(token.param.as_deref()?)
 }
 
+/// The parameter of a `dgram/1` answer: the UDP port of the outlet in
+/// exactly 4 hexadecimal digits, then a cookie in exactly 16 hexadecimal
+/// digits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DgramParam {
+    /// The UDP port of the outlet.
+    pub port: u16,
+    /// The random value that each datagram carries.
+    pub cookie: u64,
+}
+
+impl DgramParam {
+    /// Read a parameter. The result is `None` unless the parameter has
+    /// exactly 20 hexadecimal digits.
+    pub fn parse(param: &str) -> Option<DgramParam> {
+        if param.len() != 20
+            || !param
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return None;
+        }
+        Some(DgramParam {
+            port: u16::from_str_radix(&param[..4], 16).ok()?,
+            cookie: u64::from_str_radix(&param[4..], 16).ok()?,
+        })
+    }
+
+    /// Write the parameter as it goes on the wire.
+    pub fn to_param(&self) -> String {
+        format!("{:04x}{:016x}", self.port, self.cookie)
+    }
+
+    /// A `dgram/1` token with this parameter.
+    pub fn token(&self) -> Token {
+        Token {
+            name: DGRAM.to_string(),
+            version: 1,
+            param: Some(self.to_param()),
+        }
+    }
+}
+
+/// True when the configuration allows `dgram`. `dgram` needs `seq` and
+/// `resume`, so the configuration must allow all three.
+fn dgram_allowed(allowed: &[String]) -> bool {
+    resume_allowed(allowed) && allowed.iter().any(|a| a == DGRAM)
+}
+
+/// The `dgram/1` token that an inlet offers, or `None` when the
+/// configuration does not allow `dgram`.
+pub fn offer_dgram(allowed: &[String]) -> Option<Token> {
+    dgram_allowed(allowed).then(|| Token::new(DGRAM, 1))
+}
+
+/// True when the outlet can answer `dgram/1`.
+///
+/// `answered` must already hold the answer tokens of `seq/1` and of
+/// `resume/1`. The offer must hold `dgram/1` with no parameter.
+/// `docs/extensions.md`, section `dgram`, negotiation rules 2 and 6.
+pub fn dgram_request(offered: &[Token], answered: &[Token], allowed: &[String]) -> bool {
+    dgram_allowed(allowed)
+        && has(answered, SEQ, 1)
+        && has(answered, RESUME, 1)
+        && offered
+            .iter()
+            .any(|t| t.name == DGRAM && t.version == 1 && t.param.is_none())
+}
+
+/// Read the `dgram/1` answer of an outlet, on the inlet side.
+///
+/// The result is `None` when `dgram` is off for the connection: the
+/// features do not hold `seq/1` and `resume/1`, or do not hold `dgram/1`,
+/// or the parameter does not match [`DgramParam::parse`].
+pub fn dgram_answer(agreed: &[Token]) -> Option<DgramParam> {
+    resume_answer(agreed)?;
+    let token = agreed.iter().find(|t| t.name == DGRAM && t.version == 1)?;
+    DgramParam::parse(token.param.as_deref()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,5 +573,89 @@ mod tests {
         let unasked = agreed(&parse("seq/1"), &[Token::new(SEQ, 1), P.token()]);
         assert_eq!(resume_answer(&unasked), None);
         assert!(has(&unasked, SEQ, 1));
+    }
+
+    fn with_dgram() -> Vec<String> {
+        vec![SEQ.to_string(), RESUME.to_string(), DGRAM.to_string()]
+    }
+
+    const G: DgramParam = DgramParam {
+        port: 0xc35b,
+        cookie: 0x9f2e_81d0_4a77_13c6,
+    };
+
+    #[test]
+    fn a_dgram_parameter_reads_back_as_it_was_written() {
+        assert_eq!(G.to_param(), "c35b9f2e81d04a7713c6");
+        assert_eq!(DgramParam::parse("c35b9f2e81d04a7713c6"), Some(G));
+        let small = DgramParam { port: 1, cookie: 2 };
+        assert_eq!(small.to_param().len(), 20);
+        assert_eq!(DgramParam::parse(&small.to_param()), Some(small));
+        assert_eq!(DgramParam::parse("c35b9f2e81d04a7713c"), None);
+        assert_eq!(DgramParam::parse("c35b9f2e81d04a7713c60"), None);
+        assert_eq!(DgramParam::parse("+35b9f2e81d04a7713c6"), None);
+    }
+
+    #[test]
+    fn an_inlet_offers_dgram_only_with_seq_and_resume() {
+        assert_eq!(offer_dgram(&with_dgram()), Some(Token::new(DGRAM, 1)));
+        assert_eq!(offer_dgram(&with_resume()), None);
+        assert_eq!(offer_dgram(&[SEQ.to_string(), DGRAM.to_string()]), None);
+        assert_eq!(offer_dgram(&[DGRAM.to_string()]), None);
+    }
+
+    #[test]
+    fn an_outlet_answers_dgram_only_with_seq_and_resume_in_the_answer() {
+        let offered = parse("seq/1 resume/1 dgram/1");
+        let full = vec![Token::new(SEQ, 1), P.token()];
+        assert!(dgram_request(&offered, &full, &with_dgram()));
+        // Not allowed here.
+        assert!(!dgram_request(&offered, &full, &with_resume()));
+        // No resume in the answer.
+        assert!(!dgram_request(
+            &offered,
+            &[Token::new(SEQ, 1)],
+            &with_dgram()
+        ));
+        // No offer, or an offer with a parameter.
+        assert!(!dgram_request(
+            &parse("seq/1 resume/1"),
+            &full,
+            &with_dgram()
+        ));
+        assert!(!dgram_request(
+            &parse("seq/1 resume/1 dgram/1=00"),
+            &full,
+            &with_dgram()
+        ));
+        // The plain answer leaves dgram out.
+        assert_eq!(answer(&offered, &with_dgram()), vec![Token::new(SEQ, 1)]);
+    }
+
+    #[test]
+    fn an_inlet_reads_the_dgram_answer() {
+        let offered = parse("seq/1 resume/1 dgram/1");
+        let on = agreed(&offered, &[Token::new(SEQ, 1), P.token(), G.token()]);
+        assert_eq!(dgram_answer(&on), Some(G));
+        // No resume on the connection.
+        let lone = agreed(&offered, &[Token::new(SEQ, 1), G.token()]);
+        assert_eq!(dgram_answer(&lone), None);
+        // No parameter, or a bad one.
+        let bare = agreed(
+            &offered,
+            &parse("seq/1 resume/1=9c3e51a0d2b7f4e81f4a0 dgram/1"),
+        );
+        assert_eq!(dgram_answer(&bare), None);
+        let bad = agreed(
+            &offered,
+            &parse("seq/1 resume/1=9c3e51a0d2b7f4e81f4a0 dgram/1=00ff"),
+        );
+        assert_eq!(dgram_answer(&bad), None);
+        // The inlet did not offer dgram.
+        let unasked = agreed(
+            &parse("seq/1 resume/1"),
+            &[Token::new(SEQ, 1), P.token(), G.token()],
+        );
+        assert_eq!(dgram_answer(&unasked), None);
     }
 }
