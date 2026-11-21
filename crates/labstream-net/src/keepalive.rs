@@ -33,10 +33,43 @@ pub(crate) const USER_TIMEOUT: Duration = Duration::from_secs(6);
 /// An error is ignored. The connection then works as before, and the
 /// watchdog still applies.
 pub(crate) fn enable(stream: &TcpStream) {
+    set(stream, IDLE, INTERVAL, RETRIES, USER_TIMEOUT_SHORT);
+}
+
+/// The timers while the samples of a `dgram/1` connection go on UDP. The
+/// datagrams then show that the peer is alive, and the TCP connection is
+/// quiet. `docs/extensions.md`, section `dgram`, keepalive on UDP.
+pub(crate) const UDP_IDLE: Duration = Duration::from_secs(30);
+/// The time between two probes on UDP.
+pub(crate) const UDP_INTERVAL: Duration = Duration::from_secs(5);
+/// The count of probes on UDP.
+pub(crate) const UDP_RETRIES: u32 = 6;
+/// The acknowledgement timeout on UDP.
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+pub(crate) const UDP_USER_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const USER_TIMEOUT_SHORT: Duration = USER_TIMEOUT;
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const USER_TIMEOUT_SHORT: Duration = Duration::ZERO;
+
+/// Use the long timers of UDP on this connection.
+pub(crate) fn relax(stream: &TcpStream) {
+    set(
+        stream,
+        UDP_IDLE,
+        UDP_INTERVAL,
+        UDP_RETRIES,
+        UDP_USER_TIMEOUT,
+    );
+}
+
+#[allow(unused_variables)]
+fn set(stream: &TcpStream, idle: Duration, interval: Duration, retries: u32, user: Duration) {
     let sock = socket2::SockRef::from(stream);
     let params = socket2::TcpKeepalive::new()
-        .with_time(IDLE)
-        .with_interval(INTERVAL);
+        .with_time(idle)
+        .with_interval(interval);
     #[cfg(any(
         target_os = "linux",
         target_os = "android",
@@ -45,10 +78,10 @@ pub(crate) fn enable(stream: &TcpStream) {
         target_os = "freebsd",
         target_os = "windows",
     ))]
-    let params = params.with_retries(RETRIES);
+    let params = params.with_retries(retries);
     let _ = sock.set_tcp_keepalive(&params);
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    let _ = sock.set_tcp_user_timeout(Some(USER_TIMEOUT));
+    let _ = sock.set_tcp_user_timeout(Some(user));
 }
 
 #[cfg(test)]
@@ -79,5 +112,29 @@ mod tests {
         }
         #[cfg(any(target_os = "linux", target_os = "android"))]
         assert_eq!(sock.tcp_user_timeout().unwrap(), Some(USER_TIMEOUT));
+    }
+
+    #[test]
+    fn relax_takes_the_long_timers_and_enable_the_short_ones() {
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(_) => {
+                eprintln!("no local network; skipping");
+                return;
+            }
+        };
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        relax(&stream);
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            let sock = socket2::SockRef::from(&stream);
+            assert_eq!(sock.tcp_keepalive_time().unwrap(), UDP_IDLE);
+            assert_eq!(sock.tcp_keepalive_interval().unwrap(), UDP_INTERVAL);
+            assert_eq!(sock.tcp_keepalive_retries().unwrap(), UDP_RETRIES);
+            assert_eq!(sock.tcp_user_timeout().unwrap(), Some(UDP_USER_TIMEOUT));
+            enable(&stream);
+            assert_eq!(sock.tcp_keepalive_time().unwrap(), IDLE);
+            assert_eq!(sock.tcp_user_timeout().unwrap(), Some(USER_TIMEOUT));
+        }
     }
 }

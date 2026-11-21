@@ -168,6 +168,7 @@ impl Conn {
                     first,
                     count,
                     payload,
+                    ..
                 } => {
                     assert_eq!(cookie, self.param.cookie);
                     let mut at = 0;
@@ -188,10 +189,21 @@ impl Conn {
                     assert_eq!(cookie, self.param.cookie);
                     idle.push(next);
                 }
-                Datagram::Hello { .. } => panic!("the outlet sends no hello"),
+                Datagram::Hello { .. } | Datagram::Feedback { .. } => {
+                    panic!("the outlet sends no hello and no feedback")
+                }
             }
         }
         (data, idle)
+    }
+
+    fn feedback(&self, cookie: u64, loss: u32, gaps: &[(u64, u32)]) {
+        self.udp
+            .send_to(
+                &dgram::feedback(cookie, loss, gaps),
+                ("127.0.0.1", self.param.port),
+            )
+            .unwrap();
     }
 
     fn request(&mut self, bytes: &[u8]) {
@@ -232,36 +244,58 @@ fn switched(out: &Outlet) -> (Conn, u64) {
     (c, n)
 }
 
+fn count(data: &[Vec<u64>]) -> std::collections::HashMap<u64, usize> {
+    let mut seen = std::collections::HashMap::new();
+    for g in data {
+        for n in g {
+            *seen.entry(*n).or_insert(0) += 1;
+        }
+    }
+    seen
+}
+
 #[test]
-fn a_hello_moves_the_samples_to_udp_with_copies() {
+fn a_hello_moves_the_samples_to_udp_and_a_loss_report_adds_copies() {
     let Some(out) = outlet("DgramOut1", Format::Float32) else {
         eprintln!("no local network; skipping");
         return;
     };
     let (mut c, n) = switched(&out);
     assert_eq!(n, 0);
-    for k in 0..100 {
+    for k in 0..50 {
+        push(&out, k, k + 1, 1);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let (data, idle) = c.udp(Duration::from_millis(400));
+    let seen = count(&data);
+    assert_eq!(seen.len(), 50, "each sample on UDP");
+    assert!(seen.values().all(|&c| c == 1), "no copy before a loss");
+    assert_eq!(
+        idle.last(),
+        Some(&50),
+        "an idle datagram gives the next number"
+    );
+    assert!(idle.len() >= 3, "idle datagrams soon after the last data");
+
+    // A report of 1 % loss: 2 copies.
+    c.feedback(c.param.cookie, 10_000, &[]);
+    std::thread::sleep(Duration::from_millis(100));
+    for k in 50..150 {
         push(&out, k, k + 1, 1);
         std::thread::sleep(Duration::from_millis(1));
     }
     let (data, idle) = c.udp(Duration::from_millis(1500));
-    let mut seen = std::collections::HashMap::new();
-    for g in &data {
-        for n in g {
-            *seen.entry(*n).or_insert(0) += 1;
-        }
-    }
+    // The free space of the first datagrams also takes copies of the
+    // samples before the report.
+    let mut seen = count(&data);
+    seen.retain(|&n, _| n >= 50);
     assert_eq!(seen.len(), 100, "each sample on UDP");
     assert!(seen.values().all(|&c| c <= 3), "at most two copies");
     assert!(
         seen.values().filter(|&&c| c >= 2).count() >= 90,
         "the copies go out"
     );
-    assert_eq!(
-        idle.first(),
-        Some(&100),
-        "an idle datagram gives the next number"
-    );
+    assert_eq!(idle.last(), Some(&150));
     assert!(
         c.tcp(Duration::from_millis(50)).is_empty(),
         "no sample on TCP"
@@ -361,4 +395,33 @@ fn the_udp_port_is_in_the_lsl_port_range() {
     let c = Conn::open(&out);
     let cfg = labstream_net::config::get();
     assert!((cfg.base_port..cfg.base_port + cfg.port_range).contains(&c.param.port));
+}
+
+#[test]
+fn a_gap_in_a_feedback_datagram_gets_its_samples_again_on_udp() {
+    let Some(out) = outlet("DgramOut7", Format::Float32) else {
+        eprintln!("no local network; skipping");
+        return;
+    };
+    let (mut c, _) = switched(&out);
+    push(&out, 0, 20, 1);
+    let (data, _) = c.udp(Duration::from_millis(400));
+    assert_eq!(count(&data).len(), 20);
+
+    // A wrong cookie gets nothing.
+    c.feedback(c.param.cookie ^ 1, 0, &[(5, 3)]);
+    let (data, _) = c.udp(Duration::from_millis(300));
+    assert!(data.is_empty(), "{data:?}");
+
+    c.feedback(c.param.cookie, 0, &[(5, 3), (12, 1)]);
+    let (data, _) = c.udp(Duration::from_millis(300));
+    assert_eq!(
+        data,
+        vec![vec![5, 6, 7], vec![12]],
+        "the gaps, with no copy"
+    );
+    assert!(
+        c.tcp(Duration::from_millis(50)).is_empty(),
+        "nothing on TCP"
+    );
 }

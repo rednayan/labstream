@@ -786,8 +786,14 @@ fn read_and_recover(
             }
             Err(ref e) if read_timed_out(e) => {
                 // A source that stopped without closing looks exactly like a
-                // quiet one. The watchdog is what tells them apart.
-                if last_data.elapsed() > watchdog_threshold() {
+                // quiet one. The watchdog is what tells them apart. On UDP,
+                // no byte arrives on TCP, and the datagrams are the data.
+                let threshold = watchdog_threshold();
+                let on_udp = dg.as_ref().is_some_and(|d| d.heard_within(threshold));
+                if on_udp {
+                    last_data = Instant::now();
+                }
+                if last_data.elapsed() > threshold {
                     Some(Ending::Quiet)
                 } else {
                     None
@@ -825,11 +831,15 @@ fn read_and_recover(
         }
 
         // With `dgram`, the merged stream knows the next number. The count
-        // takes it, and the next connection asks from it.
-        if let Some(e) = dg.take().and_then(|d| d.close()) {
-            counter.resync(e);
+        // takes it, and the next connection asks from it. A quiet
+        // connection can still continue, so its `dgram` part stays until a
+        // new connection replaces the socket.
+        if ending == Ending::Closed {
+            if let Some(e) = dg.take().and_then(|d| d.close()) {
+                counter.resync(e);
+            }
+            conn.on_udp.store(false, Ordering::SeqCst);
         }
-        conn.on_udp.store(false, Ordering::SeqCst);
 
         // Try until a connection exists again, or the inlet closes.
         loop {
@@ -900,6 +910,12 @@ fn read_and_recover(
                 Found::Moved(fresh) => {
                     match handshake(&fresh, Duration::from_secs(5), buffer_samples, None) {
                         Ok((s, c, rest)) => {
+                            // The old connection ends here. No sample of it
+                            // goes to the queue after this point.
+                            if let Some(old) = dg.take() {
+                                old.close();
+                            }
+                            conn.on_udp.store(false, Ordering::SeqCst);
                             let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
                             sock = s;
                             carry = rest;

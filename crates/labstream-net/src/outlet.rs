@@ -804,6 +804,8 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
                 stream.try_clone()?,
                 Arc::clone(&consumer.queue),
             ),
+            queue: Arc::clone(&consumer.queue),
+            tcp: stream.try_clone()?,
         }),
         None => None,
     };

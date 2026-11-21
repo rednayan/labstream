@@ -69,12 +69,18 @@ RULES = {
     # run.
     "loss30": ("delay 20ms", 12.0, 2.0, None, "delay 20ms loss 30%"),
     "loss50": ("delay 20ms", 12.0, 2.0, None, "delay 20ms loss 50%"),
+    # The same loss from the start, before discovery and the handshake.
+    "loss30s": ("delay 20ms loss 30%", 12.0, None, None, None),
+    "loss50s": ("delay 20ms loss 50%", 12.0, None, None, None),
     "udpdead": ("", 15.0, 5.0, None, None),
+    # UDP stops for 5 s, then works again: a fallback to TCP, then the way
+    # back to UDP after 30 s. The run is longer than the watchdog time.
+    "udpback": ("", 45.0, 5.0, 5.0, None),
 }
 
 # The rules whose cut drops only UDP: a firewall or NAT state that ends
 # while TCP works.
-UDP_ONLY = {"udpdead"}
+UDP_ONLY = {"udpdead", "udpback"}
 
 # With `--logs DIR`, the stderr and stdout of each process go to files.
 LOGS = os.environ.get("LABSTREAM_LOSSYLINK_LOGS")
@@ -173,7 +179,18 @@ def run_pair(link: Link, out_bin: Path, in_bin: Path, name: str, rule: str, load
                                   "--timeout", "60"],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         try:
-            latency.wait_ready(inlet, "inlet", in_err)
+            try:
+                latency.wait_ready(inlet, "inlet", in_err)
+            except RuntimeError:
+                # At heavy loss from the start, the discovery or the
+                # handshake can fail. That is a result, not a fault of the
+                # runner.
+                if LOGS:
+                    (Path(LOGS) / name).with_suffix(".inlet.log").write_text(
+                        "\n".join(in_err) + "\n")
+                nan = float("nan")
+                return {}, {"p50_us": nan, "p99_us": nan, "p999_us": nan, "max_us": nan,
+                            "lost": "no connect", "repeated": 0}
             if cut_at is not None:
                 def cut():
                     time.sleep(cut_at)

@@ -2,13 +2,15 @@
 //! `dgram`.
 //!
 //! The samples of a connection arrive on two paths: UDP, and TCP for the
-//! resends and for the samples too large for a datagram. A [`Reorder`]
+//! resends of large gaps and for the samples too large for a datagram. The
+//! small gaps get their resends on UDP: the inlet asks for them in feedback
+//! datagrams. A [`Reorder`]
 //! buffer puts them back in the order of their numbers. The reader of TCP
 //! and a thread for UDP both put samples into it, and both move the samples
 //! that are in order to the queue of the application, under one lock.
 
 use crate::queue::SampleQueue;
-use labstream_proto::dgram::{self, Action, Datagram, Path, Reorder};
+use labstream_proto::dgram::{self, Action, Datagram, LossMeter, Path, Reorder};
 use labstream_proto::features::DgramParam;
 use labstream_wire::{Codec, Sample};
 use std::io::Write;
@@ -22,9 +24,16 @@ const HELLO_EVERY: Duration = Duration::from_millis(100);
 const HELLO_FOR: Duration = Duration::from_secs(1);
 /// The shortest wait for a copy before a resend request.
 const MIN_WAIT: f64 = 0.010;
-/// The time after a resend request before the inlet gives up the gap.
+/// The time after a resend request on TCP before the inlet gives up the gap.
 const GIVE_UP: f64 = 0.500;
-/// The loss after the copies that counts a window of 1 s as bad.
+/// The largest small gap, which gets its resend on UDP.
+const SMALL_GAP: u64 = 64;
+/// The time after which the inlet gives up a small gap at `E`.
+const SMALL_GIVE_UP: f64 = 1.0;
+/// The time between two feedback datagrams while datagrams arrive.
+const FEEDBACK_EVERY: Duration = Duration::from_millis(100);
+/// The loss after the copies and the resends that counts a window of 1 s as
+/// bad.
 const BAD_LOSS: f64 = 0.05;
 /// The count of bad windows in a row that asks for TCP.
 const BAD_WINDOWS: u32 = 3;
@@ -40,6 +49,9 @@ struct State {
     started: bool,
     /// The resend requests with no answer yet.
     requests: Vec<(u64, u32)>,
+    meter: LossMeter,
+    /// True once a datagram of the outlet arrived.
+    heard: bool,
     on_udp: bool,
     asked_tcp: bool,
     tcp: TcpStream,
@@ -48,7 +60,8 @@ struct State {
     period: f64,
     window_start: Instant,
     window_datagrams: u32,
-    window_asked: u64,
+    /// The samples given up in the window.
+    window_lost: u64,
     window_first: Option<u64>,
     bad_windows: u32,
     /// Set when the connection ends. No sample goes to the queue after it.
@@ -88,10 +101,16 @@ impl DgramIn {
             .ok()?;
         let outlet = SocketAddr::new(peer.ip(), param.port);
         let state = Arc::new(Mutex::new(State {
-            reorder: Reorder::new(),
+            reorder: {
+                let mut r = Reorder::new();
+                r.set_small_gaps(SMALL_GAP, SMALL_GIVE_UP);
+                r
+            },
             base_lost: 0,
             started: false,
             requests: Vec::new(),
+            meter: LossMeter::new(),
+            heard: false,
             on_udp: false,
             asked_tcp: false,
             tcp: tcp.try_clone().ok()?,
@@ -99,7 +118,7 @@ impl DgramIn {
             period: 0.0,
             window_start: Instant::now(),
             window_datagrams: 0,
-            window_asked: 0,
+            window_lost: 0,
             window_first: None,
             bad_windows: 0,
             closed: false,
@@ -162,6 +181,13 @@ impl DgramIn {
     pub fn path(&self, path: Path) {
         let mut s = self.state.lock().unwrap();
         s.on_udp = path == Path::Udp;
+        // The datagrams show that the outlet is alive. `docs/extensions.md`,
+        // section `dgram`, keepalive on UDP.
+        if s.on_udp {
+            crate::keepalive::relax(&s.tcp);
+        } else {
+            crate::keepalive::enable(&s.tcp);
+        }
         if s.on_udp {
             s.asked_tcp = false;
             s.last_datagram = Instant::now();
@@ -197,6 +223,14 @@ impl DgramIn {
     pub fn on_udp(&self) -> bool {
         self.state.lock().unwrap().on_udp
     }
+
+    /// True if a datagram of the outlet arrived in the last `time`. The
+    /// watchdog of the inlet counts it as data: on UDP, no byte arrives on
+    /// TCP for a long time.
+    pub fn heard_within(&self, time: Duration) -> bool {
+        let s = self.state.lock().unwrap();
+        s.heard && s.last_datagram.elapsed() < time
+    }
 }
 
 impl Drop for DgramIn {
@@ -231,6 +265,7 @@ fn udp_loop(
     let begin = state.lock().unwrap().begin;
     let mut hello_at: Option<Instant> = None;
     let mut heard = false;
+    let mut feedback_at = Instant::now();
     let mut buf = vec![0u8; 2048];
     while !stop.load(Ordering::SeqCst) && !queue.is_closed() {
         // The hellos, until the first datagram arrives, or for 1 s.
@@ -254,8 +289,10 @@ fn udp_loop(
                     cookie: c,
                     first,
                     count,
+                    serial,
                     payload,
                 }) if c == cookie => {
+                    s.meter.record(serial, begin.elapsed().as_secs_f64());
                     let mut at = 0;
                     for k in 0..count as u64 {
                         match codec.decode(&payload[at..]) {
@@ -268,11 +305,13 @@ fn udp_loop(
                     }
                     heard_datagram(&mut s, now);
                     heard = true;
+                    s.heard = true;
                 }
                 Ok(Datagram::Idle { cookie: c, next }) if c == cookie => {
                     s.reorder.idle(next);
                     heard_datagram(&mut s, now);
                     heard = true;
+                    s.heard = true;
                 }
                 _ => {}
             }
@@ -291,16 +330,33 @@ fn udp_loop(
                         eprintln!("TRACE dgram: asked for {count} samples from {from}");
                     }
                     s.requests.push((from, count));
-                    s.window_asked += count as u64;
                 }
             }
             Some(Action::GaveUp { from, count }) => {
                 if trace() {
                     eprintln!("TRACE dgram: gave up {count} samples from {from}");
                 }
+                s.window_lost += count;
                 deliver(&mut s, queue, lost)
             }
             None => {}
+        }
+
+        // The small gaps, and the measured loss, in a feedback datagram.
+        // `docs/extensions.md`, section `dgram`, the feedback datagram.
+        let gaps = s.reorder.nacks(t, wait);
+        if heard && (!gaps.is_empty() || (s.on_udp && feedback_at.elapsed() >= FEEDBACK_EVERY)) {
+            let d = dgram::feedback(cookie, s.meter.loss_ppm(t), &gaps);
+            if socket.send_to(&d, outlet).is_ok() {
+                feedback_at = Instant::now();
+                if trace() && !gaps.is_empty() {
+                    eprintln!(
+                        "TRACE dgram: asked for {} gaps on UDP from {}",
+                        gaps.len(),
+                        gaps[0].0
+                    );
+                }
+            }
         }
         check_path(&mut s, now);
     }
@@ -322,9 +378,9 @@ fn heard_datagram(s: &mut State, now: Instant) {
     s.window_datagrams += 1;
 }
 
-/// The fallback rules of the inlet: heavy loss after the copies, or a UDP
-/// path that stops while TCP works. `docs/extensions.md`, section `dgram`,
-/// the fallback to TCP, rules 1 and 2.
+/// The fallback rules of the inlet: heavy loss after the copies and the
+/// resends, or a UDP path that stops while TCP works. `docs/extensions.md`,
+/// section `dgram`, the fallback to TCP, rules 1 and 2.
 fn check_path(s: &mut State, now: Instant) {
     if !s.on_udp || s.asked_tcp {
         return;
@@ -334,21 +390,59 @@ fn check_path(s: &mut State, now: Instant) {
         let e = s.reorder.expected().unwrap_or(0);
         let samples = e.saturating_sub(s.window_first.unwrap_or(e)).max(1);
         if s.window_datagrams >= 10 {
-            let bad = s.window_asked as f64 / samples as f64 > BAD_LOSS;
+            let bad = s.window_lost as f64 / samples as f64 > BAD_LOSS;
             s.bad_windows = if bad { s.bad_windows + 1 } else { 0 };
         }
         s.window_start = now;
         s.window_datagrams = 0;
-        s.window_asked = 0;
+        s.window_lost = 0;
         s.window_first = Some(e);
     }
     if dead || s.bad_windows >= BAD_WINDOWS {
         if let Some(from) = s.reorder.expected() {
             let mut r = Vec::new();
             dgram::write_path_request(&mut r, Path::Tcp, from);
+            crate::keepalive::enable(&s.tcp);
             if s.tcp.write_all(&r).is_ok() {
                 s.asked_tcp = true;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use labstream_wire::{ByteOrder, Format};
+    use std::net::TcpListener;
+
+    #[test]
+    fn on_udp_the_tcp_connection_takes_the_long_keepalive_timers() {
+        // `docs/extensions.md`, section `dgram`, keepalive on UDP.
+        let Ok(listener) = TcpListener::bind("127.0.0.1:0") else {
+            eprintln!("no local network; skipping");
+            return;
+        };
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        crate::keepalive::enable(&stream);
+        let param = DgramParam { port: 9, cookie: 1 };
+        let codec = Codec::new(Format::Float32, 1, ByteOrder::native());
+        let queue = Arc::new(SampleQueue::new(16));
+        let lost = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let d = DgramIn::start(param, &stream, codec, queue, lost, None).expect("a UDP socket");
+        let sock = socket2::SockRef::from(&stream);
+        d.path(Path::Udp);
+        // The timers read back only on the systems where the getters exist.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        assert_eq!(
+            sock.tcp_keepalive_time().unwrap(),
+            crate::keepalive::UDP_IDLE,
+            "a quiet TCP connection on UDP is not ended by keepalive"
+        );
+        d.path(Path::Tcp);
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        assert_eq!(sock.tcp_keepalive_time().unwrap(), crate::keepalive::IDLE);
+        assert!(sock.keepalive().unwrap());
+        d.close();
     }
 }

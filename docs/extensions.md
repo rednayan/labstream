@@ -568,6 +568,14 @@ with `resume_`.
 branch `feat/dgram`, not merged. Off by default. The token is `dgram/1`.
 `docs/roadmap.md`, step 5, gives the decision for plain UDP (decision 12).
 
+**Change of 2026-11-21.** The first version missed two targets. At 30 %
+and 50 % loss, the resends went on TCP, and TCP at that loss waits
+seconds. On a clean link of 1 Mbit/s, the fixed copies made the p99 worse
+than TCP. The user asked for a fix of both. The resend of a small gap now
+goes on UDP (the feedback datagram), and the count of copies follows the
+measured loss. `dgram/1` is not released, and no liblsl peer negotiates
+it, so the token stays `dgram/1` and the wire format changes in place.
+
 #### The purpose
 
 TCP gives each byte in order. When the network loses one segment, each
@@ -680,10 +688,14 @@ u8  type     2 (data)
 u64 cookie   little-endian, from the answer
 u64 first    little-endian, the number of the first sample in the datagram
 u16 count    little-endian, the count of samples in the datagram
+u32 serial   little-endian, the number of the datagram
 ...          the samples, in the encoding of SPEC.md 7, one after another
 ```
 
 1. The samples of one datagram have consecutive numbers, from `first`.
+   Each data datagram of a connection gets the next `serial`, from 0: a
+   datagram with new samples, a repeat datagram, and a resend datagram.
+   The inlet measures the loss of datagrams from the gaps in `serial`.
 2. Each sample carries its full timestamp (tag 2). A datagram can arrive
    after a later one, or not at all, so the inlet cannot deduce a
    timestamp from the sample before it. The history already holds the
@@ -706,7 +718,11 @@ u64 cookie   little-endian, from the answer
 u64 next     little-endian, the number that the next sample will get
 ```
 
-1. While no sample follows, the outlet sends an idle datagram each 1 s.
+1. After the last data datagram, the outlet sends the repeat datagram of
+   the copies rule 3 at 5 ms, or an idle datagram if it has no copy to
+   send. It then sends idle datagrams at 25 ms, 100 ms, and 250 ms. A lost
+   last datagram thus shows at the inlet soon, also at heavy loss. While
+   no sample follows, the outlet then sends an idle datagram each 1 s.
    These datagrams also keep the state of a NAT or a firewall open.
 2. When `next` is above the last number that the inlet has, the inlet has
    a gap, and the resend rules apply.
@@ -716,8 +732,9 @@ u64 next     little-endian, the number that the next sample will get
 1. The outlet first puts the new samples of a push into datagrams.
 2. Then it fills the free space of each datagram with copies of the samples
    just before the new samples, newest first, so that the samples stay
-   consecutive. Each sample goes into at most 3 datagrams: once as new,
-   and as a copy in at most 2 later datagrams.
+   consecutive. Each sample goes into at most `1 + C` datagrams: once as
+   new, and as a copy in at most `C` later datagrams. `C` is the count of
+   copies of rule 6.
 3. If the outlet sends no data datagram for 5 ms after a data datagram, it
    sends one repeat datagram: copies of the last samples, with no new
    sample. A push of a chunk, and the last marker before a quiet time,
@@ -730,6 +747,31 @@ u64 next     little-endian, the number that the next sample will get
    and 4 samples fill a datagram. The new samples fill most datagrams, and
    the repeat datagram holds only the last 4 samples. A lost datagram then
    often needs a resend.
+6. **The count of copies.** Copies cost bytes. On a link of 1 Mbit/s with
+   no loss, 2 copies made each datagram of a 512 Hz x 8 channel stream
+   about 60 % longer than the TCP segment, and the p99 went from 1.1 ms
+   to 2.0 ms. Thus `C` follows the loss of datagrams that the inlet
+   measures (the feedback datagram):
+
+   | measured loss | `C` |
+   |---|---|
+   | 0 | 0 |
+   | up to 2 % | 2 |
+   | up to 10 % | 3 |
+   | up to 25 % | 4 |
+   | up to 40 % | 6 |
+   | more than 40 % | 8 |
+
+   - `C` starts at 0.
+   - A higher `C` applies at once.
+   - A lower `C` applies only after each report for 5 s gave it, and after
+     the outlet sent 1000 datagrams.
+   - With `C = 0`, the repeat datagram has no copy, and the outlet sends
+     the idle datagram of the idle rule 1 in its place.
+
+   With `C` copies, a raw loss `p` leaves about `p` to the power `C + 1`
+   of the samples for a resend: 0.02 % at 30 % with `C = 6`, and 0.2 % at
+   50 % with `C = 8`.
 
 #### The resend
 
@@ -737,8 +779,31 @@ u64 next     little-endian, the number that the next sample will get
    application each sample in the order of the numbers, as with TCP.
 2. A sample above `E` waits in a buffer. A copy of a sample that the inlet
    already has goes away.
-3. If a gap at `E` stays for 2 datagram periods, or for 10 ms if that is
-   longer, the inlet asks for the gap on TCP:
+3. A gap is a run of missing numbers below the highest number that the
+   inlet knows of. A gap of at most 64 samples is a small gap. A larger
+   gap comes from a cut, not from a lost datagram.
+4. **A small gap goes on UDP.** If a small gap stays for 2 datagram
+   periods, or for 10 ms if that is longer, the inlet puts it in a
+   feedback datagram (the next section). Each small gap goes in, not only
+   the gap at `E`, so the gaps get their resends in parallel. The inlet
+   sends the gap again each `max(10 ms, 1.5 x R)` until the gap closes.
+   `R` is the round trip of a resend: the time from the first request of
+   a gap to the arrival of a sample of it. `R` starts at 50 ms.
+5. The outlet sends the samples of a small gap from the `resume` history,
+   in data datagrams on UDP, with no copies. If `C` is 3 or more, it sends
+   each such datagram twice. It sends at most 256 samples for one
+   feedback datagram, and it does not send a sample again within 10 ms.
+   A sample that the history no longer holds gets no resend.
+6. The inlet gives up a small gap when it stood at `E` for `max(1 s, 4 x
+   R)`. The time counts from when the gap reached `E`, so a gap behind a
+   TCP resend first waits for that resend. At 30 % loss in each direction,
+   a request and its answer both arrive in about half of the tries. 1 s
+   holds about 15 tries, and leaves less than 1 gap in 10000 unfilled. On
+   a slow link, a TCP resend after a cut can fill the queue of the link
+   for seconds. The first rule, 1 s from when the gap first showed, then
+   gave up a sample in 2 of 3 runs of the cut of 10 s at 1 Mbit/s.
+7. **A large gap goes on TCP.** If a large gap at `E` stays for the same
+   wait, the inlet asks for it on TCP:
 
    ```
    u8  tag      0xFC
@@ -746,19 +811,50 @@ u64 next     little-endian, the number that the next sample will get
    u32 count    little-endian, the count of missing samples
    ```
 
-4. The outlet sends the samples of a request from the `resume` history on
-   TCP, with their `seq` records, as for a resend after a recovery.
-5. If the history no longer holds a sample, the outlet sends the next one
+8. The outlet sends the samples of a TCP request from the `resume` history
+   on TCP, with their `seq` records, as for a resend after a recovery.
+9. If the history no longer holds a sample, the outlet sends the next one
    that it holds. The inlet counts the samples between as lost.
-6. The inlet gives up a gap after 500 ms with no answer and no other data on
-   TCP. Data on TCP shows that an answer can still be on the way, on a slow
-   link. It counts the gap as lost, and gives the samples after it. A
-   sample of the gap that arrives later goes away.
-7. A gap that an open request covers gets no new request. Only a part
-   beyond the request gets one. At the start of a connection with a
-   `resume` resend, the numbers of the resend count as requested. Without
-   this rule, a reconnect on a slow link sent each part of the resend about
-   14 times, and the backlog ended the connection again.
+10. The inlet gives up a large gap after 500 ms with no answer and no other
+    data on TCP. Data on TCP shows that an answer can still be on the way,
+    on a slow link. It counts the gap as lost, and gives the samples after
+    it. A sample of the gap that arrives later goes away.
+11. A gap that an open TCP request covers gets no new request on TCP or on
+    UDP. Only a part beyond the request gets one. At the start of a
+    connection with a `resume` resend, the numbers of the resend count as
+    requested. Without this rule, a reconnect on a slow link sent each part
+    of the resend about 14 times, and the backlog ended the connection
+    again.
+
+The first version sent each resend on TCP, one gap at a time. At 30 % loss
+in each direction, TCP waits seconds for each lost segment, and the later
+gaps waited behind the first one. The runs lost about 3000 of 6144
+samples.
+
+#### The feedback datagram
+
+The inlet sends it to the UDP port of the outlet, from the socket of its
+hellos:
+
+```
+u8  type     4 (feedback)
+u64 cookie   little-endian, from the answer
+u32 loss     little-endian, the measured loss of datagrams, in parts per
+             million, or 0xFFFFFFFF if the inlet has no measure yet
+u8  gaps     the count of gaps that follow, at most 64
+...          each gap: u64 from, then u32 count, little-endian
+```
+
+1. The inlet measures the loss of datagrams from `serial`. It counts the
+   datagrams that arrived and the range of their `serial` values in
+   buckets of 100 ms, and adds the last 10 buckets. A gap in `serial`
+   between two buckets does not count, so the time of a cut is no loss.
+2. The inlet sends a feedback datagram each 100 ms while datagrams arrive,
+   and also each time that a small gap is due for a request (resend rule
+   4).
+3. The outlet accepts a feedback datagram only with the correct cookie and
+   from the address of the accepted hello. It ignores each other one.
+4. The outlet sets `C` from `loss` (the copies, rule 6).
 
 #### The count on two paths
 
@@ -771,7 +867,7 @@ that UDP already gave.
    gives to the application moves `E` by one.
 2. A `seq` record on TCP gives the number of the next sample on TCP only.
    It does not move `E`, and it counts no loss by itself.
-3. A loss counts only in two cases: resend rule 5, and resend rule 6.
+3. A loss counts only in three cases: resend rules 6, 9, and 10.
    `Inlet::lost()` is thus the count of the numbers that the inlet never
    gave.
 
@@ -782,10 +878,13 @@ milliseconds. Neither is a reason to leave UDP. A fallback is only for a
 UDP path that stays bad while data still arrives, or that stops while TCP
 works.
 
-1. **Heavy loss.** The inlet measures the loss after the copies: the
-   samples that it had to ask for, in each window of 1 s. A window counts
-   only if at least 10 datagrams arrived in it. If 3 windows in a row show
-   more than 5 %, the inlet writes a path request on TCP:
+1. **Heavy loss.** The inlet measures the loss after the copies and the
+   resends: the samples that it gave up, in each window of 1 s. A window
+   counts only if at least 10 datagrams arrived in it. If 3 windows in a
+   row show more than 5 %, the inlet writes a path request on TCP. The
+   first version counted the samples that it asked for. At 50 % loss that
+   count is about 12 %, so the connection changed to TCP, and TCP at 50 %
+   loss lost about 5350 of 6144 samples. The path request:
 
    ```
    u8  tag      0xFB
@@ -806,9 +905,30 @@ works.
    inlet stays the address of the accepted hello. If the path is still
    bad, rule 1 or 2 gives the next fallback.
 
-With 3 copies, a raw loss of 30 % leaves about 0.3^3, that is 2.7 %, of the
-samples to ask for. Such a link thus stays on UDP. A raw loss of 50 %
-leaves about 12.5 %, and gives a fallback.
+A raw loss of 30 % or 50 % thus stays on UDP: the copies and the resends
+on UDP leave almost no sample to give up. TCP at such a loss is worse than
+UDP, so a fallback would only add loss. Rule 1 is for a UDP path that is
+much worse than TCP, for example a UDP rate limit in a firewall.
+
+#### Keepalive on UDP
+
+labstream ends a quiet TCP connection after about 5 s with no answer to its
+keepalive probes, and after 6 s with data that the peer does not
+acknowledge (`crates/labstream-net/src/keepalive.rs`). On UDP, the TCP
+connection is quiet, so the probes run all the time. At 50 % loss in each
+direction, a probe and its answer both arrive in a quarter of the tries,
+and 3 failed probes in a row are frequent. Without the rules below, the
+TCP connection broke in 2 of 3 runs at 50 % loss, and the `resume` resend
+of the reconnect stalled on TCP: about 1100 samples lost in each.
+
+1. While the samples go on UDP, each side uses long timers on its TCP
+   socket: the first probe after 30 s, a probe each 5 s, 6 probes, and an
+   acknowledgement timeout of 60 s.
+2. The datagrams show that the peer is alive. The inlet gets a datagram at
+   least each 1 s (the idle rule), and the outlet gets a feedback datagram
+   each 100 ms.
+3. If a side gets no datagram of its peer for 3 s, or if the path changes
+   to TCP, it uses the short timers again.
 
 #### What the inlet reports
 
@@ -830,9 +950,19 @@ leaves about 12.5 %, and gives a fallback.
    range of `ports.BasePort` and `ports.PortRange`.
 3. **The encoding.** Unit tests: a data datagram reads back, a cut datagram
    is an error, and a datagram never has more than 1200 bytes.
-4. **The copies.** Unit tests: each sample goes into at most 3 datagrams,
-   the samples of each datagram are consecutive, and one lost datagram of
-   a 512 Hz x 8 channel stream costs no sample.
+4. **The copies.** Unit tests: each sample goes into at most `1 + C`
+   datagrams, the samples of each datagram are consecutive, and one lost
+   datagram of a 512 Hz x 8 channel stream costs no sample when `C` is 2.
+   The count of copies follows the table of the copies rule 6: it goes up
+   at once, and down only after 5 s and 1000 datagrams.
+4a. **The repair at heavy loss.** A unit test simulates the packer, the
+    reorder buffer, and the feedback with a seeded random loss in each
+    direction and a delay of 20 ms. At 30 % loss no sample is lost. At
+    50 % loss at most 0.1 % is lost. With the resend on TCP rules of the
+    first version, the same simulation loses samples at 30 %.
+4b. **The watchdog.** A live test with `tuning.WatchdogTimeThreshold`
+    shorter than the run: a connection on UDP, with no byte on TCP, keeps
+    its samples on UDP past the watchdog time.
 5. **The order and the count at the inlet.** Unit tests with each pattern
    of loss, repeat, and reorder on UDP, mixed with resends on TCP: the
    inlet gives each sample once, in order, and `Inlet::lost()` counts only
@@ -847,10 +977,15 @@ leaves about 12.5 %, and gives a fallback.
 8. **Large samples.** A live test with string samples of 2000 bytes, mixed
    with small ones. The large ones go on TCP, and each sample arrives
    once, in order.
-9. **The fallback.** In the lossy-link benchmark:
-    - a loss of 30 % keeps the connection on UDP, with no lost sample,
-    - a loss of 50 % changes the connection to TCP, with no lost sample,
-    - 30 s later the connection tries UDP again,
+9. **Heavy loss and the fallback.** In the lossy-link benchmark:
+    - a loss of 30 % in each direction keeps the connection on UDP, with
+      no lost sample,
+    - a loss of 50 % in each direction keeps the connection on UDP, and
+      loses much less than TCP: at most 0.1 % of the samples,
+    - the same two rules from the start of the run, before the
+      connection opens: the result of the connect is reported, for
+      `dgram` and for TCP,
+    - after a fallback, the connection tries UDP again after 30 s,
     - a UDP path that stops while TCP works (a rule that drops only UDP)
       changes the connection to TCP within 4 s, with no lost sample.
 10. **The success criterion.** `oracle/lossylink.py` with `dgram/1` on.

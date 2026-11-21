@@ -3,15 +3,19 @@
 //!
 //! The session first runs as with `resume/1`. When a hello with the correct
 //! cookie arrives, a path record on TCP moves the samples to UDP. The TCP
-//! connection then carries resends, samples too large for a datagram, and
-//! the path records. A thread reads the requests of the inlet from TCP.
+//! connection then carries the resends of large gaps, samples too large for
+//! a datagram, and the path records. A thread reads the requests of the
+//! inlet from TCP. A second thread reads the hello and the feedback
+//! datagrams of the inlet from UDP.
 
 use crate::queue::{Fanout, SampleQueue};
-use labstream_proto::dgram::{self, Packer, Packet, Path, Record};
+use labstream_proto::dgram::{self, CopyControl, Packer, Packet, Path, Record};
 use labstream_proto::seq::Numbering;
 use labstream_wire::{Codec, Format, Sample};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, UdpSocket};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,6 +30,20 @@ const IDLE_EVERY: Duration = Duration::from_secs(1);
 const HELLO_WAIT: Duration = Duration::from_secs(1);
 /// The time after a fallback before the outlet tries UDP again.
 const RETRY_UDP: Duration = Duration::from_secs(30);
+/// The idle datagrams after the last data datagram. `docs/extensions.md`,
+/// the idle datagram, rule 1.
+const TAIL: [Duration; 3] = [
+    Duration::from_millis(25),
+    Duration::from_millis(100),
+    Duration::from_millis(250),
+];
+/// The most samples that the outlet sends for one feedback datagram.
+const RESEND_CAP: usize = 256;
+/// The shortest time before the outlet sends one sample again on UDP.
+const RESEND_AGAIN: Duration = Duration::from_millis(10);
+/// The time with no feedback datagram after which the outlet uses the short
+/// keepalive timers again. `docs/extensions.md`, keepalive on UDP, rule 3.
+const QUIET_FEEDBACK: Duration = Duration::from_secs(3);
 
 /// True when the samples of this stream are small enough for `dgram/1`.
 pub(crate) fn sample_fits(format: Format, channels: usize) -> bool {
@@ -62,7 +80,15 @@ pub(crate) struct Setup {
     pub peer: IpAddr,
     /// The requests of the inlet, read from TCP.
     pub requests: Receiver<Record>,
+    /// The queue of the session, to wake it for a feedback datagram.
+    pub queue: Arc<SampleQueue>,
+    /// The TCP connection, for its keepalive timers.
+    pub tcp: TcpStream,
 }
+
+/// One feedback datagram of the inlet: the loss in parts per million, and
+/// the gaps.
+type Feedback = (u32, Vec<(u64, u32)>);
 
 /// Read the requests of the inlet from TCP. The thread ends with the
 /// connection.
@@ -102,32 +128,69 @@ pub(crate) fn read_requests(
     rx
 }
 
-/// Wait for the first hello with the correct cookie from the address of the
-/// TCP peer. The result holds the source of that hello, once it arrives.
-fn wait_hello(socket: &UdpSocket, cookie: u64, peer: IpAddr) -> Arc<Mutex<Option<SocketAddr>>> {
+/// Read the UDP socket of the session until `stop`. The first hello with
+/// the correct cookie from the address of the TCP peer, in 1 s, sets the
+/// target. After it, each feedback datagram from the target with the
+/// correct cookie goes to the result channel, and wakes the session.
+fn read_udp(
+    socket: &UdpSocket,
+    cookie: u64,
+    peer: IpAddr,
+    queue: Arc<SampleQueue>,
+    stop: Arc<AtomicBool>,
+) -> (Arc<Mutex<Option<SocketAddr>>>, Receiver<Feedback>) {
     let found = Arc::new(Mutex::new(None));
+    let (tx, rx) = std::sync::mpsc::channel();
     let Ok(sock) = socket.try_clone() else {
-        return found;
+        return (found, rx);
     };
     let out = Arc::clone(&found);
     std::thread::spawn(move || {
-        let end = Instant::now() + HELLO_WAIT;
-        let mut buf = [0u8; 64];
-        while let Some(left) = end.checked_duration_since(Instant::now()) {
-            let _ = sock.set_read_timeout(Some(left.max(Duration::from_millis(1))));
+        let _ = sock.set_read_timeout(Some(Duration::from_millis(100)));
+        let begin = Instant::now();
+        let mut target: Option<SocketAddr> = None;
+        let mut buf = [0u8; 2048];
+        while !stop.load(Ordering::SeqCst) {
+            if target.is_none() && begin.elapsed() >= HELLO_WAIT {
+                return;
+            }
             let Ok((n, from)) = sock.recv_from(&mut buf) else {
                 continue;
             };
-            if from.ip() != peer {
-                continue;
-            }
-            if dgram::parse(&buf[..n]) == Ok(dgram::Datagram::Hello { cookie }) {
-                *out.lock().unwrap() = Some(from);
-                return;
+            match (target, dgram::parse(&buf[..n])) {
+                (None, Ok(dgram::Datagram::Hello { cookie: c }))
+                    if c == cookie && from.ip() == peer =>
+                {
+                    target = Some(from);
+                    *out.lock().unwrap() = Some(from);
+                }
+                (
+                    Some(t),
+                    Ok(dgram::Datagram::Feedback {
+                        cookie: c,
+                        loss,
+                        gaps,
+                    }),
+                ) if c == cookie && from == t => {
+                    if tx.send((loss, gaps.iter().collect())).is_err() {
+                        return;
+                    }
+                    queue.wake();
+                }
+                _ => {}
             }
         }
     });
-    found
+    (found, rx)
+}
+
+/// Sets a flag when it goes out of scope.
+struct StopOnDrop(Arc<AtomicBool>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 /// The live part of a `dgram/1` session.
@@ -147,10 +210,24 @@ impl<W: Write> Live<'_, W> {
     /// Send the queue until `stop`, or until a write fails. The result is the
     /// count of samples sent.
     pub fn run(mut self, stop: &dyn Fn() -> bool) -> usize {
-        let hello = wait_hello(&self.setup.socket, self.setup.cookie, self.setup.peer);
+        let stop_udp = Arc::new(AtomicBool::new(false));
+        let _stop_udp = StopOnDrop(Arc::clone(&stop_udp));
+        let (hello, feedback) = read_udp(
+            &self.setup.socket,
+            self.setup.cookie,
+            self.setup.peer,
+            Arc::clone(&self.setup.queue),
+            stop_udp,
+        );
+        let begin = Instant::now();
         let mut target: Option<SocketAddr> = None;
         let mut path = Path::Tcp;
         let mut packer = Packer::new(self.setup.cookie);
+        let mut control = CopyControl::new();
+        let mut resent_at: HashMap<u64, Instant> = HashMap::new();
+        let mut tail = TAIL.len();
+        let mut last_feedback = Instant::now();
+        let mut relaxed = false;
         let mut fallback_at: Option<Instant> = None;
         let mut last_data = Instant::now();
         let mut repeated = true;
@@ -204,6 +281,32 @@ impl<W: Write> Live<'_, W> {
                 }
             }
 
+            // The feedback of the inlet: the count of copies, and the small
+            // gaps, sent again on UDP.
+            while let Ok((loss, gaps)) = feedback.try_recv() {
+                last_feedback = Instant::now();
+                if path == Path::Udp && !relaxed {
+                    crate::keepalive::relax(&self.setup.tcp);
+                    relaxed = true;
+                }
+                let t = begin.elapsed().as_secs_f64();
+                let copies = control.report(loss, t, packer.serial());
+                if self.trace && copies != packer.copies() {
+                    eprintln!("TRACE dgram: {copies} copies at a loss of {loss} ppm");
+                }
+                packer.set_copies(copies);
+                if let (Path::Udp, Some(to)) = (path, target) {
+                    self.resend_udp(&gaps, next, &mut packer, &mut resent_at, to);
+                }
+            }
+
+            // Keepalive: the long timers only while the feedback shows that
+            // the inlet is alive. `docs/extensions.md`, keepalive on UDP.
+            if relaxed && (path == Path::Tcp || last_feedback.elapsed() >= QUIET_FEEDBACK) {
+                crate::keepalive::enable(&self.setup.tcp);
+                relaxed = false;
+            }
+
             // The change to UDP, once the hello arrived, and again after a
             // fallback.
             let may_retry = fallback_at.map_or(true, |t| t.elapsed() >= RETRY_UDP);
@@ -221,6 +324,7 @@ impl<W: Write> Live<'_, W> {
 
             let wait = match path {
                 Path::Udp if !repeated => REPEAT_AFTER.saturating_sub(last_data.elapsed()),
+                Path::Udp if tail < TAIL.len() => TAIL[tail].saturating_sub(last_data.elapsed()),
                 Path::Udp => IDLE_EVERY.saturating_sub(last_idle.elapsed()),
                 Path::Tcp if target.is_none() => Duration::from_millis(10),
                 Path::Tcp => Duration::from_millis(200),
@@ -241,6 +345,13 @@ impl<W: Write> Live<'_, W> {
                             .unwrap_or_else(|| dgram::idle(self.setup.cookie, next).to_vec());
                         let _ = self.setup.socket.send_to(&d, to);
                         repeated = true;
+                        last_idle = Instant::now();
+                    } else if tail < TAIL.len() && last_data.elapsed() >= TAIL[tail] {
+                        let _ = self
+                            .setup
+                            .socket
+                            .send_to(&dgram::idle(self.setup.cookie, next), to);
+                        tail += 1;
                         last_idle = Instant::now();
                     } else if last_idle.elapsed() >= IDLE_EVERY {
                         let _ = self
@@ -323,6 +434,7 @@ impl<W: Write> Live<'_, W> {
                     }
                     last_data = Instant::now();
                     repeated = false;
+                    tail = 0;
                 }
             }
         }
@@ -354,6 +466,82 @@ impl<W: Write> Live<'_, W> {
             at = first.wrapping_add(taken as u64);
         }
         self.flush(pending)
+    }
+
+    /// Send the samples of small gaps again on UDP, from the history.
+    /// `docs/extensions.md`, section `dgram`, the resend, rule 5.
+    fn resend_udp(
+        &mut self,
+        gaps: &[(u64, u32)],
+        next: u64,
+        packer: &mut Packer,
+        resent_at: &mut HashMap<u64, Instant>,
+        to: SocketAddr,
+    ) {
+        if resent_at.len() > 4096 {
+            resent_at.retain(|_, t| t.elapsed() < Duration::from_secs(1));
+        }
+        let times = if packer.copies() >= 3 { 2 } else { 1 };
+        let mut budget = RESEND_CAP;
+        let mut history = Vec::new();
+        let mut grams = Vec::new();
+        for &(from, count) in gaps {
+            let until = from.saturating_add(count as u64).min(next);
+            let mut at = from;
+            while at < until && budget > 0 {
+                // A run of numbers that did not go out in the last 10 ms.
+                while at < until
+                    && resent_at
+                        .get(&at)
+                        .is_some_and(|t| t.elapsed() < RESEND_AGAIN)
+                {
+                    at += 1;
+                }
+                let mut end = at;
+                while end < until
+                    && (end - at) < budget as u64
+                    && !resent_at
+                        .get(&end)
+                        .is_some_and(|t| t.elapsed() < RESEND_AGAIN)
+                {
+                    end += 1;
+                }
+                if end == at {
+                    break;
+                }
+                history.clear();
+                let Some((first, taken)) =
+                    self.fanout
+                        .read_history(at, end, (end - at) as usize, &mut history)
+                else {
+                    break;
+                };
+                let mut encoded = Vec::with_capacity(taken);
+                for s in &history {
+                    let mut e = Vec::new();
+                    if self.codec.encode(s, &mut e).is_err() {
+                        return;
+                    }
+                    encoded.push(e);
+                }
+                grams.clear();
+                packer.resend(first, &encoded, &mut grams);
+                for d in &grams {
+                    for _ in 0..times {
+                        let _ = self.setup.socket.send_to(d, to);
+                    }
+                }
+                let now = Instant::now();
+                for n in first..first.wrapping_add(taken as u64) {
+                    resent_at.insert(n, now);
+                }
+                budget = budget.saturating_sub(taken);
+                if self.trace {
+                    eprintln!("TRACE dgram: resent {taken} samples from {first} on UDP");
+                }
+                at = end.max(first.wrapping_add(taken as u64));
+            }
+        }
     }
 
     /// Write what waits on TCP. A resend block and a batch each go out with
