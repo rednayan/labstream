@@ -53,6 +53,10 @@ struct State {
     bad_windows: u32,
     /// Set when the connection ends. No sample goes to the queue after it.
     closed: bool,
+    /// The time base of the reorder buffer.
+    begin: Instant,
+    /// `N` of the `resume` answer: the TCP resend gives the samples below it.
+    resend_until: Option<u64>,
 }
 
 /// The `dgram/1` part of one inlet connection.
@@ -70,6 +74,7 @@ impl DgramIn {
         codec: Codec,
         queue: Arc<SampleQueue>,
         lost: Arc<std::sync::atomic::AtomicU64>,
+        resend_until: Option<u64>,
     ) -> Option<DgramIn> {
         let peer = tcp.peer_addr().ok()?;
         let local: IpAddr = if peer.is_ipv6() {
@@ -98,6 +103,8 @@ impl DgramIn {
             window_first: None,
             bad_windows: 0,
             closed: false,
+            begin: Instant::now(),
+            resend_until,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         {
@@ -127,6 +134,12 @@ impl DgramIn {
             s.started = true;
             s.base_lost = counter_lost;
             s.reorder.start(number);
+            // The `resume` resend is on the way on TCP. Asking for it again
+            // only adds a second copy to the link.
+            if let Some(until) = s.resend_until {
+                let now = s.begin.elapsed().as_secs_f64();
+                s.reorder.assume_requested(number, until, now);
+            }
             return;
         }
         let e = s.reorder.expected();
@@ -137,6 +150,9 @@ impl DgramIn {
         {
             let (from, _) = s.requests.remove(i);
             if e == Some(from) {
+                if trace() {
+                    eprintln!("TRACE dgram: the history starts at {number}, not {from}");
+                }
                 s.reorder.lost_below(number);
             }
         }
@@ -155,7 +171,10 @@ impl DgramIn {
 
     /// A sample from TCP, with its number.
     pub fn tcp_sample(&self, number: u64, sample: Sample) {
-        self.state.lock().unwrap().reorder.insert(number, sample);
+        let mut s = self.state.lock().unwrap();
+        let now = s.begin.elapsed().as_secs_f64();
+        s.reorder.progress(now);
+        s.reorder.insert(number, sample);
     }
 
     /// Move the samples that are in order to the queue.
@@ -209,7 +228,7 @@ fn udp_loop(
     queue: &SampleQueue,
     lost: &std::sync::atomic::AtomicU64,
 ) {
-    let begin = Instant::now();
+    let begin = state.lock().unwrap().begin;
     let mut hello_at: Option<Instant> = None;
     let mut heard = false;
     let mut buf = vec![0u8; 2048];
@@ -268,15 +287,28 @@ fn udp_loop(
                 let mut r = Vec::new();
                 dgram::write_resend(&mut r, from, count);
                 if s.tcp.write_all(&r).is_ok() {
+                    if trace() {
+                        eprintln!("TRACE dgram: asked for {count} samples from {from}");
+                    }
                     s.requests.push((from, count));
                     s.window_asked += count as u64;
                 }
             }
-            Some(Action::GaveUp { .. }) => deliver(&mut s, queue, lost),
+            Some(Action::GaveUp { from, count }) => {
+                if trace() {
+                    eprintln!("TRACE dgram: gave up {count} samples from {from}");
+                }
+                deliver(&mut s, queue, lost)
+            }
             None => {}
         }
         check_path(&mut s, now);
     }
+}
+
+/// True when `LSL_TRACE_DGRAM` is set.
+fn trace() -> bool {
+    std::env::var_os("LSL_TRACE_DGRAM").is_some()
 }
 
 fn heard_datagram(s: &mut State, now: Instant) {

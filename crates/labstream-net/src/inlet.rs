@@ -724,7 +724,8 @@ fn read_and_recover(
     // `docs/extensions.md`, section `dgram`.
     let start_dgram = |param: Option<features::DgramParam>,
                        sock: &TcpStream,
-                       codec: labstream_wire::Codec|
+                       codec: labstream_wire::Codec,
+                       until: Option<u64>|
      -> Option<crate::dgram_in::DgramIn> {
         crate::dgram_in::DgramIn::start(
             param?,
@@ -732,9 +733,10 @@ fn read_and_recover(
             codec,
             Arc::clone(&queue),
             Arc::clone(&conn.lost),
+            until,
         )
     };
-    let mut dg = start_dgram(dgram, &sock, codec);
+    let mut dg = start_dgram(dgram, &sock, codec, until);
 
     loop {
         if queue.is_closed() {
@@ -880,7 +882,7 @@ fn read_and_recover(
                         epoch = Some(a.epoch);
                     }
                     until = answer.map(|a| a.number);
-                    dg = start_dgram(features::dgram_answer(c.features()), &sock, codec);
+                    dg = start_dgram(features::dgram_answer(c.features()), &sock, codec, until);
                     conn.resumed.store(answer.is_some(), Ordering::SeqCst);
                     conn.numbered.store(uses_seq(&c), Ordering::SeqCst);
                     conn.recoveries.fetch_add(1, Ordering::SeqCst);
@@ -918,7 +920,12 @@ fn read_and_recover(
                             let answer = features::resume_answer(c.features());
                             epoch = answer.map(|a| a.epoch);
                             until = answer.map(|a| a.number);
-                            dg = start_dgram(features::dgram_answer(c.features()), &sock, codec);
+                            dg = start_dgram(
+                                features::dgram_answer(c.features()),
+                                &sock,
+                                codec,
+                                until,
+                            );
                             conn.resumed.store(answer.is_some(), Ordering::SeqCst);
                             conn.numbered.store(uses_seq(&c), Ordering::SeqCst);
                             *conn.info.lock().unwrap() = *fresh;

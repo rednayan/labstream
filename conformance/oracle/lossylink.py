@@ -60,6 +60,8 @@ RULES = {
     "rate": ("rate 1mbit", 10.0, None, None),
     "cut3": ("", 15.0, 5.0, 3.0),
     "cut10": ("", 25.0, 5.0, 10.0),
+    # A slow link with a dropout: the backlog after the cut is slow too.
+    "cut10rate": ("rate 1mbit", 25.0, 5.0, 10.0),
     # The fallback of `dgram/1`. `docs/extensions.md`, section `dgram`.
     "loss30": ("delay 20ms loss 30%", 10.0, None, None),
     "loss50": ("delay 20ms loss 50%", 15.0, None, None),
@@ -69,6 +71,9 @@ RULES = {
 # The rules whose cut drops only UDP: a firewall or NAT state that ends
 # while TCP works.
 UDP_ONLY = {"udpdead"}
+
+# With `--logs DIR`, the stderr and stdout of each process go to files.
+LOGS = os.environ.get("LABSTREAM_LOSSYLINK_LOGS")
 
 
 def spread(values: list) -> str:
@@ -86,7 +91,7 @@ class Link:
     """The second namespace, the veth pair, and the rules on both ends."""
 
     def __init__(self):
-        self.has_prio = {}
+        self.has_root = {}
         sh("ip", "link", "set", "lo", "up")
         self.holder = subprocess.Popen(["unshare", "-n", "sleep", "infinity"])
         time.sleep(0.3)
@@ -112,22 +117,26 @@ class Link:
         args = netem.split() if netem else ["delay", "0ms"]
         for run in (sh, self.inside):
             dev = "va" if run is sh else "vb"
-            # A `prio` root with a filter goes first, as a whole.
-            if self.has_prio.get(dev):
+            # `tc qdisc replace` keeps the parameters that the new rule does
+            # not give, for example a rate limit. Each rule thus starts from
+            # an empty root.
+            if self.has_root.get(dev):
                 run("tc", "qdisc", "del", "dev", dev, "root")
-                self.has_prio[dev] = False
-            run("tc", "qdisc", "replace", "dev", dev, "root", "netem", *args)
+            run("tc", "qdisc", "add", "dev", dev, "root", "netem", *args)
+            self.has_root[dev] = True
 
     def drop_udp(self) -> None:
         """Drop each UDP packet on both ends, and pass the rest."""
         for run in (sh, self.inside):
             dev = "va" if run is sh else "vb"
-            run("tc", "qdisc", "replace", "dev", dev, "root", "handle", "1:", "prio")
+            if self.has_root.get(dev):
+                run("tc", "qdisc", "del", "dev", dev, "root")
+            run("tc", "qdisc", "add", "dev", dev, "root", "handle", "1:", "prio")
             run("tc", "qdisc", "add", "dev", dev, "parent", "1:3", "handle", "30:",
                 "netem", "loss", "100%")
             run("tc", "filter", "add", "dev", dev, "parent", "1:0", "protocol", "ip",
                 "prio", "1", "u32", "match", "ip", "protocol", "17", "0xff", "flowid", "1:3")
-            self.has_prio[dev] = True
+            self.has_root[dev] = True
 
     def close(self) -> None:
         self.holder.kill()
@@ -182,10 +191,21 @@ def run_pair(link: Link, out_bin: Path, in_bin: Path, name: str, rule: str, load
     finally:
         if outlet.poll() is None:
             outlet.kill()
+    if LOGS:
+        stem = Path(LOGS) / name
+        stem.with_suffix(".outlet.log").write_text("\n".join(out_err) + "\n" + out_out)
+        stem.with_suffix(".inlet.log").write_text("\n".join(in_err) + "\n" + in_out)
     try:
-        return latency.last_json(out_out), latency.last_json(in_out)
-    except RuntimeError:
+        # A run that measured no sample prints `nan`, which JSON does not
+        # allow.
+        o = latency.last_json(out_out.replace("nan", "null"))
+        i = latency.last_json(in_out.replace("nan", "null"))
+    except (RuntimeError, ValueError):
         raise RuntimeError(f"{rule}: no result. outlet: {out_err[-5:]} inlet: {in_err[-5:]}")
+    for key in ("p50_us", "p99_us", "p999_us", "max_us"):
+        if i.get(key) is None:
+            i[key] = float("nan")
+    return o, i
 
 
 def inside(args) -> int:
@@ -293,6 +313,7 @@ def main() -> int:
                     metavar="NAME:SECTION.KEY=VALUE",
                     help="add one key to the configuration file of one library")
     ap.add_argument("--loads", default="512x8x1")
+    ap.add_argument("--logs", default=None, help="keep the output of each process here")
     args = ap.parse_args()
     if args.lib is None:
         args.lib = [f"liblsl={ROOT / '.build' / 'install' / 'lib'}",
@@ -303,6 +324,9 @@ def main() -> int:
     if os.environ.get(INSIDE):
         return inside(args)
     env = dict(os.environ, **{INSIDE: "1"})
+    if args.logs:
+        Path(args.logs).mkdir(parents=True, exist_ok=True)
+        env["LABSTREAM_LOSSYLINK_LOGS"] = str(Path(args.logs).resolve())
     env.pop("LD_LIBRARY_PATH", None)
     cmd = ["unshare", "-Urn", sys.executable, str(Path(__file__).resolve()),
            "--rules", args.rules, "--repeat", str(args.repeat)]

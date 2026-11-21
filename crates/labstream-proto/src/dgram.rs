@@ -431,7 +431,9 @@ pub struct Reorder<T> {
     /// The number after the highest number that the inlet knows of.
     horizon: Option<u64>,
     gap_since: Option<f64>,
-    requested: Option<(u64, f64)>,
+    /// The open request: the numbers `from..until`, and the time of the
+    /// request or of the last TCP data.
+    requested: Option<(u64, u64, f64)>,
     lost: u64,
     duplicates: u64,
 }
@@ -513,6 +515,23 @@ impl<T> Reorder<T> {
         }
     }
 
+    /// Data arrived on TCP at `now`. A resend can be slow on a slow link, so
+    /// the time limit of an open request counts again from this point.
+    /// `docs/extensions.md`, section `dgram`, resend rule 6.
+    pub fn progress(&mut self, now: f64) {
+        if let Some((from, until, _)) = self.requested {
+            self.requested = Some((from, until, now));
+        }
+    }
+
+    /// The numbers `from..until` are on the way on TCP, as at the start of a
+    /// connection with a `resume` resend. The buffer asks for none of them.
+    pub fn assume_requested(&mut self, from: u64, until: u64, now: f64) {
+        if until > from {
+            self.requested = Some((from, until, now));
+        }
+    }
+
     /// Move each sample that follows the expected number to `out`, in
     /// order. The result is their count.
     pub fn drain(&mut self, out: &mut Vec<T>) -> usize {
@@ -546,36 +565,59 @@ impl<T> Reorder<T> {
     /// answer for `give_up` seconds gives up the gap: its numbers count as
     /// lost, and the samples after it can go.
     pub fn poll(&mut self, now: f64, wait: f64, give_up: f64) -> Option<Action> {
+        // A request that the expected number passed is complete.
+        if let (Some((_, until, _)), Some(e)) = (self.requested, self.expected) {
+            if until <= e {
+                self.requested = None;
+                self.gap_since = None;
+            }
+        }
         let (Some(e), Some(end)) = (self.expected, self.gap_end()) else {
             self.gap_since = None;
-            self.requested = None;
             return None;
         };
-        // A request for a different number belongs to an older gap.
-        if self.requested.is_some_and(|(from, _)| from != e) {
-            self.requested = None;
-            self.gap_since = Some(now);
-        }
-        let since = *self.gap_since.get_or_insert(now);
         match self.requested {
-            None if now - since >= wait => {
-                self.requested = Some((e, now));
-                Some(Action::Request {
-                    from: e,
-                    count: (end - e).min(u32::MAX as u64) as u32,
-                })
+            // The open request covers the start of the gap. No new request
+            // for that part: the answer can be on the way. A part beyond the
+            // request gets its own request after the wait.
+            Some((from, until, at)) => {
+                if now - at >= give_up {
+                    let stop = end.min(until);
+                    self.lost += stop - e;
+                    self.expected = Some(stop);
+                    self.requested = None;
+                    self.gap_since = None;
+                    return Some(Action::GaveUp {
+                        from: e,
+                        count: stop - e,
+                    });
+                }
+                if end > until {
+                    let since = *self.gap_since.get_or_insert(now);
+                    if now - since >= wait {
+                        self.requested = Some((from, end, now));
+                        self.gap_since = None;
+                        return Some(Action::Request {
+                            from: until,
+                            count: (end - until).min(u32::MAX as u64) as u32,
+                        });
+                    }
+                }
+                None
             }
-            Some((_, at)) if now - at >= give_up => {
-                self.lost += end - e;
-                self.expected = Some(end);
-                self.gap_since = None;
-                self.requested = None;
-                Some(Action::GaveUp {
-                    from: e,
-                    count: end - e,
-                })
+            None => {
+                let since = *self.gap_since.get_or_insert(now);
+                if now - since >= wait {
+                    self.requested = Some((e, end, now));
+                    self.gap_since = None;
+                    Some(Action::Request {
+                        from: e,
+                        count: (end - e).min(u32::MAX as u64) as u32,
+                    })
+                } else {
+                    None
+                }
             }
-            _ => None,
         }
     }
 }
@@ -907,6 +949,37 @@ mod tests {
     }
 
     #[test]
+    fn data_on_tcp_holds_off_the_give_up() {
+        let mut r = Reorder::new();
+        r.start(0);
+        r.insert(3, 3);
+        assert_eq!(r.poll(0.0, 0.01, 0.5), None);
+        assert_eq!(
+            r.poll(0.02, 0.01, 0.5),
+            Some(Action::Request { from: 0, count: 3 })
+        );
+        // The resend is slow: other TCP data arrives at 0.4 and 0.8 s.
+        r.progress(0.4);
+        assert_eq!(r.poll(0.6, 0.01, 0.5), None);
+        r.progress(0.8);
+        assert_eq!(r.poll(1.2, 0.01, 0.5), None);
+        // The gap fills at 1.25 s.
+        for n in 0..3 {
+            r.insert(n, n);
+        }
+        assert_eq!(take(&mut r), vec![0, 1, 2, 3]);
+        assert_eq!(r.lost(), 0);
+        // With no data, the limit still acts.
+        r.insert(6, 6);
+        assert!(r.poll(2.0, 0.01, 0.5).is_none());
+        assert!(r.poll(2.02, 0.01, 0.5).is_some());
+        assert_eq!(
+            r.poll(2.53, 0.01, 0.5),
+            Some(Action::GaveUp { from: 4, count: 2 })
+        );
+    }
+
+    #[test]
     fn an_idle_datagram_shows_a_lost_last_sample() {
         let mut r = Reorder::new();
         r.start(0);
@@ -997,5 +1070,63 @@ mod tests {
                 assert_eq!(r.lost(), 0);
             }
         }
+    }
+
+    #[test]
+    fn a_shrinking_gap_gets_no_new_request() {
+        let mut r = Reorder::new();
+        r.start(0);
+        r.insert(100, 100);
+        assert_eq!(r.poll(0.0, 0.01, 0.5), None);
+        assert_eq!(
+            r.poll(0.02, 0.01, 0.5),
+            Some(Action::Request {
+                from: 0,
+                count: 100
+            })
+        );
+        // The answer arrives in parts. The gap shrinks, and stays covered.
+        for n in 0..40 {
+            r.insert(n, n);
+        }
+        take(&mut r);
+        r.progress(0.05);
+        for t in [0.10, 0.20, 0.40] {
+            assert_eq!(r.poll(t, 0.01, 0.5), None, "at {t}");
+        }
+        // The rest of the answer, then a new gap after it.
+        for n in 40..100 {
+            r.insert(n, n);
+        }
+        r.insert(150, 150);
+        take(&mut r);
+        assert_eq!(r.poll(0.41, 0.01, 0.5), None);
+        assert_eq!(
+            r.poll(0.43, 0.01, 0.5),
+            Some(Action::Request {
+                from: 101,
+                count: 49
+            })
+        );
+        assert_eq!(r.lost(), 0);
+    }
+
+    #[test]
+    fn the_range_of_a_resume_resend_gets_no_request() {
+        let mut r = Reorder::new();
+        r.start(10);
+        r.assume_requested(10, 500, 0.0);
+        // UDP gives 500 onward while TCP still sends the resend.
+        r.insert(500, 500);
+        for t in [0.01, 0.1, 0.3] {
+            assert_eq!(r.poll(t, 0.01, 0.5), None);
+            r.progress(t);
+        }
+        for n in 10..500 {
+            r.insert(n, n);
+        }
+        assert_eq!(take(&mut r).len(), 491);
+        assert_eq!(r.poll(0.4, 0.01, 0.5), None);
+        assert_eq!(r.lost(), 0);
     }
 }
