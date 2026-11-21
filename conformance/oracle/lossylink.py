@@ -51,21 +51,25 @@ OUTLET_ADDR = "10.77.0.1"
 INLET_ADDR = "10.77.0.2"
 INSIDE = "LABSTREAM_LOSSYLINK_INSIDE"
 
-# name: (netem arguments, run seconds, cut start, cut seconds)
-# A cut of `None` seconds lasts to the end of the run.
+# name: (netem arguments, run seconds, change start, change seconds,
+#        netem arguments during the change)
+# A change of `None` seconds lasts to the end of the run.
 RULES = {
-    "clean": ("", 10.0, None, None),
-    "delay": ("delay 20ms", 10.0, None, None),
-    "loss": ("delay 20ms loss 1%", 10.0, None, None),
-    "rate": ("rate 1mbit", 10.0, None, None),
-    "cut3": ("", 15.0, 5.0, 3.0),
-    "cut10": ("", 25.0, 5.0, 10.0),
+    "clean": ("", 10.0, None, None, None),
+    "delay": ("delay 20ms", 10.0, None, None, None),
+    "loss": ("delay 20ms loss 1%", 10.0, None, None, None),
+    "rate": ("rate 1mbit", 10.0, None, None, None),
+    "cut3": ("", 15.0, 5.0, 3.0, "loss 100%"),
+    "cut10": ("", 25.0, 5.0, 10.0, "loss 100%"),
     # A slow link with a dropout: the backlog after the cut is slow too.
-    "cut10rate": ("rate 1mbit", 25.0, 5.0, 10.0),
+    "cut10rate": ("rate 1mbit", 25.0, 5.0, 10.0, "loss 100%"),
     # The fallback of `dgram/1`. `docs/extensions.md`, section `dgram`.
-    "loss30": ("delay 20ms loss 30%", 10.0, None, None),
-    "loss50": ("delay 20ms loss 50%", 15.0, None, None),
-    "udpdead": ("", 15.0, 5.0, None),
+    # The heavy loss starts after 2 s, once the connection is open: at 50 %
+    # loss, the discovery and the handshake alone can take longer than the
+    # run.
+    "loss30": ("delay 20ms", 12.0, 2.0, None, "delay 20ms loss 30%"),
+    "loss50": ("delay 20ms", 12.0, 2.0, None, "delay 20ms loss 50%"),
+    "udpdead": ("", 15.0, 5.0, None, None),
 }
 
 # The rules whose cut drops only UDP: a firewall or NAT state that ends
@@ -153,7 +157,7 @@ def parse_load(text: str) -> tuple:
 
 def run_pair(link: Link, out_bin: Path, in_bin: Path, name: str, rule: str, load: tuple,
              cfg: Path) -> tuple:
-    netem, seconds, cut_at, cut_for = RULES[rule]
+    netem, seconds, cut_at, cut_for, during = RULES[rule]
     rate, channels, chunk, irregular = load
     link.set_rule(netem)
     env = dict(os.environ, LSLAPICFG=str(cfg))
@@ -176,7 +180,7 @@ def run_pair(link: Link, out_bin: Path, in_bin: Path, name: str, rule: str, load
                     if rule in UDP_ONLY:
                         link.drop_udp()
                     else:
-                        link.set_rule("loss 100%")
+                        link.set_rule(during)
                     if cut_for is not None:
                         time.sleep(cut_for)
                         link.set_rule(netem)
