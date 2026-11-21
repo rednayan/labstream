@@ -368,8 +368,11 @@ struct ConnState {
     info: Mutex<StreamInfo>,
     /// True when the current connection uses `seq/1`. `docs/extensions.md`.
     numbered: AtomicBool,
-    /// The samples that never arrived, from the `seq/1` numbers.
-    lost: AtomicU64,
+    /// The samples that never arrived, from the `seq/1` numbers. The thread
+    /// of `dgram/1` also writes it.
+    lost: Arc<AtomicU64>,
+    /// True while the samples of the connection arrive on UDP.
+    on_udp: AtomicBool,
     /// True when the current connection uses `resume/1`. `docs/extensions.md`,
     /// section `resume`.
     resumed: AtomicBool,
@@ -428,6 +431,7 @@ impl Inlet {
         debug_assert_eq!(client.state(), State::Streaming);
         let numbered = uses_seq(&client);
         let resume = features::resume_answer(client.features());
+        let dgram = features::dgram_answer(client.features());
 
         // The queue holds what the application has not pulled yet. Its size is
         // the value that went out in `Max-Buffer-Length`, which is a count of
@@ -451,7 +455,8 @@ impl Inlet {
             connected: AtomicBool::new(true),
             info: Mutex::new(info.clone()),
             numbered: AtomicBool::new(numbered),
-            lost: AtomicU64::new(0),
+            lost: Arc::new(AtomicU64::new(0)),
+            on_udp: AtomicBool::new(false),
             resumed: AtomicBool::new(resume.is_some()),
             resent: AtomicU64::new(0),
         });
@@ -475,6 +480,7 @@ impl Inlet {
                     state,
                     buffer_samples,
                     resume,
+                    dgram,
                 );
             });
         }
@@ -648,6 +654,13 @@ impl Inlet {
         }
     }
 
+    /// True while the samples of the connection arrive on UDP, with the
+    /// `dgram/1` feature. `docs/extensions.md`, section `dgram`. `dgram/1` is
+    /// off by default.
+    pub fn on_udp(&self) -> bool {
+        self.conn.on_udp.load(Ordering::SeqCst)
+    }
+
     /// The size of the queue, in samples.
     pub fn buffer_capacity(&self) -> usize {
         self.queue.capacity()
@@ -683,6 +696,7 @@ fn read_and_recover(
     conn: Arc<ConnState>,
     buffer_samples: i32,
     resume: Option<features::ResumeParam>,
+    dgram: Option<features::DgramParam>,
 ) {
     let mut tmp = vec![0u8; 65536];
     let mut batch: Vec<Sample> = Vec::new();
@@ -706,6 +720,22 @@ fn read_and_recover(
     let mut until = resume.map(|p| p.number);
     let mut resent: u64 = 0;
 
+    // The `dgram/1` part of the current connection, if it agreed to it.
+    // `docs/extensions.md`, section `dgram`.
+    let start_dgram = |param: Option<features::DgramParam>,
+                       sock: &TcpStream,
+                       codec: labstream_wire::Codec|
+     -> Option<crate::dgram_in::DgramIn> {
+        crate::dgram_in::DgramIn::start(
+            param?,
+            sock,
+            codec,
+            Arc::clone(&queue),
+            Arc::clone(&conn.lost),
+        )
+    };
+    let mut dg = start_dgram(dgram, &sock, codec);
+
     loop {
         if queue.is_closed() {
             break;
@@ -720,9 +750,17 @@ fn read_and_recover(
             &mut deducer,
             numbered.then_some(&mut counter),
             until.map(|n| (n, &mut resent)),
+            dg.as_ref(),
             &mut batch,
         );
-        conn.lost.store(counter.lost(), Ordering::SeqCst);
+        match dg.as_ref() {
+            // The merged stream gives the loss count of a `dgram` connection.
+            Some(d) => {
+                d.deliver(&queue, &conn.lost);
+                conn.on_udp.store(d.on_udp(), Ordering::SeqCst);
+            }
+            None => conn.lost.store(counter.lost(), Ordering::SeqCst),
+        }
         conn.resent.store(resent, Ordering::SeqCst);
         if !batch.is_empty() {
             last_data = Instant::now();
@@ -784,6 +822,13 @@ fn read_and_recover(
             conn.connected.store(false, Ordering::SeqCst);
         }
 
+        // With `dgram`, the merged stream knows the next number. The count
+        // takes it, and the next connection asks from it.
+        if let Some(e) = dg.take().and_then(|d| d.close()) {
+            counter.resync(e);
+        }
+        conn.on_udp.store(false, Ordering::SeqCst);
+
         // Try until a connection exists again, or the inlet closes.
         loop {
             if queue.is_closed() {
@@ -835,6 +880,7 @@ fn read_and_recover(
                         epoch = Some(a.epoch);
                     }
                     until = answer.map(|a| a.number);
+                    dg = start_dgram(features::dgram_answer(c.features()), &sock, codec);
                     conn.resumed.store(answer.is_some(), Ordering::SeqCst);
                     conn.numbered.store(uses_seq(&c), Ordering::SeqCst);
                     conn.recoveries.fetch_add(1, Ordering::SeqCst);
@@ -872,6 +918,7 @@ fn read_and_recover(
                             let answer = features::resume_answer(c.features());
                             epoch = answer.map(|a| a.epoch);
                             until = answer.map(|a| a.number);
+                            dg = start_dgram(features::dgram_answer(c.features()), &sock, codec);
                             conn.resumed.store(answer.is_some(), Ordering::SeqCst);
                             conn.numbered.store(uses_seq(&c), Ordering::SeqCst);
                             *conn.info.lock().unwrap() = *fresh;
@@ -924,8 +971,10 @@ fn decode_buffered(
     deducer: &mut labstream_wire::TimestampDeducer,
     mut counter: Option<&mut labstream_proto::seq::Counter>,
     mut resent: Option<(u64, &mut u64)>,
+    dg: Option<&crate::dgram_in::DgramIn>,
     out: &mut Vec<Sample>,
 ) -> Result<(), labstream_wire::Error> {
+    use labstream_proto::dgram::{self, Record};
     use labstream_proto::seq::{peek, Next, RECORD_LEN};
     let mut pos = 0;
     let result = loop {
@@ -935,6 +984,9 @@ fn decode_buffered(
             match peek(&carry[pos..]) {
                 Next::Record(n) => {
                     c.record(n);
+                    if let Some(d) = dg {
+                        d.seq_record(n, c.lost());
+                    }
                     pos += RECORD_LEN;
                     continue;
                 }
@@ -942,11 +994,23 @@ fn decode_buffered(
                 Next::Sample => {}
             }
         }
+        // With `dgram/1`, a path record can stand before a sample.
+        if let Some(d) = dg {
+            match dgram::peek(&carry[pos..]) {
+                Record::Path { path, .. } => {
+                    d.path(path);
+                    pos += dgram::PATH_LEN;
+                    continue;
+                }
+                Record::Incomplete => break Ok(()),
+                _ => {}
+            }
+        }
         match codec.decode(&carry[pos..]) {
             Ok((mut sample, used)) => {
                 pos += used;
                 sample.timestamp = deducer.apply(sample.timestamp);
-                out.push(sample);
+                let number = counter.as_deref().and_then(|c| c.expected());
                 if let Some(c) = counter.as_deref_mut() {
                     if let (Some(number), Some((until, n))) = (c.expected(), resent.as_mut()) {
                         if number < *until {
@@ -954,6 +1018,11 @@ fn decode_buffered(
                         }
                     }
                     c.sample();
+                }
+                // A `dgram` connection merges its two paths by number.
+                match (dg, number) {
+                    (Some(d), Some(n)) => d.tcp_sample(n, sample),
+                    _ => out.push(sample),
                 }
             }
             Err(labstream_wire::Error::Truncated) => break Ok(()),
@@ -1077,6 +1146,7 @@ fn handshake(
     let allowed = &crate::config::get().features;
     let mut offer = features::offer(allowed);
     offer.extend(features::offer_resume(allowed, resume_from));
+    offer.extend(features::offer_dgram(allowed));
     let (mut client, request) =
         FeedClient::start_with(params, info.format, info.channel_count as usize, offer);
     stream.write_all(&request)?;
@@ -1184,7 +1254,7 @@ mod tests {
         let mut from = 0;
         for &to in cuts.iter().chain(std::iter::once(&bytes.len())) {
             carry.extend_from_slice(&bytes[from..to]);
-            decode_buffered(codec, &mut carry, &mut deducer, None, None, &mut out).unwrap();
+            decode_buffered(codec, &mut carry, &mut deducer, None, None, None, &mut out).unwrap();
             from = to;
         }
         assert!(carry.is_empty(), "no byte stays behind at the end");
@@ -1210,6 +1280,7 @@ mod tests {
                 &mut carry,
                 &mut deducer,
                 Some(&mut counter),
+                None,
                 None,
                 &mut out,
             )
@@ -1247,6 +1318,7 @@ mod tests {
             &mut deducer,
             Some(&mut counter),
             Some((27, &mut resent)),
+            None,
             &mut out,
         )
         .unwrap();
@@ -1334,7 +1406,9 @@ mod tests {
         let mut carry = bytes;
         let mut deducer = TimestampDeducer::new(100.0);
         let mut out = Vec::new();
-        assert!(decode_buffered(&codec, &mut carry, &mut deducer, None, None, &mut out).is_err());
+        assert!(
+            decode_buffered(&codec, &mut carry, &mut deducer, None, None, None, &mut out).is_err()
+        );
         assert_eq!(out.len(), 2);
     }
 

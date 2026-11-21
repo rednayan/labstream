@@ -89,6 +89,13 @@ impl Counter {
         }
     }
 
+    /// Take `number` as the expected number, and count nothing. An inlet that
+    /// merges two paths knows the expected number better than the count of
+    /// one path. `docs/extensions.md`, section `dgram`.
+    pub fn resync(&mut self, number: u64) {
+        self.expected = Some(number);
+    }
+
     /// Forget the expected number. A new outlet has a new counter.
     pub fn restart(&mut self) {
         self.expected = None;
