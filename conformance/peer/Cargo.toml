@@ -13,6 +13,10 @@ license.workspace = true
 name = "lsl-peer"
 path = "src/main.rs"
 
+[[bin]]
+name = "wifitest"
+path = "src/bin/wifitest.rs"
+
 [dependencies]
 labstream-wire.workspace = true
 labstream-net.workspace = true
