@@ -288,27 +288,29 @@ keepalive on UDP, and no give-up during a cut). 3 runs for each cell
 
 ### `dgram/1` between two machines on Wi-Fi
 
-`conformance/peer/src/bin/wifitest.rs` ran between a Linux outlet and a
-Windows inlet over Wi-Fi on 2026-11-21, with `lab.KnownPeers`. Each mode
+`conformance/peer/src/bin/wifitest.rs` ran twice between a Linux outlet and
+a Windows inlet over Wi-Fi on 2026-11-21, with `lab.KnownPeers`. Each pass
 ran 3 loads of 200 s each (10 minutes total for each mode). Two machines do
-not share a monotonic clock, so the table gives the tail jitter above p50:
+not share a monotonic clock, so the table gives the tail jitter above p50
+(pass 1, then pass 2 on `main` with `dgram/1` on by default):
 
-| mode | load | samples | lost | on_udp % | p99-p50 ms | p99.9-p50 ms | max-p50 ms |
+| mode | load | samples | lost | on_udp % | p99-p50 ms (run 1 / run 2) | p99.9-p50 ms (run 1 / run 2) | max-p50 ms (run 1 / run 2) |
 |---|---|---|---|---|---|---|---|
-| tcp | 512 Hz x 8, chunk 1 | 102400 | 0 | 0 | 20.0 | 39.6 | 164.6 |
-| udp | 512 Hz x 8, chunk 1 | 102400 | 0 | 100 | 19.6 | 30.2 | 81.5 |
-| tcp | 1000 Hz x 32, chunk 1 | 200000 | 0 | 0 | 6817.6 | 7060.0 | 7178.2 |
-| udp | 1000 Hz x 32, chunk 1 | 200000 | 0 | 100 | 21.9 | 42.8 | 94.8 |
-| tcp | 4000 Hz x 64, chunk 32 | 800000 | 0 | 0 | 128.0 | 176.7 | 285.7 |
-| udp | 4000 Hz x 64, chunk 32 | 800000 | 0 | 100 | 19.3 | 38.4 | 85.0 |
+| tcp | 512 Hz x 8, chunk 1 | 102400 | 0 / 0 | 0 | 20.0 / 30.0 | 39.6 / 79.9 | 164.6 / 161.3 |
+| udp | 512 Hz x 8, chunk 1 | 102400 | 0 / 0 | 100 | 19.6 / 18.7 | 30.2 / 25.1 | 81.5 / 43.7 |
+| tcp | 1000 Hz x 32, chunk 1 | 200000 | 0 / 0 | 0 | 6817.6 / 26.1 | 7060.0 / 58.5 | 7178.2 / 108.5 |
+| udp | 1000 Hz x 32, chunk 1 | 200000 | 0 / 0 | 100 | 21.9 / 19.7 | 42.8 / 28.8 | 94.8 / 66.8 |
+| tcp | 4000 Hz x 64, chunk 32 | 800000 | 0 / 0 | 0 | 128.0 / 75.8 | 176.7 / 211.7 | 285.7 / 257.6 |
+| udp | 4000 Hz x 64, chunk 32 | 800000 | 0 / 0 | 100 | 19.3 / 19.1 | 38.4 / 61.5 | 85.0 / 146.0 |
 
 - **Loss and order.** Every run gave 0 lost, 0 repeated, 0 reordered, and 0
-  dropped samples, with 0 recoveries.
-- **1000 Hz x 32 channels.** TCP stalled for up to 7.2 s (`p99-p50` of
-  6817.6 ms). `dgram` stayed on UDP for 100 % of the run, with a `p99-p50`
-  of 21.9 ms and a maximum of 94.8 ms.
-- **4000 Hz x 64 channels, chunk 32.** `dgram` cut `p99-p50` from 128.0 ms
-  to 19.3 ms, and `max-p50` from 285.7 ms to 85.0 ms.
+  dropped samples across 2.2 million UDP samples, with 0 recoveries.
+- **Consistency.** `dgram` held `p99-p50` between 18.7 ms and 21.9 ms on
+  every load in both passes. TCP showed 26 ms to 128 ms on clean passes,
+  and stalled for 7.2 s in pass 1 at 1000 Hz x 32 channels.
+- **4000 Hz x 64 channels, chunk 32.** `dgram` cut `p99-p50` by 4x to 6.6x
+  against TCP in both passes (19.3 ms and 19.1 ms against 128.0 ms and
+  75.8 ms).
 - **Discovery on Windows.** Multicast discovery did not find the Linux
   outlet, because `local_ipv4_addresses()` reads `/proc/net/fib_trie` on
   Linux only. Unicast with `lab.KnownPeers` needed an inbound allow rule in
