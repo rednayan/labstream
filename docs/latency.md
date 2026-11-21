@@ -161,30 +161,46 @@ no root, and it does not change the interfaces of the host.
 `docs/roadmap.md`, step 0, gives the method and the rules. Each rule applies
 in both directions. The load is 512 Hz x 8 channels, one sample for each
 push. Each cell is the median of 3 runs, with the range in brackets. The
-runs alternate the order of the two libraries. The results of 2026-11-21,
-for liblsl and for labstream `main` at `081f7fa`:
+runs alternate the order of the libraries.
+
+**A correction.** The first runs of 2026-11-21 had a fault in the runner.
+`tc qdisc replace` keeps each parameter that the new rule does not give, so
+the rate limit of the rule `1 Mbit/s` stayed on the link for the two cuts
+after it. The rows of the cuts in that version of this page thus came from
+a link of 1 Mbit/s. Their medians of 0.5 s to 3.5 s, and the note "not
+explained", came from that limit. The runner now starts each rule from an
+empty root. The table below is the second run, with the corrected runner,
+on the branch `feat/dgram`.
+
+The libraries: liblsl, and labstream `main` with the first default history
+of 10 s (`081f7fa`) and with the default of 30 s (`dfb6c39`):
 
 | rule | library | p50 ms | p99 ms | max ms | lost in each run |
 |---|---|---|---|---|---|
-| clean | liblsl | 0.1 (0.1-0.1) | 0.3 (0.3-1.3) | 6.0 | 0, 0, 0 |
-| clean | labstream | 0.1 (0.1-0.1) | 0.2 (0.2-0.2) | 2.9 | 0, 0, 0 |
-| delay 20 ms | liblsl | 20.1 (20.1-20.1) | 20.2 (20.2-20.2) | 23.5 | 0, 0, 0 |
-| delay 20 ms | labstream | 20.1 (20.1-20.1) | 20.2 (20.2-20.5) | 30.4 | 0, 0, 0 |
-| delay 20 ms, loss 1 % | liblsl | 22.2 (22.2-22.9) | 71.0 (69.4-71.1) | 117.7 | 0, 0, 0 |
-| delay 20 ms, loss 1 % | labstream | 22.2 (21.6-22.4) | 67.1 (66.2-71.0) | 90.5 | 0, 0, 0 |
-| 1 Mbit/s | liblsl | 1.1 (1.1-1.1) | 1.4 (1.2-1.4) | 1.9 | 0, 0, 0 |
-| 1 Mbit/s | labstream | 0.9 (0.9-0.9) | 1.0 (1.0-1.1) | 1.7 | 0, 0, 0 |
-| cut of 3 s | liblsl | 1.1 (1.1-1.1) | 3061.7 (3011.7-3065.4) | 3179.7 | 0, 0, 0 |
-| cut of 3 s | labstream | 1.0 (0.9-1.0) | 3017.5 (3008.8-3031.5) | 3147.4 | 0, 0, 0 |
-| cut of 10 s | liblsl | 3485.4 (3375.4-3530.0) | 13135.7 (13026.5-13204.8) | 13396.0 | 0, 0, 0 |
-| cut of 10 s | labstream | 715.6 (532.8-895.0) | 9838.8 (9832.1-9844.0) | 10065.3 | 697, 457, 960 |
-| cut of 10 s, `ResumeSeconds = 30` | labstream | 0.2 (0.2-0.4) | 11602.9 (11572.1-11612.4) | 11852.5 | 0, 0, 0 |
+| clean | liblsl | 0.1 (0.1-0.1) | 0.4 (0.4-0.5) | 9.2 | 0, 0, 0 |
+| clean | history 10 s | 0.1 (0.1-0.1) | 0.2 (0.2-0.2) | 3.2 | 0, 0, 0 |
+| clean | history 30 s | 0.1 (0.1-0.1) | 0.4 (0.4-0.4) | 0.7 | 0, 0, 0 |
+| delay 20 ms | liblsl | 20.1 (20.1-20.1) | 20.3 (20.2-20.3) | 20.7 | 0, 0, 0 |
+| delay 20 ms | history 10 s | 20.1 (20.1-20.1) | 20.3 (20.3-20.3) | 23.7 | 0, 0, 0 |
+| delay 20 ms | history 30 s | 20.1 (20.1-20.1) | 20.2 (20.2-20.3) | 23.2 | 0, 0, 0 |
+| delay 20 ms, loss 1 % | liblsl | 22.2 (22.2-22.8) | 71.9 (67.2-84.3) | 118.3 | 0, 0, 0 |
+| delay 20 ms, loss 1 % | history 10 s | 23.2 (22.6-23.4) | 75.6 (68.1-76.2) | 115.3 | 0, 0, 0 |
+| delay 20 ms, loss 1 % | history 30 s | 22.4 (21.3-23.4) | 69.0 (68.1-70.0) | 91.5 | 0, 0, 0 |
+| 1 Mbit/s | liblsl | 1.1 (1.1-1.1) | 1.3 (1.2-1.4) | 1.6 | 0, 0, 0 |
+| 1 Mbit/s | history 10 s | 0.9 (0.9-0.9) | 1.0 (1.0-1.2) | 3.8 | 0, 0, 0 |
+| 1 Mbit/s | history 30 s | 0.9 (0.9-0.9) | 1.2 (1.0-1.2) | 1.7 | 0, 0, 0 |
+| cut of 3 s | liblsl | 0.1 (0.1-0.2) | 2990.2 (2975.9-3000.6) | 3141.2 | 0, 0, 0 |
+| cut of 3 s | history 10 s | 0.1 (0.1-0.1) | 2997.9 (2993.8-3004.8) | 3143.6 | 0, 0, 0 |
+| cut of 3 s | history 30 s | 0.1 (0.1-0.1) | 2974.4 (2966.4-3024.7) | 3165.1 | 0, 0, 0 |
+| cut of 10 s | liblsl | 1419.3 (1395.5-1436.3) | 13047.5 (13042.1-13069.3) | 13309.5 | 0, 0, 0 |
+| cut of 10 s | history 10 s | 0.2 (0.1-0.2) | 9776.9 (9770.3-9779.1) | 10000.3 | 921, 937, 454 |
+| cut of 10 s | history 30 s | 0.3 (0.2-0.4) | 11592.9 (10666.3-11598.1) | 11838.1 | 0, 0, 0 |
 
-- **The control.** The rule of 20 ms adds 20.0 ms to the median of both
-  libraries.
+- **The control.** The rule of 20 ms adds 20.0 ms to the median of each
+  library.
 - **Loss of 1 %.** TCP sends each lost packet again, so no sample is lost.
   Each lost packet holds back the samples after it. The p99 grows from
-  20 ms to about 70 ms for both libraries.
+  20 ms to about 70 ms for each library.
 - **1 Mbit/s.** The load needs about 0.2 Mbit/s, so it fits. The time to
   send each packet adds about 1 ms.
 - **The cut of 3 s.** The keepalive limit is 6 s, so no library closes the
@@ -193,24 +209,12 @@ for liblsl and for labstream `main` at `081f7fa`:
   connection does not end.
 - **The cut of 10 s.** liblsl does not see the cut, because its watchdog
   waits 15 s. TCP waits longer between two attempts after each failure, so
-  the data arrives about 13.1 s after the start of the cut. No sample is
+  the data arrives about 13 s after the start of the cut, and no sample is
   lost. labstream closes the connection after about 6 s, and connects again
-  about 1.8 s after the end of the cut. The gap is then about 11.8 s,
-  longer than the first default history of 10 s. The oldest samples of the
-  gap are lost. With a history of 30 s, nothing is lost, and the longest
-  wait is 11.9 s. After this result, the default became 30 s.
-- **Not explained.** With a history of 10 s, the median of the cut of 10 s
-  is 0.5 s to 0.9 s. With a history of 30 s, it is 0.2 ms.
-- **The new default.** A second run of the cut of 10 s, with the default of
-  30 s and no change to the configuration:
-
-  | library | p50 ms | p99 ms | max ms | lost in each run |
-  |---|---|---|---|---|
-  | liblsl | 1310.0 (982.0-1359.4) | 12942.0 (12633.7-12980.2) | 13220.4 | 0, 0, 0 |
-  | labstream | 0.2 (0.2-0.2) | 11593.7 (11554.4-11615.4) | 11855.5 | 0, 0, 0 |
-
-  The median of liblsl moved from about 3.5 s to about 1.3 s between the
-  two runs. Its longest wait stayed at about 13 s.
+  after the end of the cut. A history of 10 s then loses 454 to 937 samples
+  on a normal link too, so the corrected runs confirm decision 11 of
+  `docs/roadmap.md`. A history of 30 s loses none, and the longest wait is
+  about 11.8 s.
 
 ## What this benchmark does not measure
 

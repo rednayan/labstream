@@ -33,6 +33,8 @@ The user made these decisions on 2026-11-16:
 11. The default of `labstream.ResumeSeconds` is 30 s, not 10 s. The user
     decided this on 2026-11-21, after the cut of 10 s in step 0 lost
     samples with the first default. The memory limit stays at 64 MiB.
+    The runs with the corrected runner confirm the loss on a normal link
+    (step 0, status).
 12. Step 5 uses plain UDP, not QUIC. The token is `dgram/1`. The user
     decided this on 2026-11-21. QUIC is UDP with encryption, a protocol
     stack in user space, and an async runtime, so it cannot give a lower
@@ -207,6 +209,12 @@ lossy, or cut link", gives the results.
   `labstream.ResumeSeconds` to 30 s on 2026-11-21 (decision 11). With the
   new default, the cut of 10 s loses no sample. `docs/latency.md` gives
   the runs.
+- **A correction of 2026-11-21.** The runner kept the rate limit of the
+  rule `1 Mbit/s` for the cuts after it, so the first rows of the cuts came
+  from a slow link. The runs again with the corrected runner give the same
+  result: on a normal link, a history of 10 s loses 454 to 937 samples in
+  the cut of 10 s, and a history of 30 s loses none. Decision 11 thus
+  stands. `docs/latency.md` marks the faulty rows.
 
 ### Step 1: `resume/1`
 
