@@ -564,7 +564,8 @@ with `resume_`.
 
 ### `dgram`: samples over UDP
 
-**Status:** proposal, not implemented. The token is `dgram/1`.
+**Status:** spec approved by the user on 2026-11-21. The code is in
+progress on the branch `feat/dgram`. The token is `dgram/1`.
 `docs/roadmap.md`, step 5, gives the decision for plain UDP (decision 12).
 
 #### The purpose

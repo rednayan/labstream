@@ -305,7 +305,8 @@ latency is less than half the p99 of TCP. After the resend, `Inlet::lost()`
 gives 0.
 
 The transport is plain UDP (decision 12). The spec is `docs/extensions.md`,
-section `dgram`, which gives the criterion in detail.
+section `dgram`, which gives the criterion in detail. The user approved the
+spec on 2026-11-21.
 
 ### Step 6: channel and rate selection
 
