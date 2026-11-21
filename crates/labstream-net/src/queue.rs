@@ -73,6 +73,8 @@ pub struct SampleQueue {
     capacity: usize,
     dropped: AtomicU64,
     closed: Mutex<bool>,
+    /// Set by [`SampleQueue::wake`]. The next wait returns at once.
+    woken: std::sync::atomic::AtomicBool,
 }
 
 impl SampleQueue {
@@ -113,6 +115,7 @@ impl SampleQueue {
             capacity,
             dropped: AtomicU64::new(0),
             closed: Mutex::new(false),
+            woken: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -329,7 +332,12 @@ impl SampleQueue {
         let end = Instant::now() + timeout;
         let mut q = self.inner.lock().unwrap();
         loop {
-            if max == 0 || !q.is_empty() || Instant::now() >= end || *self.closed.lock().unwrap() {
+            if max == 0
+                || !q.is_empty()
+                || Instant::now() >= end
+                || *self.closed.lock().unwrap()
+                || self.woken.swap(false, Ordering::SeqCst)
+            {
                 let first = q.front_number();
                 let take = q.len().min(max);
                 let ring = &mut *q;
@@ -354,6 +362,15 @@ impl SampleQueue {
                 .unwrap();
             q = guard;
         }
+    }
+
+    /// End the current wait of [`SampleQueue::pop_many_numbered`] or
+    /// [`SampleQueue::pop_many_full`] at once, with what the queue holds. A
+    /// session uses it when a request of its consumer arrives.
+    pub fn wake(&self) {
+        let _q = self.inner.lock().unwrap();
+        self.woken.store(true, Ordering::SeqCst);
+        self.room.notify_all();
     }
 
     /// Wake every reader and stop the queue.

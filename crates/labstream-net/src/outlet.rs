@@ -684,6 +684,25 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         }
     }
 
+    // A `dgram` consumer gets a UDP socket of its own, and the answer gives
+    // its port and a cookie. `docs/extensions.md`, section `dgram`.
+    let mut dgram_socket: Option<(std::net::UdpSocket, u64, std::net::IpAddr)> = None;
+    if let (true, Some(o), Some(a)) = (resumed.is_some(), offered.as_deref(), answered.as_mut()) {
+        let fits = crate::dgram_out::sample_fits(info.format, info.channel_count as usize);
+        if fits && features::dgram_request(o, a, allowed) {
+            let peer = stream.peer_addr()?;
+            if let Some(sock) = crate::dgram_out::bind(peer) {
+                let cookie = crate::dgram_out::cookie();
+                let port = sock.local_addr()?.port();
+                a.push(features::DgramParam { port, cookie }.token());
+                if trace {
+                    eprintln!("TRACE dgram: UDP port {port}");
+                }
+                dgram_socket = Some((sock, cookie, peer.ip()));
+            }
+        }
+    }
+
     stream.write_all(
         accepted
             .to_wire_with(srv.configured_version, &info.uid, answered.as_deref())
@@ -775,6 +794,20 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         usize::MAX
     };
 
+    // The inlet writes its requests on TCP. A thread reads them.
+    let dgram = match dgram_socket {
+        Some((socket, cookie, peer)) => Some(crate::dgram_out::Setup {
+            socket,
+            cookie,
+            peer,
+            requests: crate::dgram_out::read_requests(
+                stream.try_clone()?,
+                Arc::clone(&consumer.queue),
+            ),
+        }),
+        None => None,
+    };
+
     let stop = || *shared.stop.lock().unwrap();
     let sent = feed_with(
         &consumer.queue,
@@ -783,6 +816,7 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         max_chunk,
         numbered,
         resend.as_ref().map(|r| (&shared.fanout, r)),
+        dgram,
         &stop,
         trace,
     );
@@ -817,7 +851,7 @@ struct Resend {
 
 /// The largest count of samples that one read of the history copies. A push
 /// waits for at most one such copy. `docs/extensions.md`, resend rule 6.
-const RESEND_BLOCK: usize = 256;
+pub(crate) const RESEND_BLOCK: usize = 256;
 
 /// Copy the samples of one consumer queue to its socket.
 ///
@@ -848,7 +882,9 @@ fn feed<W: Write>(
     stop: &dyn Fn() -> bool,
     trace: bool,
 ) -> usize {
-    feed_with(queue, codec, out, max_chunk, numbered, None, stop, trace)
+    feed_with(
+        queue, codec, out, max_chunk, numbered, None, None, stop, trace,
+    )
 }
 
 /// [`feed`], with an optional resend for the `resume` feature.
@@ -866,6 +902,7 @@ fn feed_with<W: Write>(
     max_chunk: usize,
     numbered: bool,
     resend: Option<(&Fanout, &Resend)>,
+    dgram: Option<crate::dgram_out::Setup>,
     stop: &dyn Fn() -> bool,
     trace: bool,
 ) -> usize {
@@ -952,6 +989,23 @@ fn feed_with<W: Write>(
     }
     if trace && last.is_some() {
         eprintln!("TRACE resume: resent {sent} samples");
+    }
+
+    // A `dgram` connection runs its own live part. It needs `seq` and
+    // `resume`, so the numbering and the fanout exist.
+    if let (Some(setup), Some(numbering), Some((fanout, _))) = (dgram, numbering.take(), resend) {
+        return sent
+            + crate::dgram_out::Live {
+                queue,
+                fanout,
+                codec,
+                out,
+                numbering,
+                last,
+                setup,
+                trace,
+            }
+            .run(stop);
     }
 
     let mut full = Vec::new();
@@ -1319,6 +1373,7 @@ mod tests {
             usize::MAX,
             true,
             Some((f, &resend)),
+            None,
             stop,
             false,
         );
