@@ -51,7 +51,9 @@ BASE_HEADERS = [
 # sample number. This epoch belongs to no outlet, so a labstream outlet
 # answers with its own epoch and sends nothing again. `docs/extensions.md`,
 # section `resume`.
-EXTRA = "Labstream-Features: seq/1 resume/1=9c3e51a0d2b7f4e81f4a0 shm/1=0a1b2c"
+# `dgram/1` is off by default, so no outlet with the default configuration
+# answers it. `docs/extensions.md`, section `dgram`.
+EXTRA = "Labstream-Features: seq/1 resume/1=9c3e51a0d2b7f4e81f4a0 dgram/1 shm/1=0a1b2c"
 RESUME_PARAM = re.compile(r"[0-9a-f]{17,32}")
 
 

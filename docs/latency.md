@@ -216,6 +216,46 @@ of 10 s (`081f7fa`) and with the default of 30 s (`dfb6c39`):
   `docs/roadmap.md`. A history of 30 s loses none, and the longest wait is
   about 11.8 s.
 
+## `dgram/1` over a slow, lossy, or cut link
+
+The same runner, with one build of the branch `feat/dgram` as two
+libraries: `tcp` with the default configuration, and `udp` with
+`labstream.Features = {seq, resume, dgram}`. The results of 2026-11-21, 3 runs
+for each cell:
+
+| rule | load | tcp p99 ms | udp p99 ms | lost tcp | lost udp |
+|---|---|---|---|---|---|
+| clean | 512 Hz x 8, chunk 1 | 0.3 (0.2-0.3) | 0.2 (0.2-0.4) | 0, 0, 0 | 0, 0, 0 |
+| delay 20 ms | 512 Hz x 8, chunk 1 | 20.2 (20.2-20.2) | 20.2 (20.2-20.3) | 0, 0, 0 | 0, 0, 0 |
+| delay 20 ms, loss 1 % | 512 Hz x 8, chunk 1 | 68.2 (66.0-70.8) | 20.5 (20.5-22.0) | 0, 0, 0 | 0, 0, 0 |
+| delay 20 ms, loss 1 % | 512 Hz x 8, chunk 16 | 91.6 (91.6-91.7) | 20.9 (20.8-20.9) | 0, 0, 0 | 0, 0, 0 |
+| delay 20 ms, loss 1 % | markers, 200 each second | 70.2 (70.1-70.3) | 20.7 (20.7-25.1) | 0, 0, 0 | 0, 0, 0 |
+| delay 20 ms, loss 1 % | 4000 Hz x 64, chunk 32 | 4203.7 (4146.4-4483.7) | 279.4 (273.9-524.3) | 10145, 12557, 9751 | 0, 0, 0 |
+| 1 Mbit/s | 512 Hz x 8, chunk 1 | 1.1 (1.0-1.1) | 2.0 (1.9-2.1) | 0, 0, 0 | 0, 0, 0 |
+| cut of 3 s | 512 Hz x 8, chunk 1 | 3014.8 (2964.8-3020.3) | 2928.8 (2922.8-2928.8) | 0, 0, 0 | 0, 0, 0 |
+| cut of 10 s | 512 Hz x 8, chunk 1 | 11584.3 (11578.1-11597.1) | 11163.9 (11150.1-11183.5) | 0, 0, 0 | 0, 0, 0 |
+| cut of 10 s at 1 Mbit/s | 512 Hz x 8, chunk 1 | 11713.2 (10689.0-11714.8) | 11285.0 (11270.9-11304.9) | 0, 0, 0 | 0, 0, 0 |
+| UDP stops, TCP works | 512 Hz x 8, chunk 1 | 0.3 (0.2-0.3) | 2859.3 (2859.2-2860.6) | 0, 0, 0 | 0, 0, 0 |
+| loss 30 % after 2 s | 512 Hz x 8, chunk 1 | 10404.6 (1886.9-15559.9) | 8357.0 (6419.1-11929.6) | 4545, 4368, 3379 | 3781, 3143, 3845 |
+| loss 50 % after 2 s | 512 Hz x 8, chunk 1 | 3610.4 (1013.0-3941.8) | 13679.2 (9104.1-16402.7) | 5359, 5352, 5360 | 4892, 4462, 5010 |
+
+- **Loss of 1 %.** The p99 of `dgram` stays within about 1 ms of the
+  delay, for each load with small samples. The copies repair nearly each
+  loss after one datagram.
+- **4000 Hz x 64 channels.** TCP cannot carry 8 Mbit/s with 1 % loss and a
+  round trip of 40 ms, so its queue fills, and it loses about 10000
+  samples. `dgram` loses none.
+- **1 Mbit/s.** The copies about triple the bytes, so `dgram` adds about
+  1 ms. This rule is the one case where `dgram` is worse than TCP.
+- **The cuts.** `dgram` loses no sample, and waits a little less than TCP.
+- **UDP stops.** The inlet asks for TCP after 3 s with no datagram, and the
+  connection loses no sample.
+- **Loss of 30 % and 50 %.** Each path loses most samples. The loss applies
+  to TCP too, and TCP waits seconds between its own retransmits. The copies
+  of `dgram` repair nearly each loss, but the rest needs a resend on TCP.
+  The inlet then holds the samples after a gap for seconds, and the samples
+  that still wait at the end of the run count as lost.
+
 ## What this benchmark does not measure
 
 - **Two machines.** All results come from the loopback interface.

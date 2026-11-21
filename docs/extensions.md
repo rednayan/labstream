@@ -564,8 +564,8 @@ with `resume_`.
 
 ### `dgram`: samples over UDP
 
-**Status:** spec approved by the user on 2026-11-21. The code is in
-progress on the branch `feat/dgram`. The token is `dgram/1`.
+**Status:** spec approved by the user on 2026-11-21. Implemented on the
+branch `feat/dgram`, not merged. Off by default. The token is `dgram/1`.
 `docs/roadmap.md`, step 5, gives the decision for plain UDP (decision 12).
 
 #### The purpose
@@ -750,9 +750,15 @@ u64 next     little-endian, the number that the next sample will get
    TCP, with their `seq` records, as for a resend after a recovery.
 5. If the history no longer holds a sample, the outlet sends the next one
    that it holds. The inlet counts the samples between as lost.
-6. The inlet gives up a gap after 2 round trips with no answer, or after
-   500 ms if that is longer. It counts the gap as lost, and gives the
-   samples after it. A sample of the gap that arrives later goes away.
+6. The inlet gives up a gap after 500 ms with no answer and no other data on
+   TCP. Data on TCP shows that an answer can still be on the way, on a slow
+   link. It counts the gap as lost, and gives the samples after it. A
+   sample of the gap that arrives later goes away.
+7. A gap that an open request covers gets no new request. Only a part
+   beyond the request gets one. At the start of a connection with a
+   `resume` resend, the numbers of the resend count as requested. Without
+   this rule, a reconnect on a slow link sent each part of the resend about
+   14 times, and the backlog ended the connection again.
 
 #### The count on two paths
 
@@ -871,6 +877,43 @@ leaves about 12.5 %, and gives a fallback.
     `dgram` goes on by default.
 14. **Windows and macOS.** The tests of items 6 to 8 pass in CI on each
     platform.
+
+#### The status of the conformance plan
+
+The status on 2026-11-21, on the branch `feat/dgram`. `docs/latency.md`,
+section "`dgram/1` over a slow, lossy, or cut link", gives the runs.
+
+1. **Done.** `oracle/headerprobe.py` offers `dgram/1`. liblsl, 0.1.2, the
+   `seq` build, and the `dgram` build with its default configuration
+   answer no `dgram/1`, and nothing else changes.
+2. **Done.** The unit tests in `features.rs`, and `dgram_outlet_live.rs`
+   for the port range.
+3. **Done.** The unit tests in `dgram.rs`.
+4. **Done.** The unit tests of the packer in `dgram.rs`: each datagram is
+   dropped in turn.
+5. **Done.** The unit tests of the reorder buffer in `dgram.rs`, with a
+   random mix of loss, repeats, and reorder on two paths.
+6. **Partly done.** `dgram_outlet_live.rs`: a wrong cookie keeps the samples
+   on TCP. A hello from a different address is not tested.
+7. **Done.** `dgram_outlet_live.rs` and `dgram_live.rs`: the change to UDP,
+   a path request back to TCP, and a cut of 3 s, with each sample once.
+8. **Done.** Both live files: string samples of 2000 bytes go on TCP, in
+   order.
+9. **Not met for heavy loss.** A UDP path that stops while TCP works
+   changes to TCP after about 2.9 s, with no lost sample. With 30 % and
+   50 % loss on both directions, each path loses most samples. The resend
+   goes on TCP, and TCP at such a loss waits seconds. The way back to UDP
+   after 30 s is not measured.
+10. **Met, except one rule.** With 20 ms delay and 1 % loss, the p99 is
+    20.5 ms at chunk 1, 20.9 ms at chunk 16, and 20.7 ms for markers, with
+    no lost sample. At 4000 Hz x 64 channels, `dgram` loses none and TCP
+    loses about 10000. The cuts of 3 s and 10 s lose no sample. The rule of
+    1 Mbit/s is worse than TCP: a p99 of 2.0 ms against 1.1 ms. That the
+    connection stays on UDP after the cut of 3 s is not measured.
+11. **Not done.** The interop matrix with `dgram` on.
+12. **Not done.** `latency.py` on loopback with `dgram` on.
+13. **Not done.** Two machines on Wi-Fi. `dgram` stays off by default.
+14. **Not done.** Windows and macOS, until CI works again.
 
 #### Open questions
 

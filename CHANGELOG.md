@@ -61,9 +61,19 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `docs/roadmap.md`, the order of the labstream-only features.
 - `conformance/oracle/resumeprobe.py`. It cuts the connection of an inlet
   against outlets of each version.
+- The `dgram/1` feature, off by default (`docs/extensions.md`, section
+  `dgram`). With `labstream.Features = {seq, resume, dgram}` on both
+  sides, the samples go in UDP datagrams with copies, and the TCP
+  connection carries the resends and the path records. With 20 ms delay
+  and 1 % loss, the p99 latency at 512 Hz drops from about 68 ms to about
+  21 ms, with no lost sample. `Inlet::on_udp` shows the path.
+- `labstream_proto::dgram`: the datagrams and records, `Packer`, and
+  `Reorder`. `SampleQueue::wake`, and `seq::Counter::resync`.
 - `conformance/oracle/lossylink.py`. It measures the latency over a slow,
   lossy, or cut link between two network namespaces, with no root.
-  `oracle/latency.c` has a new option `--timeout` for the inlet.
+  `oracle/latency.c` has new options `--timeout` and `--irregular`. The
+  runner takes loads, markers, a configuration for each library, and rules
+  for heavy loss and a dead UDP path.
 
 ### Fixed
 
