@@ -292,7 +292,9 @@ fn udp_loop(
                     serial,
                     payload,
                 }) if c == cookie => {
-                    s.meter.record(serial, begin.elapsed().as_secs_f64());
+                    let t = begin.elapsed().as_secs_f64();
+                    s.meter.record(serial, t);
+                    s.reorder.udp_heard(t);
                     let mut at = 0;
                     for k in 0..count as u64 {
                         match codec.decode(&payload[at..]) {
@@ -308,6 +310,7 @@ fn udp_loop(
                     s.heard = true;
                 }
                 Ok(Datagram::Idle { cookie: c, next }) if c == cookie => {
+                    s.reorder.udp_heard(begin.elapsed().as_secs_f64());
                     s.reorder.idle(next);
                     heard_datagram(&mut s, now);
                     heard = true;

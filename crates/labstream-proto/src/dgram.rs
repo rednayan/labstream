@@ -727,6 +727,8 @@ pub struct Reorder<T> {
     rtt: Option<f64>,
     /// The expected number when a small gap stood there first, and the time.
     head: Option<(u64, f64)>,
+    /// The time of the last UDP datagram, when the caller reports it.
+    last_udp: Option<f64>,
 }
 
 /// One small gap. `docs/extensions.md`, section `dgram`, the resend.
@@ -746,6 +748,11 @@ struct Hole {
 const FIRST_RTT: f64 = 0.050;
 /// The shortest time between two requests for one small gap, in seconds.
 const MIN_REPEAT: f64 = 0.010;
+/// A small gap is given up only while datagrams arrive within this time.
+const UDP_ALIVE: f64 = 0.5;
+/// After this time with no datagram, the link is in a cut, and the wait of
+/// a small gap at `E` starts again when datagrams return.
+const UDP_CUT: f64 = 1.5;
 
 impl<T> Default for Reorder<T> {
     fn default() -> Self {
@@ -762,6 +769,7 @@ impl<T> Default for Reorder<T> {
             holes: Vec::new(),
             rtt: None,
             head: None,
+            last_udp: None,
         }
     }
 }
@@ -929,6 +937,13 @@ impl<T> Reorder<T> {
         self.horizon = Some(self.horizon.map_or(next, |h| h.max(next)));
     }
 
+    /// A datagram arrived on UDP at `now`. A small gap is given up only while
+    /// datagrams still arrive, so a cut does not drop a sample before
+    /// `resume/1` can ask for it.
+    pub fn udp_heard(&mut self, now: f64) {
+        self.last_udp = Some(now);
+    }
+
     /// The outlet has no sample below `number` for this inlet: a resend
     /// started at `number`. The numbers from the expected number up to it
     /// count as lost. `docs/extensions.md`, resend rule 5.
@@ -1013,6 +1028,15 @@ impl<T> Reorder<T> {
         let in_request = self.requested.is_some_and(|(f, u, _)| e >= f && e < u);
         if self.small > 0 && end - e <= self.small && !in_request {
             self.gap_since = None;
+            if let Some(u) = self.last_udp {
+                if now - u >= UDP_CUT {
+                    self.head = None;
+                    return None;
+                }
+                if now - u >= UDP_ALIVE {
+                    return None;
+                }
+            }
             if self.head.map(|h| h.0) != Some(e) {
                 self.head = Some((e, now));
             }
@@ -1875,6 +1899,55 @@ mod tests {
         r.insert(10, 10);
         assert_eq!(r.nacks(0.1, 0.010), vec![]);
         assert_eq!(r.poll(0.1, 0.010, 0.5), None);
+    }
+
+    #[test]
+    fn a_small_gap_is_not_given_up_during_a_cut() {
+        let mut r = Reorder::new();
+        r.set_small_gaps(64, 1.0);
+        r.start(0);
+        r.udp_heard(0.0);
+        r.insert(0, 0);
+        r.insert(2, 2);
+        take(&mut r);
+        assert_eq!(r.poll(0.0, 0.010, 0.5), None);
+        // A cut stops all datagrams. The gap stays open for `resume/1`.
+        for t in [0.5, 1.1, 2.0] {
+            assert_eq!(r.poll(t, 0.010, 0.5), None);
+        }
+        assert_eq!(r.expected(), Some(1));
+        assert_eq!(r.lost(), 0);
+        // After the cut, the gap gets a full wait to recover on UDP.
+        r.udp_heard(3.0);
+        r.insert(10, 10);
+        assert_eq!(r.poll(3.0, 0.010, 0.5), None);
+        r.udp_heard(3.9);
+        assert_eq!(r.poll(3.9, 0.010, 0.5), None);
+        r.udp_heard(4.0);
+        assert_eq!(
+            r.poll(4.0, 0.010, 0.5),
+            Some(Action::GaveUp { from: 1, count: 1 })
+        );
+    }
+
+    #[test]
+    fn a_quiet_live_outlet_still_gives_up_a_small_gap_on_idle() {
+        let mut r = Reorder::new();
+        r.set_small_gaps(64, 1.0);
+        r.start(0);
+        r.udp_heard(0.0);
+        r.insert(0, 0);
+        r.insert(2, 2);
+        take(&mut r);
+        assert_eq!(r.poll(0.0, 0.010, 0.5), None);
+        // Tail idle at 250 ms, then periodic idle at 1.25 s.
+        r.udp_heard(0.25);
+        assert_eq!(r.poll(1.0, 0.010, 0.5), None);
+        r.udp_heard(1.25);
+        assert_eq!(
+            r.poll(1.25, 0.010, 0.5),
+            Some(Action::GaveUp { from: 1, count: 1 })
+        );
     }
 
     /// A small random number source, so the simulation repeats.

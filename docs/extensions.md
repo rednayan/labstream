@@ -801,7 +801,12 @@ u64 next     little-endian, the number that the next sample will get
    holds about 15 tries, and leaves less than 1 gap in 10000 unfilled. On
    a slow link, a TCP resend after a cut can fill the queue of the link
    for seconds. The first rule, 1 s from when the gap first showed, then
-   gave up a sample in 2 of 3 runs of the cut of 10 s at 1 Mbit/s.
+   gave up a sample in 2 of 3 runs of the cut of 10 s at 1 Mbit/s. The
+   inlet gives up a small gap only while datagrams still arrive (within
+   500 ms). After 1.5 s with no datagram, the link is in a cut, and the
+   wait starts again when datagrams return. Without this rule, the inlet
+   gave up a gap at the start of a cut before TCP closed, and `resume/1`
+   asked past that sample.
 7. **A large gap goes on TCP.** If a large gap at `E` stays for the same
    wait, the inlet asks for it on TCP:
 
