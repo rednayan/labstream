@@ -993,7 +993,9 @@ fn feed_with<W: Write>(
 
     // A `dgram` connection runs its own live part. It needs `seq` and
     // `resume`, so the numbering and the fanout exist.
-    if let (Some(setup), Some(numbering), Some((fanout, _))) = (dgram, numbering.take(), resend) {
+    // The numbering moves to that part only when it runs.
+    if let (Some(setup), true, Some((fanout, _))) = (dgram, numbering.is_some(), resend) {
+        let numbering = numbering.take().expect("checked above");
         return sent
             + crate::dgram_out::Live {
                 queue,
