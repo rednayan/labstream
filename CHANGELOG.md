@@ -61,15 +61,16 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `docs/roadmap.md`, the order of the labstream-only features.
 - `conformance/oracle/resumeprobe.py`. It cuts the connection of an inlet
   against outlets of each version.
-- The `dgram/1` feature, off by default (`docs/extensions.md`, section
-  `dgram`). With `labstream.Features = {seq, resume, dgram}` on both
-  sides, the samples go in UDP datagrams with copies. The count of copies
-  follows the loss that the inlet measures, from 0 on a clean link to 8 at
-  heavy loss. The inlet asks for small gaps in feedback datagrams on UDP,
-  and the outlet sends them again on UDP. The TCP connection carries the
-  resends of large gaps and the path records. With 20 ms delay and 1 %
-  loss, the p99 latency at 512 Hz drops from about 68 ms to about 21 ms,
-  with no lost sample. `Inlet::on_udp` shows the path.
+- The `dgram/1` feature, on by default (`docs/extensions.md`, section
+  `dgram`). The default of `labstream.Features` is now
+  `{seq, resume, dgram}`. Between two labstream peers, the samples go in
+  UDP datagrams with copies. The count of copies follows the loss that the
+  inlet measures, from 0 on a clean link to 8 at heavy loss. The inlet asks
+  for small gaps in feedback datagrams on UDP, and the outlet sends them
+  again on UDP. The TCP connection carries the resends of large gaps and
+  the path records. With 20 ms delay and 1 % loss, the p99 latency at
+  512 Hz drops from about 71 ms to about 22 ms, with no lost sample.
+  `Inlet::on_udp` shows the path.
 - `labstream_proto::dgram`: the datagrams and records, `Packer`,
   `Reorder`, `CopyControl`, and `LossMeter`. `SampleQueue::wake`, and
   `seq::Counter::resync`.

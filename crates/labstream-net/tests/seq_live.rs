@@ -85,10 +85,15 @@ fn the_count_adds_up_when_the_outlet_queue_drops() {
     let dropped = inlet.samples_dropped();
     println!("received {}, lost {lost}, dropped {dropped}", got.len());
     assert_eq!(got.len() as u64 + lost + dropped, n as u64);
-    assert!(
-        lost >= (n - 64) as u64,
-        "the outlet dropped most of the block"
-    );
+    // With `dgram/1`, the inlet asks for the gap from the 30 s `resume`
+    // history (30000 samples at 1000 Hz), so only the older samples count as
+    // lost. On TCP, the `seq` record marks the whole drop as lost at once.
+    let min_lost = if inlet.on_udp() {
+        (n - 35_000) as u64
+    } else {
+        (n - 64) as u64
+    };
+    assert!(lost >= min_lost, "the outlet dropped most of the block");
 }
 
 /// A TCP proxy that forwards each connection to `target`, and can cut them.

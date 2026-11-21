@@ -51,10 +51,12 @@ BASE_HEADERS = [
 # sample number. This epoch belongs to no outlet, so a labstream outlet
 # answers with its own epoch and sends nothing again. `docs/extensions.md`,
 # section `resume`.
-# `dgram/1` is off by default, so no outlet with the default configuration
-# answers it. `docs/extensions.md`, section `dgram`.
+# `dgram/1` is on by default in current labstream, so it answers with a
+# 20-digit hexadecimal parameter (UDP port and cookie). Older outlets ignore
+# it. `docs/extensions.md`, section `dgram`.
 EXTRA = "Labstream-Features: seq/1 resume/1=9c3e51a0d2b7f4e81f4a0 dgram/1 shm/1=0a1b2c"
 RESUME_PARAM = re.compile(r"[0-9a-f]{17,32}")
+DGRAM_PARAM = re.compile(r"[0-9a-f]{20}")
 
 
 def name_version(token: str) -> str:
@@ -149,6 +151,11 @@ def probe(name: str, lib_dir: Path, work: Path) -> bool:
             param = t.partition("=")[2]
             answer_ok = answer_ok and bool(RESUME_PARAM.fullmatch(param)) and "seq/1" in answered
             answer_ok = answer_ok and param[:16] != "9c3e51a0d2b7f4e8"
+        if name_version(t) == "dgram/1":
+            param = t.partition("=")[2]
+            has_resume = any(name_version(x) == "resume/1" for x in answered)
+            answer_ok = (answer_ok and bool(DGRAM_PARAM.fullmatch(param))
+                         and "seq/1" in answered and has_resume)
     # A sample starts with tag 1 or 2 (SPEC.md 7.1). With seq/1 on, the data
     # starts with a numbering record, tag 0xFE. `docs/extensions.md`.
     plain_data_ok = plain_first in (1, 2)

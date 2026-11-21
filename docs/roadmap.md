@@ -1,7 +1,7 @@
 # Roadmap: features that liblsl does not have
 
-**Status:** approved by the user on 2026-11-16. The gate and step 1 are
-complete. The other steps are not implemented.
+**Status:** approved by the user on 2026-11-16. The gate, step 0, step 1,
+and step 5 are complete. The other steps are not implemented.
 
 This page gives the order of the labstream-only features, the success
 criterion of each feature, and the dependencies. Each feature follows the
@@ -44,6 +44,10 @@ The user made these decisions on 2026-11-16:
     with both. QUIC also needs Rust 1.85 and tokio (quinn 0.11), and
     labstream supports Rust 1.75 with threads. The user accepted that cost
     only for better performance, which QUIC cannot give here.
+13. `dgram/1` is on by default: `labstream.Features` is
+    `{seq, resume, dgram}`. The user decided this on 2026-11-21, after the
+    10-minute Linux-to-Windows Wi-Fi run passed with 0 lost samples and
+    311x lower tail jitter than TCP at 1000 Hz x 32 channels.
 
 ## The map
 
@@ -316,11 +320,11 @@ The transport is plain UDP (decision 12). The spec is `docs/extensions.md`,
 section `dgram`, which gives the criterion in detail. The user approved the
 spec on 2026-11-21.
 
-**Status:** implemented on the branch `feat/dgram`, off by default. All
-lossy-link criteria pass, `oracle/interop.py` passes, Windows live tests
-pass (11 of 11), and a 10-minute Linux-to-Windows Wi-Fi run passed with 0
-lost samples and much lower tail jitter than TCP (`docs/latency.md`). macOS
-CI waits until GitHub CI works again.
+**Status:** complete on 2026-11-21, on by default (decision 13), and merged
+into `main`. All lossy-link criteria pass, `oracle/interop.py` passes,
+Windows live tests pass (11 of 11), and a 10-minute Linux-to-Windows Wi-Fi
+run passed with 0 lost samples and much lower tail jitter than TCP
+(`docs/latency.md`). macOS CI waits until GitHub CI works again.
 
 ### Step 6: channel and rate selection
 

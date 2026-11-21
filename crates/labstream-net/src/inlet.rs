@@ -655,8 +655,7 @@ impl Inlet {
     }
 
     /// True while the samples of the connection arrive on UDP, with the
-    /// `dgram/1` feature. `docs/extensions.md`, section `dgram`. `dgram/1` is
-    /// off by default.
+    /// `dgram/1` feature. `docs/extensions.md`, section `dgram`.
     pub fn on_udp(&self) -> bool {
         self.conn.on_udp.load(Ordering::SeqCst)
     }

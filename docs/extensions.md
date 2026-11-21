@@ -564,8 +564,8 @@ with `resume_`.
 
 ### `dgram`: samples over UDP
 
-**Status:** spec approved by the user on 2026-11-21. Implemented on the
-branch `feat/dgram`, not merged. Off by default. The token is `dgram/1`.
+**Status:** spec approved by the user on 2026-11-21. Implemented on `main`,
+and on by default (`docs/roadmap.md`, decision 13). The token is `dgram/1`.
 `docs/roadmap.md`, step 5, gives the decision for plain UDP (decision 12).
 
 **Change of 2026-11-21.** The first version missed two targets. At 30 %
@@ -612,9 +612,9 @@ These facts come from `conformance/liblsl/` at `e651023c`.
    `docs/roadmap.md` has connection migration as an open question.
 4. `dgram` does not encrypt. Step 14 of `docs/roadmap.md` covers
    encryption.
-5. `dgram` is off by default in version 1:
-   `labstream.Features` is `{seq, resume}`. It goes on by default only
-   after a test with two machines on Wi-Fi (conformance item 13).
+5. `dgram` is on by default after the two-machine Wi-Fi test of 2026-11-21
+   (`docs/roadmap.md`, decision 13): `labstream.Features` is
+   `{seq, resume, dgram}`. Set `{seq, resume}` to keep samples on TCP.
 
 #### The rules for the negotiation
 
@@ -1023,9 +1023,9 @@ of the reconnect stalled on TCP: about 1100 samples lost in each.
 The status on 2026-11-21, on the branch `feat/dgram`. `docs/latency.md`,
 section "`dgram/1` over a slow, lossy, or cut link", gives the runs.
 
-1. **Done.** `oracle/headerprobe.py` offers `dgram/1`. liblsl, 0.1.2, the
-   `seq` build, and the `dgram` build with its default configuration
-   answer no `dgram/1`, and nothing else changes.
+1. **Done.** `oracle/headerprobe.py` offers `dgram/1`. liblsl, 0.1.2, and
+   the `seq` build answer no `dgram/1`. Current labstream answers `seq/1`,
+   `resume/1`, and `dgram/1`, and nothing else changes.
 2. **Done.** The unit tests in `features.rs`, and `dgram_outlet_live.rs`
    for the port range.
 3. **Done.** The unit tests in `dgram.rs`.
@@ -1068,8 +1068,8 @@ section "`dgram/1` over a slow, lossy, or cut link", gives the runs.
     chunk 32) from Linux to Windows over Wi-Fi. `dgram` stayed on UDP for
     100 % of each load with 0 lost samples, and cut `p99-p50` from
     6817.6 ms to 21.9 ms at 1000 Hz x 32 and from 128.0 ms to 19.3 ms at
-    4000 Hz x 64 chunk 32 (`docs/latency.md`). `dgram` stays off by default
-    until the user decides to turn it on.
+    4000 Hz x 64 chunk 32 (`docs/latency.md`). The user then turned `dgram`
+    on by default (`docs/roadmap.md`, decision 13).
 14. **Partly done.** On Windows, `dgram_live` (3 tests),
     `dgram_outlet_live` (7 tests), and `dgram_watchdog` (1 test) all pass.
     macOS waits until CI works again.
