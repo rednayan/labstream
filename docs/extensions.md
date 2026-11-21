@@ -1029,29 +1029,40 @@ section "`dgram/1` over a slow, lossy, or cut link", gives the runs.
 2. **Done.** The unit tests in `features.rs`, and `dgram_outlet_live.rs`
    for the port range.
 3. **Done.** The unit tests in `dgram.rs`.
-4. **Done.** The unit tests of the packer in `dgram.rs`: each datagram is
-   dropped in turn.
-5. **Done.** The unit tests of the reorder buffer in `dgram.rs`, with a
-   random mix of loss, repeats, and reorder on two paths.
+4. **Done.** The unit tests of `Packer` and `CopyControl` in `dgram.rs`.
+4a. **Done.** The simulation unit tests in `dgram.rs` cover 1 %, 30 %, and
+    50 % loss.
+4b. **Done.** `crates/labstream-net/tests/dgram_watchdog.rs`.
+5. **Done.** The unit tests of `Reorder` in `dgram.rs`, with loss, repeats,
+   reorder on two paths, and cuts.
 6. **Partly done.** `dgram_outlet_live.rs`: a wrong cookie keeps the samples
    on TCP. A hello from a different address is not tested.
 7. **Done.** `dgram_outlet_live.rs` and `dgram_live.rs`: the change to UDP,
    a path request back to TCP, and a cut of 3 s, with each sample once.
 8. **Done.** Both live files: string samples of 2000 bytes go on TCP, in
    order.
-9. **Not met for heavy loss.** A UDP path that stops while TCP works
-   changes to TCP after about 2.9 s, with no lost sample. With 30 % and
-   50 % loss on both directions, each path loses most samples. The resend
-   goes on TCP, and TCP at such a loss waits seconds. The way back to UDP
-   after 30 s is not measured.
-10. **Met, except one rule.** With 20 ms delay and 1 % loss, the p99 is
-    20.5 ms at chunk 1, 20.9 ms at chunk 16, and 20.7 ms for markers, with
-    no lost sample. At 4000 Hz x 64 channels, `dgram` loses none and TCP
-    loses about 10000. The cuts of 3 s and 10 s lose no sample. The rule of
-    1 Mbit/s is worse than TCP: a p99 of 2.0 ms against 1.1 ms. That the
-    connection stays on UDP after the cut of 3 s is not measured.
-11. **Not done.** The interop matrix with `dgram` on.
-12. **Not done.** `latency.py` on loopback with `dgram` on.
+9. **Mostly met.** A UDP path that stops changes to TCP after about 2.9 s
+   with no lost sample. `udpback` returns to UDP after 30 s with no lost
+   sample. At 30 % loss after 2 s, `dgram` loses no sample. At 50 % loss
+   after 2 s, a traced 3-run batch lost `0, 0, 0` samples. One earlier
+   3-run batch lost `6110, 0, 1` (one run stalled after 34 samples). From
+   the start, 30 % loss gave `0, 0, 759` lost on `dgram` against
+   `no connect, 4129, 5939` on TCP. At 50 % from the start, discovery or
+   handshake failed in most runs for every library.
+10. **Met.** With 20 ms delay and 1 % loss, the p99 is 22.0 ms at chunk 1,
+    28.9 ms at chunk 16, and 20.9 ms for markers, with no lost sample. At
+    4000 Hz x 64 channels, `dgram` loses none and TCP loses over 12000. At
+    1 Mbit/s, `dgram` matches TCP (1.2 ms against 1.1 ms). The cuts of 3 s,
+    10 s, and 10 s at 1 Mbit/s lose no sample, and `cut3` stays on UDP.
+11. **Done.** `oracle/interop.py` with `dgram` on passes 28 of 28 plain
+    cells (plus 4 self-tests), 24 of 24 numeric chunk cells, and 24 of 24
+    numeric sync cells.
+12. **Partly met.** `oracle/latency.py` on loopback gives lower p50 on
+    every load, and equal or lower CPU on single-sample loads. Chunked
+    loads exceed +25 % CPU on the inlet (0.8 % against 0.6 % at 512 Hz x 8,
+    chunk 16, and 3.7 % against 2.3 % at 4000 Hz x 64, chunk 32). Outlet
+    CPU at 4000 Hz x 64, chunk 32 is 6.6 % against 5.2 % (+27 %), because
+    one chunk splits into 8 datagrams.
 13. **Not done.** Two machines on Wi-Fi. `dgram` stays off by default.
 14. **Not done.** Windows and macOS, until CI works again.
 

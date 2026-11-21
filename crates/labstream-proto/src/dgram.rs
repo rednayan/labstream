@@ -533,6 +533,9 @@ impl Packer {
     /// Set the count of copies of each sample, at most [`MAX_COPIES`].
     pub fn set_copies(&mut self, copies: u8) {
         self.copies = copies.min(MAX_COPIES);
+        if self.copies == 0 {
+            self.recent.clear();
+        }
     }
 
     /// Put samples of a resend into data datagrams with no copies.
@@ -575,6 +578,49 @@ impl Packer {
         s
     }
 
+    /// Put the samples of one push into packets, from slices in one buffer.
+    /// The caller reuses `gram`, and `on_datagram` or `on_tcp` runs for each
+    /// packet. When `copies` is 0, no sample goes into the copy buffer.
+    pub fn push_slices(
+        &mut self,
+        first: u64,
+        samples: &[&[u8]],
+        gram: &mut Vec<u8>,
+        mut on_datagram: impl FnMut(&[u8]),
+        mut on_tcp: impl FnMut(u64),
+    ) {
+        let room = MAX_DATAGRAM - DATA_HEADER;
+        let mut i = 0;
+        while i < samples.len() {
+            let n = first.wrapping_add(i as u64);
+            if samples[i].len() > room {
+                on_tcp(n);
+                self.recent.clear();
+                i += 1;
+                continue;
+            }
+            let mut j = i;
+            let mut used = 0;
+            while j < samples.len() && used + samples[j].len() <= room {
+                used += samples[j].len();
+                j += 1;
+            }
+            let copies = if self.copies == 0 {
+                0
+            } else {
+                self.take_copies(n, room - used)
+            };
+            self.write_datagram(gram, n, copies, &samples[i..j]);
+            on_datagram(gram);
+            if self.copies > 0 {
+                for (k, sample) in samples[i..j].iter().enumerate() {
+                    self.remember(n.wrapping_add(k as u64), sample.to_vec());
+                }
+            }
+            i = j;
+        }
+    }
+
     /// Put the samples of one push into packets. `samples` holds encoded
     /// samples with consecutive numbers from `first`.
     ///
@@ -601,10 +647,16 @@ impl Packer {
                 used += samples[j].len();
                 j += 1;
             }
-            let copies = self.take_copies(n, room - used);
+            let copies = if self.copies == 0 {
+                0
+            } else {
+                self.take_copies(n, room - used)
+            };
             out.push(Packet::Datagram(self.datagram(n, copies, &samples[i..j])));
-            for (k, sample) in samples[i..j].iter().enumerate() {
-                self.remember(n.wrapping_add(k as u64), sample.clone());
+            if self.copies > 0 {
+                for (k, sample) in samples[i..j].iter().enumerate() {
+                    self.remember(n.wrapping_add(k as u64), sample.clone());
+                }
             }
             i = j;
         }
@@ -639,6 +691,29 @@ impl Packer {
             count += 1;
         }
         count
+    }
+
+    /// Build a datagram into `d` from the last `copies` recent samples, then
+    /// the new samples, which start at the number `next`.
+    fn write_datagram(&mut self, d: &mut Vec<u8>, next: u64, copies: usize, new: &[&[u8]]) {
+        let count = copies + new.len();
+        d.clear();
+        let serial = self.next_serial();
+        data_header(
+            d,
+            self.cookie,
+            next.wrapping_sub(copies as u64),
+            count as u16,
+            serial,
+        );
+        let start = self.recent.len() - copies;
+        for (_, bytes, _) in self.recent.range(start..) {
+            d.extend_from_slice(bytes);
+        }
+        for bytes in new {
+            d.extend_from_slice(bytes);
+        }
+        debug_assert!(d.len() <= MAX_DATAGRAM);
     }
 
     /// Build a datagram from the last `copies` recent samples, then the new
@@ -876,11 +951,17 @@ impl<T> Reorder<T> {
         }
     }
 
+    /// True when the buffer holds a sample above the expected number, or knows
+    /// of a sample above it.
+    pub fn has_gaps(&self) -> bool {
+        !self.pending.is_empty() || self.expected.zip(self.horizon).is_some_and(|(e, h)| h > e)
+    }
+
     /// The small gaps to ask for on UDP now: each gap that stayed for
     /// `wait` seconds, again each `max(10 ms, 1.5 x round trip)` until it
     /// closes. At most [`MAX_GAPS`] gaps, from the lowest.
     pub fn nacks(&mut self, now: f64, wait: f64) -> Vec<(u64, u32)> {
-        if self.small == 0 {
+        if self.small == 0 || (self.holes.is_empty() && !self.has_gaps()) {
             return Vec::new();
         }
         self.update_holes(now);
@@ -916,6 +997,19 @@ impl<T> Reorder<T> {
     /// The count of samples that arrived again, or too late.
     pub fn duplicates(&self) -> u64 {
         self.duplicates
+    }
+
+    /// Take one sample from either path. When the sample is next in order and
+    /// no sample waits in the buffer, it goes directly to `out`.
+    pub fn insert_or_emit(&mut self, number: u64, item: T, out: &mut Vec<T>) -> bool {
+        if self.expected == Some(number) && self.pending.is_empty() {
+            out.push(item);
+            let after = number.wrapping_add(1);
+            self.expected = Some(after);
+            self.horizon = Some(self.horizon.map_or(after, |h| h.max(after)));
+            return true;
+        }
+        self.insert(number, item)
     }
 
     /// Take one sample from either path. The result is false for a sample
@@ -1948,6 +2042,50 @@ mod tests {
             r.poll(1.25, 0.010, 0.5),
             Some(Action::GaveUp { from: 1, count: 1 })
         );
+    }
+
+    #[test]
+    fn push_slices_matches_push_for_copies_and_large_samples() {
+        for copies in [0u8, 2] {
+            let mut a = Packer::new(77);
+            let mut b = Packer::new(77);
+            a.set_copies(copies);
+            b.set_copies(copies);
+            let block = vec![sample(0, 41), sample(1, 41), sample(2, 2000), sample(3, 41)];
+            let slices: Vec<&[u8]> = block.iter().map(Vec::as_slice).collect();
+            let mut out_a = Vec::new();
+            a.push(0, &block, &mut out_a);
+            let out_b = std::cell::RefCell::new(Vec::new());
+            let mut gram = Vec::new();
+            b.push_slices(
+                0,
+                &slices,
+                &mut gram,
+                |d| out_b.borrow_mut().push(Packet::Datagram(d.to_vec())),
+                |n| out_b.borrow_mut().push(Packet::Tcp(n)),
+            );
+            assert_eq!(out_a, *out_b.borrow(), "copies={copies}");
+            assert_eq!(a.serial(), b.serial());
+        }
+    }
+
+    #[test]
+    fn insert_or_emit_fast_path_matches_insert_and_drain() {
+        let mut r = Reorder::new();
+        r.start(0);
+        let mut out = Vec::new();
+        assert!(r.insert_or_emit(0, 10, &mut out));
+        assert!(r.insert_or_emit(1, 11, &mut out));
+        assert!(!r.has_gaps());
+        assert_eq!(out, vec![10, 11]);
+        // Out of order goes into the buffer until the missing number arrives.
+        assert!(r.insert_or_emit(3, 13, &mut out));
+        assert!(r.has_gaps());
+        assert_eq!(out, vec![10, 11]);
+        assert!(r.insert_or_emit(2, 12, &mut out));
+        r.drain(&mut out);
+        assert!(!r.has_gaps());
+        assert_eq!(out, vec![10, 11, 12, 13]);
     }
 
     /// A small random number source, so the simulation repeats.

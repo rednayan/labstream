@@ -19,6 +19,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// The UDP read timeout when a gap is open.
+const GAP_TIMEOUT: Duration = Duration::from_millis(2);
+/// The UDP read timeout while hellos go out.
+const HELLO_TIMEOUT: Duration = Duration::from_millis(20);
+/// The UDP read timeout on a clean link with no open gap.
+const IDLE_TIMEOUT: Duration = Duration::from_millis(50);
 /// The time between two hellos, and the time that the inlet sends them.
 const HELLO_EVERY: Duration = Duration::from_millis(100);
 const HELLO_FOR: Duration = Duration::from_secs(1);
@@ -96,9 +102,7 @@ impl DgramIn {
             std::net::Ipv4Addr::UNSPECIFIED.into()
         };
         let socket = UdpSocket::bind((local, 0)).ok()?;
-        socket
-            .set_read_timeout(Some(Duration::from_millis(2)))
-            .ok()?;
+        socket.set_read_timeout(Some(HELLO_TIMEOUT)).ok()?;
         let outlet = SocketAddr::new(peer.ip(), param.port);
         let state = Arc::new(Mutex::new(State {
             reorder: {
@@ -240,13 +244,23 @@ impl Drop for DgramIn {
 }
 
 fn deliver(s: &mut State, queue: &SampleQueue, lost: &std::sync::atomic::AtomicU64) {
+    let mut out = Vec::new();
+    deliver_into(s, &mut out, queue, lost);
+}
+
+fn deliver_into(
+    s: &mut State,
+    out: &mut Vec<Sample>,
+    queue: &SampleQueue,
+    lost: &std::sync::atomic::AtomicU64,
+) {
     if s.closed {
+        out.clear();
         return;
     }
-    let mut out = Vec::new();
-    s.reorder.drain(&mut out);
+    s.reorder.drain(out);
     if !out.is_empty() {
-        queue.push_owned(&mut out);
+        queue.push_owned(out);
     }
     lost.store(s.base_lost + s.reorder.lost(), Ordering::SeqCst);
 }
@@ -266,7 +280,9 @@ fn udp_loop(
     let mut hello_at: Option<Instant> = None;
     let mut heard = false;
     let mut feedback_at = Instant::now();
+    let mut cur_timeout = HELLO_TIMEOUT;
     let mut buf = vec![0u8; 2048];
+    let mut out: Vec<Sample> = Vec::new();
     while !stop.load(Ordering::SeqCst) && !queue.is_closed() {
         // The hellos, until the first datagram arrives, or for 1 s.
         if !heard
@@ -283,6 +299,8 @@ fn udp_loop(
         };
         let mut s = state.lock().unwrap();
         let now = Instant::now();
+        let t = now.saturating_duration_since(begin).as_secs_f64();
+        out.clear();
         if let Some(n) = got {
             match dgram::parse(&buf[..n]) {
                 Ok(Datagram::Data {
@@ -292,7 +310,6 @@ fn udp_loop(
                     serial,
                     payload,
                 }) if c == cookie => {
-                    let t = begin.elapsed().as_secs_f64();
                     s.meter.record(serial, t);
                     s.reorder.udp_heard(t);
                     let mut at = 0;
@@ -300,7 +317,8 @@ fn udp_loop(
                         match codec.decode(&payload[at..]) {
                             Ok((sample, used)) => {
                                 at += used;
-                                s.reorder.insert(first.wrapping_add(k), sample);
+                                s.reorder
+                                    .insert_or_emit(first.wrapping_add(k), sample, &mut out);
                             }
                             Err(_) => break,
                         }
@@ -310,7 +328,7 @@ fn udp_loop(
                     s.heard = true;
                 }
                 Ok(Datagram::Idle { cookie: c, next }) if c == cookie => {
-                    s.reorder.udp_heard(begin.elapsed().as_secs_f64());
+                    s.reorder.udp_heard(t);
                     s.reorder.idle(next);
                     heard_datagram(&mut s, now);
                     heard = true;
@@ -319,11 +337,10 @@ fn udp_loop(
                 _ => {}
             }
         }
-        deliver(&mut s, queue, lost);
+        deliver_into(&mut s, &mut out, queue, lost);
 
         // A gap at the expected number: a request, then a loss.
         let wait = MIN_WAIT.max(2.0 * s.period);
-        let t = begin.elapsed().as_secs_f64();
         match s.reorder.poll(t, wait, GIVE_UP) {
             Some(Action::Request { from, count }) => {
                 let mut r = Vec::new();
@@ -340,7 +357,7 @@ fn udp_loop(
                     eprintln!("TRACE dgram: gave up {count} samples from {from}");
                 }
                 s.window_lost += count;
-                deliver(&mut s, queue, lost)
+                deliver_into(&mut s, &mut out, queue, lost);
             }
             None => {}
         }
@@ -362,6 +379,18 @@ fn udp_loop(
             }
         }
         check_path(&mut s, now);
+        let want_timeout = if s.reorder.has_gaps() {
+            GAP_TIMEOUT
+        } else if !heard {
+            HELLO_TIMEOUT
+        } else {
+            IDLE_TIMEOUT
+        };
+        drop(s);
+        if want_timeout != cur_timeout {
+            let _ = socket.set_read_timeout(Some(want_timeout));
+            cur_timeout = want_timeout;
+        }
     }
 }
 

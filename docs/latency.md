@@ -220,41 +220,71 @@ of 10 s (`081f7fa`) and with the default of 30 s (`dfb6c39`):
 
 The same runner, with one build of the branch `feat/dgram` as two
 libraries: `tcp` with the default configuration, and `udp` with
-`labstream.Features = {seq, resume, dgram}`. The results of 2026-11-21, 3 runs
-for each cell:
+`labstream.Features = {seq, resume, dgram}`. These results are after the
+change of 2026-11-21 (adaptive copies, UDP resends of small gaps, relaxed
+keepalive on UDP, and no give-up during a cut). 3 runs for each cell
+(2 runs for `UDP stops 5 s, then returns`):
 
 | rule | load | tcp p99 ms | udp p99 ms | lost tcp | lost udp |
 |---|---|---|---|---|---|
-| clean | 512 Hz x 8, chunk 1 | 0.3 (0.2-0.3) | 0.2 (0.2-0.4) | 0, 0, 0 | 0, 0, 0 |
-| delay 20 ms | 512 Hz x 8, chunk 1 | 20.2 (20.2-20.2) | 20.2 (20.2-20.3) | 0, 0, 0 | 0, 0, 0 |
-| delay 20 ms, loss 1 % | 512 Hz x 8, chunk 1 | 68.2 (66.0-70.8) | 20.5 (20.5-22.0) | 0, 0, 0 | 0, 0, 0 |
-| delay 20 ms, loss 1 % | 512 Hz x 8, chunk 16 | 91.6 (91.6-91.7) | 20.9 (20.8-20.9) | 0, 0, 0 | 0, 0, 0 |
-| delay 20 ms, loss 1 % | markers, 200 each second | 70.2 (70.1-70.3) | 20.7 (20.7-25.1) | 0, 0, 0 | 0, 0, 0 |
-| delay 20 ms, loss 1 % | 4000 Hz x 64, chunk 32 | 4203.7 (4146.4-4483.7) | 279.4 (273.9-524.3) | 10145, 12557, 9751 | 0, 0, 0 |
-| 1 Mbit/s | 512 Hz x 8, chunk 1 | 1.1 (1.0-1.1) | 2.0 (1.9-2.1) | 0, 0, 0 | 0, 0, 0 |
-| cut of 3 s | 512 Hz x 8, chunk 1 | 3014.8 (2964.8-3020.3) | 2928.8 (2922.8-2928.8) | 0, 0, 0 | 0, 0, 0 |
-| cut of 10 s | 512 Hz x 8, chunk 1 | 11584.3 (11578.1-11597.1) | 11163.9 (11150.1-11183.5) | 0, 0, 0 | 0, 0, 0 |
-| cut of 10 s at 1 Mbit/s | 512 Hz x 8, chunk 1 | 11713.2 (10689.0-11714.8) | 11285.0 (11270.9-11304.9) | 0, 0, 0 | 0, 0, 0 |
-| UDP stops, TCP works | 512 Hz x 8, chunk 1 | 0.3 (0.2-0.3) | 2859.3 (2859.2-2860.6) | 0, 0, 0 | 0, 0, 0 |
-| loss 30 % after 2 s | 512 Hz x 8, chunk 1 | 10404.6 (1886.9-15559.9) | 8357.0 (6419.1-11929.6) | 4545, 4368, 3379 | 3781, 3143, 3845 |
-| loss 50 % after 2 s | 512 Hz x 8, chunk 1 | 3610.4 (1013.0-3941.8) | 13679.2 (9104.1-16402.7) | 5359, 5352, 5360 | 4892, 4462, 5010 |
+| clean | 512 Hz x 8, chunk 1 | 0.2 (0.2-0.3) | 0.2 (0.2-0.3) | 0, 0, 0 | 0, 0, 0 |
+| delay 20 ms | 512 Hz x 8, chunk 1 | 20.3 (20.2-20.4) | 20.5 (20.3-20.5) | 0, 0, 0 | 0, 0, 0 |
+| delay 20 ms, loss 1 % | 512 Hz x 8, chunk 1 | 71.4 (68.4-73.2) | 22.0 (20.5-22.0) | 0, 0, 0 | 0, 0, 0 |
+| delay 20 ms, loss 1 % | 512 Hz x 8, chunk 16 | 91.5 (20.9-91.9) | 28.9 (25.3-29.2) | 0, 0, 0 | 0, 0, 0 |
+| delay 20 ms, loss 1 % | markers, 200 each second | 70.2 (69.2-70.8) | 20.9 (20.7-25.0) | 0, 0, 0 | 0, 0, 0 |
+| delay 20 ms, loss 1 % | 4000 Hz x 64, chunk 32 | 4486.2 (4323.9-5371.3) | 84.3 (71.6-84.7) | 12192, 16810, 12528 | 0, 0, 0 |
+| 1 Mbit/s | 512 Hz x 8, chunk 1 | 1.1 (1.1-1.2) | 1.2 (1.1-1.3) | 0, 0, 0 | 0, 0, 0 |
+| cut of 3 s | 512 Hz x 8, chunk 1 | 2979.5 (2979.1-2985.8) | 2930.8 (2928.6-2930.8) | 0, 0, 0 | 0, 0, 0 |
+| cut of 10 s | 512 Hz x 8, chunk 1 | 11574.4 (11546.3-11593.3) | 11164.6 (11150.1-11173.2) | 0, 0, 0 | 0, 0, 0 |
+| cut of 10 s at 1 Mbit/s | 512 Hz x 8, chunk 1 | 11697.4 (11696.7-11699.2) | 11287.7 (11271.1-11299.6) | 0, 0, 0 | 0, 0, 0 |
+| UDP stops, TCP works | 512 Hz x 8, chunk 1 | 0.3 (0.3-0.3) | 2858.9 (2858.8-2859.4) | 0, 0, 0 | 0, 0, 0 |
+| UDP stops 5 s, then returns | 512 Hz x 8, chunk 1 | not run | 2562.3 (2562.2-2562.3) | not run | 0, 0 |
+| loss 30 % after 2 s | 512 Hz x 8, chunk 1 | 4989.2 (4352.3-9359.3) | 49.3 (32.0-131.6) | 4792, 4482, 4207 | 0, 0, 0 |
+| loss 50 % after 2 s | 512 Hz x 8, chunk 1 | 121.8 (89.5-4480.9) | 281.0 (265.4-376.7) | 5366, 5064, 5367 | 0, 0, 0 |
 
-- **Loss of 1 %.** The p99 of `dgram` stays within about 1 ms of the
-  delay, for each load with small samples. The copies repair nearly each
-  loss after one datagram.
+- **Loss of 1 %.** The p99 of `dgram` stays below 29 ms for each load with
+  small samples, with no lost sample.
 - **4000 Hz x 64 channels.** TCP cannot carry 8 Mbit/s with 1 % loss and a
-  round trip of 40 ms, so its queue fills, and it loses about 10000
-  samples. `dgram` loses none.
-- **1 Mbit/s.** The copies about triple the bytes, so `dgram` adds about
-  1 ms. This rule is the one case where `dgram` is worse than TCP.
-- **The cuts.** `dgram` loses no sample, and waits a little less than TCP.
-- **UDP stops.** The inlet asks for TCP after 3 s with no datagram, and the
-  connection loses no sample.
-- **Loss of 30 % and 50 %.** Each path loses most samples. The loss applies
-  to TCP too, and TCP waits seconds between its own retransmits. The copies
-  of `dgram` repair nearly each loss, but the rest needs a resend on TCP.
-  The inlet then holds the samples after a gap for seconds, and the samples
-  that still wait at the end of the run count as lost.
+  round trip of 40 ms, so it loses over 12000 samples. `dgram` loses none.
+- **1 Mbit/s.** On a clean link, `C` stays at 0, so `dgram` sends no copy
+  and matches TCP (1.2 ms against 1.1 ms).
+- **The cuts.** `dgram` loses no sample on `cut3`, `cut10`, and `cut10rate`,
+  and waits a little less than TCP. `cut3` stays on UDP.
+- **UDP stops.** The inlet asks for TCP after 3 s with no datagram, with no
+  lost sample. With `udpback`, the outlet tries UDP again after 30 s, also
+  with no lost sample.
+- **Loss of 30 % and 50 % after 2 s.** TCP loses 4200 to 5367 samples.
+  `dgram` stays on UDP, scales `C` up, and repairs small gaps on UDP. It
+  lost no sample in 3 runs at 30 % and in 3 traced runs at 50 %. One earlier
+  run at 50 % stalled after 34 samples (`6110, 0, 1` lost in that batch).
+- **Heavy loss from the start.** At 30 % from the start, `dgram` lost
+  `0, 0, 759` samples, TCP gave `no connect, 4129, 5939`, and liblsl lost
+  `4225, 3846, 5507`. At 50 % from the start, discovery or handshake failed
+  in most runs for all three libraries.
+
+### `dgram/1` on loopback
+
+`oracle/latency.py` compares `main` (`dfb6c39`) against `feat/dgram` with
+`labstream.Features = {seq, resume, dgram}`, 3 runs of 10 s for each cell:
+
+| outlet -> inlet | load | p50 µs | p99 µs | p99.9 µs | max µs | lost | CPU outlet % | CPU inlet % |
+|---|---|---|---|---|---|---|---|---|
+| main -> main | 512 Hz x 8, chunk 1 | 175 (169-186) | 401 (400-414) | 549 (536-615) | 2590 | 0 | 6.0 | 4.5 |
+| dgram -> dgram | 512 Hz x 8, chunk 1 | 158 (150-159) | 385 (369-405) | 515 (494-547) | 3987 | 0 | 5.9 | 3.6 |
+| main -> main | 512 Hz x 8, chunk 16 | 288 (262-290) | 571 (526-580) | 742 (621-763) | 765 | 0 | 1.6 | 0.6 |
+| dgram -> dgram | 512 Hz x 8, chunk 16 | 223 (218-223) | 513 (475-662) | 829 (640-1368) | 1370 | 0 | 2.0 | 0.8 |
+| main -> main | 4000 Hz x 64, chunk 1 | 65 (65-66) | 173 (172-214) | 1926 (847-2463) | 5550 | 0 | 21.1 | 16.5 |
+| dgram -> dgram | 4000 Hz x 64, chunk 1 | 54 (53-54) | 130 (120-148) | 719 (460-868) | 4050 | 0 | 20.0 | 12.4 |
+| main -> main | 4000 Hz x 64, chunk 32 | 343 (328-351) | 598 (576-610) | 1090 (1019-1143) | 3511 | 0 | 5.2 | 2.3 |
+| dgram -> dgram | 4000 Hz x 64, chunk 32 | 255 (235-262) | 595 (572-603) | 1225 (1146-1315) | 8882 | 0 | 6.6 | 3.7 |
+
+- **Latency.** `dgram` gives a lower p50 than TCP on every load.
+- **CPU, single samples.** On both single-sample loads, `dgram` uses equal
+  or lower CPU than TCP on both sides.
+- **CPU, chunks.** At 512 Hz x 8, chunk 16, outlet CPU is +25 % and inlet
+  CPU is 0.8 % against 0.6 %. At 4000 Hz x 64, chunk 32, outlet CPU is
+  6.6 % against 5.2 % (+27 %) and inlet CPU is 3.7 % against 2.3 % (+61 %).
+  One chunk of 32 samples takes 8 UDP datagrams instead of 1 TCP write.
 
 ## What this benchmark does not measure
 

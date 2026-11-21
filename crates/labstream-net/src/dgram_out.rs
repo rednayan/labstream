@@ -9,7 +9,7 @@
 //! datagrams of the inlet from UDP.
 
 use crate::queue::{Fanout, SampleQueue};
-use labstream_proto::dgram::{self, CopyControl, Packer, Packet, Path, Record};
+use labstream_proto::dgram::{self, CopyControl, Packer, Path, Record};
 use labstream_proto::seq::Numbering;
 use labstream_wire::{Codec, Format, Sample};
 use std::collections::HashMap;
@@ -235,6 +235,9 @@ impl<W: Write> Live<'_, W> {
         let mut batch: Vec<Sample> = Vec::new();
         let mut full: Vec<f64> = Vec::new();
         let mut pending: Vec<u8> = Vec::new();
+        let mut slab: Vec<u8> = Vec::new();
+        let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut gram: Vec<u8> = Vec::with_capacity(dgram::MAX_DATAGRAM);
         let mut sent = 0usize;
         // The number after the last sample that left the queue.
         let mut next = self
@@ -385,35 +388,39 @@ impl<W: Write> Live<'_, W> {
                 }
                 Path::Udp => {
                     let to = target.expect("UDP needs a target");
-                    let mut encoded = Vec::with_capacity(batch.len());
+                    slab.clear();
+                    ranges.clear();
                     for (i, s) in batch.iter_mut().enumerate() {
                         // A datagram can arrive out of order, so each sample
                         // carries its full timestamp.
                         s.timestamp = full[i];
-                        let mut e = Vec::new();
-                        if self.codec.encode(s, &mut e).is_err() {
+                        let start = slab.len();
+                        if self.codec.encode(s, &mut slab).is_err() {
                             return sent;
                         }
-                        encoded.push(e);
+                        ranges.push(start..slab.len());
                     }
-                    let mut packets = Vec::new();
-                    packer.push(first, &encoded, &mut packets);
+                    let slices: Vec<&[u8]> = ranges.iter().map(|r| &slab[r.clone()]).collect();
                     let mut failed = false;
-                    for p in packets {
-                        match p {
-                            Packet::Datagram(d) => {
-                                if !failed && self.setup.socket.send_to(&d, to).is_err() {
-                                    failed = true;
-                                }
+                    let socket = &self.setup.socket;
+                    let numbering = &mut self.numbering;
+                    let last = &mut self.last;
+                    packer.push_slices(
+                        first,
+                        &slices,
+                        &mut gram,
+                        |d| {
+                            if !failed && socket.send_to(d, to).is_err() {
+                                failed = true;
                             }
-                            Packet::Tcp(n) => {
-                                let i = (n - first) as usize;
-                                self.numbering.before(n, &mut pending);
-                                pending.extend_from_slice(&encoded[i]);
-                                self.last = Some(n);
-                            }
-                        }
-                    }
+                        },
+                        |n| {
+                            let i = (n - first) as usize;
+                            numbering.before(n, &mut pending);
+                            pending.extend_from_slice(&slab[ranges[i].clone()]);
+                            *last = Some(n);
+                        },
+                    );
                     sent += taken;
                     if failed {
                         // An error of the socket: back to TCP, with the
