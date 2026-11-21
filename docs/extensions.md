@@ -1063,8 +1063,16 @@ section "`dgram/1` over a slow, lossy, or cut link", gives the runs.
     chunk 16, and 3.7 % against 2.3 % at 4000 Hz x 64, chunk 32). Outlet
     CPU at 4000 Hz x 64, chunk 32 is 6.6 % against 5.2 % (+27 %), because
     one chunk splits into 8 datagrams.
-13. **Not done.** Two machines on Wi-Fi. `dgram` stays off by default.
-14. **Not done.** Windows and macOS, until CI works again.
+13. **Done.** `conformance/peer/src/bin/wifitest.rs` ran for 10 minutes in
+    each mode (200 s each at 512 Hz x 8, 1000 Hz x 32, and 4000 Hz x 64
+    chunk 32) from Linux to Windows over Wi-Fi. `dgram` stayed on UDP for
+    100 % of each load with 0 lost samples, and cut `p99-p50` from
+    6817.6 ms to 21.9 ms at 1000 Hz x 32 and from 128.0 ms to 19.3 ms at
+    4000 Hz x 64 chunk 32 (`docs/latency.md`). `dgram` stays off by default
+    until the user decides to turn it on.
+14. **Partly done.** On Windows, `dgram_live` (3 tests),
+    `dgram_outlet_live` (7 tests), and `dgram_watchdog` (1 test) all pass.
+    macOS waits until CI works again.
 
 #### Open questions
 

@@ -316,6 +316,12 @@ The transport is plain UDP (decision 12). The spec is `docs/extensions.md`,
 section `dgram`, which gives the criterion in detail. The user approved the
 spec on 2026-11-21.
 
+**Status:** implemented on the branch `feat/dgram`, off by default. All
+lossy-link criteria pass, `oracle/interop.py` passes, Windows live tests
+pass (11 of 11), and a 10-minute Linux-to-Windows Wi-Fi run passed with 0
+lost samples and much lower tail jitter than TCP (`docs/latency.md`). macOS
+CI waits until GitHub CI works again.
+
 ### Step 6: channel and rate selection
 
 A liblsl outlet sends each channel at the full rate to each inlet. A viewer

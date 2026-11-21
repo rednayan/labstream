@@ -286,14 +286,39 @@ keepalive on UDP, and no give-up during a cut). 3 runs for each cell
   6.6 % against 5.2 % (+27 %) and inlet CPU is 3.7 % against 2.3 % (+61 %).
   One chunk of 32 samples takes 8 UDP datagrams instead of 1 TCP write.
 
+### `dgram/1` between two machines on Wi-Fi
+
+`conformance/peer/src/bin/wifitest.rs` ran between a Linux outlet and a
+Windows inlet over Wi-Fi on 2026-11-21, with `lab.KnownPeers`. Each mode
+ran 3 loads of 200 s each (10 minutes total for each mode). Two machines do
+not share a monotonic clock, so the table gives the tail jitter above p50:
+
+| mode | load | samples | lost | on_udp % | p99-p50 ms | p99.9-p50 ms | max-p50 ms |
+|---|---|---|---|---|---|---|---|
+| tcp | 512 Hz x 8, chunk 1 | 102400 | 0 | 0 | 20.0 | 39.6 | 164.6 |
+| udp | 512 Hz x 8, chunk 1 | 102400 | 0 | 100 | 19.6 | 30.2 | 81.5 |
+| tcp | 1000 Hz x 32, chunk 1 | 200000 | 0 | 0 | 6817.6 | 7060.0 | 7178.2 |
+| udp | 1000 Hz x 32, chunk 1 | 200000 | 0 | 100 | 21.9 | 42.8 | 94.8 |
+| tcp | 4000 Hz x 64, chunk 32 | 800000 | 0 | 0 | 128.0 | 176.7 | 285.7 |
+| udp | 4000 Hz x 64, chunk 32 | 800000 | 0 | 100 | 19.3 | 38.4 | 85.0 |
+
+- **Loss and order.** Every run gave 0 lost, 0 repeated, 0 reordered, and 0
+  dropped samples, with 0 recoveries.
+- **1000 Hz x 32 channels.** TCP stalled for up to 7.2 s (`p99-p50` of
+  6817.6 ms). `dgram` stayed on UDP for 100 % of the run, with a `p99-p50`
+  of 21.9 ms and a maximum of 94.8 ms.
+- **4000 Hz x 64 channels, chunk 32.** `dgram` cut `p99-p50` from 128.0 ms
+  to 19.3 ms, and `max-p50` from 285.7 ms to 85.0 ms.
+- **Discovery on Windows.** Multicast discovery did not find the Linux
+  outlet, because `local_ipv4_addresses()` reads `/proc/net/fib_trie` on
+  Linux only. Unicast with `lab.KnownPeers` needed an inbound allow rule in
+  Windows Firewall for the UDP return port of the resolver.
+
 ## What this benchmark does not measure
 
-- **Two machines.** All results come from the loopback interface.
-- **A real wireless link.** `netem` gives loss and delay with a fixed
-  rule. A Wi-Fi link changes its rate, and loses packets in bursts. Do not
-  add a `tc netem` rule to the `lo` interface of a shared machine, because
-  the rule delays every program on the machine. `lossylink.py` uses its own
-  namespaces instead.
+- **One-way latency between two machines.** Two machines do not share a
+  monotonic clock, so `wifitest` measures tail jitter above p50, not
+  absolute one-way latency.
 - **The application.** Phasic and other programs pull in their own loop. Their
   poll interval adds to these numbers.
 - **The first offset and the recovery.** The live tests in
