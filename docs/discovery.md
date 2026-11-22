@@ -1,8 +1,8 @@
 # Doctor and fallback discovery (roadmap step 10)
 
-**Status:** implemented on `feat/doctor-discovery` and measured against both
-`labstream` and `liblsl` outlets (`conformance/oracle/doctor_net.py`).
-`docs/roadmap.md`, step 10, gives the success criterion.
+**Status:** complete and measured against both `labstream` and `liblsl`
+outlets (`conformance/oracle/doctor_net.py`) and between Linux and Windows
+over Wi-Fi. `docs/roadmap.md`, step 10, gives the success criterion.
 
 ## The purpose
 
