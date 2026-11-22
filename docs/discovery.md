@@ -164,6 +164,19 @@ Measured between two Linux network namespaces (`10.77.0.1/24` and
 All 28 cells of `conformance/oracle/interop.py` also pass with
 `FallbackDiscovery = auto`.
 
+### Two machines (Linux and Windows over Wi-Fi)
+
+Measured between Linux (`wlp1s0`, `192.168.2.208/24`) and Windows (`if8`,
+`192.168.2.210/24`) with no `--peer` flag and no custom configuration:
+
+- `labstream.exe doctor --peer 192.168.2.208` reported `OK` on all six checks
+  (`interfaces`, `multicast_port`, `multicast_self_test` on `224.0.0.183:16571`,
+  `broadcast_self_test`, `discovery`, and `peer:192.168.2.208` over UDP and TCP)
+  and listed `Wifi_udp_512x8x1` on `192.168.2.208:16572` via multicast.
+- `wifitest.exe inlet --mode udp --seconds 15 --loads 512x8x1` resolved the
+  Linux outlet with no `--peer` flag and received 7680 of 7680 samples on UDP
+  (0 lost, 100 % UDP, p99-p50 17.3 ms, max-p50 26.2 ms).
+
 ## Conformance plan
 
 1. **Unit tests.** `netif` subnet host generation (never sweeps larger than
