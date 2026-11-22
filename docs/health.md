@@ -1,6 +1,6 @@
 # Health API (roadmap step 11)
 
-**Status:** library, C API, tests, and latency check complete on `feat/health-api`.
+**Status:** library, C API, tests, and latency check complete.
 `docs/roadmap.md`, step 11, gives the success criterion. Phasic UI integration
 lives in the Phasic repository.
 
