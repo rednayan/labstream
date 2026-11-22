@@ -43,8 +43,9 @@ labstream/
 │   ├── labstream-wire/       the sample codec
 │   ├── labstream-proto/      the handshake, discovery, and time sync
 │   ├── labstream-time/       the timestamp filter
-│   ├── labstream-net/        sockets, outlet, inlet, resolver
-│   └── labstream-capi/       the C ABI, built as liblsl.so
+│   ├── labstream-net/        sockets, outlet, inlet, resolver, doctor
+│   ├── labstream-capi/       the C ABI, built as liblsl.so
+│   └── labstream-cli/        the `labstream` command-line tool (`labstream doctor`)
 ├── conformance/          the tools that measure the crates against liblsl
 │   ├── peer/                 lsl-peer, the program that the interop tool drives
 │   ├── oracle/               the measurement tools and the Docker build of liblsl
@@ -73,8 +74,9 @@ labstream/
 | `labstream-wire` | the sample codec. No input and no output | nothing | yes |
 | `labstream-proto` | the handshake, discovery, and time sync. No input and no output | `-wire` | yes |
 | `labstream-time` | the timestamp filter, bit exact to liblsl. No input and no output | nothing | yes |
-| `labstream-net` | sockets, outlet, inlet, resolver, configuration, XPath | `-wire`, `-proto`, `-time` | yes |
+| `labstream-net` | sockets, outlet, inlet, resolver, configuration, XPath, doctor | `-wire`, `-proto`, `-time` | yes |
 | `labstream-capi` | the C ABI. It builds `liblsl.so`, `liblsl.dylib`, or `lsl.dll` | `-wire`, `-net`, `-time` | no |
+| `labstream-cli` | the `labstream` binary (`labstream doctor`) | `-net` | no |
 | `lsl-peer` | a program that the interop tool drives. It is at `conformance/peer/` | `-wire`, `-net` | no |
 
 This list gives which crate needs which:
@@ -92,12 +94,13 @@ labstream-wire   needs  nothing
 The order of a publish comes from this list. A crate goes to crates.io after
 each crate that it needs.
 
-Two crates are not on crates.io. Each one sets `publish = false`, so no command
-can send it there:
+Three crates are not on crates.io. Each one sets `publish = false`, so no
+command can send it there:
 
 - `labstream-capi` builds a `cdylib` alone, which a Rust program cannot link.
   The GitHub release carries the built library for Linux, macOS, and Windows.
   `docs/releasing.md` gives the reason in full.
+- `labstream-cli` builds the `labstream` binary and not a library dependency.
 - `lsl-peer` is a tool of the workbench and not a library.
 
 ## How the workspace joins the crates
@@ -293,6 +296,7 @@ release of a new crate therefore goes by hand, with a token.
 | `docs/conformance.md` | what was measured against liblsl, how, and the result |
 | `docs/latency.md` | how to measure the latency and the CPU, and the results |
 | `docs/extensions.md` | a proposal for features between two labstream peers |
+| `docs/discovery.md` | fallback discovery, cross-platform interfaces, and `labstream doctor` |
 | `SPEC.md` | the protocol, with a citation for every claim |
 | `CONTRIBUTING.md` | the rules for a change, and the style of the documents |
 | `CHANGELOG.md` | what changed in each version |

@@ -81,8 +81,26 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for heavy loss (also from the start of a run), a dead UDP path, and a UDP
   path that comes back. A run whose inlet cannot connect gives the result
   `no connect`.
+- `labstream_net::netif` and cross-platform interface enumeration (`getifaddrs`
+  on Linux and macOS, `GetIpAddrTable` and `GetIpNetTable` on Windows).
+  Before, interface enumeration read `/proc/net/fib_trie` and returned no
+  interface on Windows and macOS.
+- Fallback discovery (`labstream.FallbackDiscovery = auto` by default,
+  `docs/discovery.md`). When multicast wave 1 finds no stream, the resolver
+  tries directed subnet broadcast, ARP neighbor unicast, a local `/24`
+  unicast probe, and TCP `LSL:shortinfo` for `lab.KnownPeers`. All paths use
+  standard LSL packets and find both `labstream` and `liblsl` outlets.
+- `labstream_net::doctor` (re-exported as `labstream::doctor`), the
+  `labstream-cli` crate (`labstream doctor [--peer IP[,IP]] [--timeout S]
+  [--json]`), and the C function `labstream_doctor_json`.
+- `conformance/oracle/doctor_net.py`. It blocks multicast, broadcast, and UDP
+  in two network namespaces against both `labstream` and `liblsl` outlets.
 
 ### Fixed
+
+- Unicast discovery queries now leave from the receive socket so the reply
+  returns on the same port and passes stateful firewalls such as Windows
+  Defender Firewall with no inbound rule.
 
 - An inlet with `CLOCKSYNC` waits up to 5 s for the first clock offset, as
   liblsl does. Before, the first timestamps used an offset of 0, and the real

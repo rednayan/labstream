@@ -1,7 +1,7 @@
 # Roadmap: features that liblsl does not have
 
 **Status:** approved by the user on 2026-11-16. The gate, step 0, step 1,
-and step 5 are complete. The other steps are not implemented.
+step 5, and step 10 are complete. The other steps are not implemented.
 
 This page gives the order of the labstream-only features, the success
 criterion of each feature, and the dependencies. Each feature follows the
@@ -48,6 +48,11 @@ The user made these decisions on 2026-11-16:
     `{seq, resume, dgram}`. The user decided this on 2026-11-21, after the
     10-minute Linux-to-Windows Wi-Fi run passed with 0 lost samples and
     311x lower tail jitter than TCP at 1000 Hz x 32 channels.
+14. Step 10 adds a new workspace crate `crates/labstream-cli` for the
+    `labstream` binary (`labstream doctor`, and future `relay`, `top`, and
+    `play`), keeps the diagnostics API in `labstream-net` (re-exported by
+    `labstream` and `labstream-capi`), and sets `labstream.FallbackDiscovery`
+    to `auto` by default. The user decided this on 2026-11-22.
 
 ## The map
 
@@ -396,6 +401,13 @@ multicast.
 
 **Success criterion:** on a network that blocks multicast, the doctor names
 the cause, and the fallback finds the stream in less than 2 s.
+
+**Status:** complete (`docs/discovery.md`). `conformance/oracle/doctor_net.py`
+blocks multicast, broadcast, and UDP in two namespaces against both
+`labstream` and `liblsl` outlets. Fallback finds both outlets in 0.47 s
+(directed broadcast), 0.63 s (cold-ARP `/24` unicast), and 0.80 s (TCP
+`LSL:shortinfo` for `KnownPeers`). `labstream doctor` names the cause in
+each case.
 
 ### Step 11: health API
 

@@ -19,10 +19,12 @@ pub mod config;
 pub mod desc;
 mod dgram_in;
 mod dgram_out;
+pub mod doctor;
 pub mod history;
 pub mod info;
 pub mod inlet;
 mod keepalive;
+pub mod netif;
 pub mod outlet;
 pub mod queue;
 pub mod resolver;
@@ -253,68 +255,17 @@ pub(crate) fn random_bytes() -> [u8; 16] {
 
 /// Every local IPv4 address on this machine.
 ///
-/// A multicast join names an interface by its address. Joining with the
-/// unspecified address lets the kernel pick one, and it can pick the loopback,
-/// which carries no multicast. An outlet is then invisible to a resolver that
-/// sends on a real interface.
-///
-/// liblsl reads the interface list with `getifaddrs`
-/// (`src/netinterfaces.cpp`). This reads the routing table instead, which needs
-/// no unsafe code. A machine with no readable table returns an empty list, and
-/// the caller falls back to the unspecified address.
+/// Uses [`netif::local_ipv4_addresses`] (`getifaddrs` on Unix,
+/// `GetIpAddrTable` on Windows).
 pub fn local_ipv4_addresses() -> Vec<std::net::Ipv4Addr> {
-    let mut out = Vec::new();
-    let text = match std::fs::read_to_string("/proc/net/fib_trie") {
-        Ok(t) => t,
-        Err(_) => return out,
-    };
-    let lines: Vec<&str> = text.lines().collect();
-    for (i, line) in lines.iter().enumerate() {
-        // A local address appears as a `/32 host LOCAL` entry, one line below
-        // the address itself.
-        if !line.contains("host LOCAL") {
-            continue;
-        }
-        if i == 0 {
-            continue;
-        }
-        let prev = lines[i - 1];
-        let addr = prev.rsplit(&[' ', '|', '-'][..]).find(|t| {
-            t.split('.').count() == 4 && t.chars().all(|c| c.is_ascii_digit() || c == '.')
-        });
-        if let Some(a) = addr.and_then(|a| a.parse::<std::net::Ipv4Addr>().ok()) {
-            if !a.is_broadcast() && !out.contains(&a) {
-                out.push(a);
-            }
-        }
-    }
-    out
+    netif::local_ipv4_addresses()
 }
 
 /// The index of every interface on this machine, with zero at the front.
 ///
-/// An IPv6 multicast join names an interface by index rather than by address
-/// (`src/udp_server.cpp:78`, which reads `scope_id`). Index zero lets the
-/// operating system pick one, and that choice can be the loopback, which
-/// carries no multicast. Every real index is therefore tried as well.
-///
-/// The list comes from `/proc/net/if_inet6`, whose fourth column is the index
-/// in hexadecimal. A machine with no readable file returns only zero.
+/// Uses [`netif::local_interface_indexes`].
 pub fn local_interface_indexes() -> Vec<u32> {
-    let mut out = vec![0u32];
-    if let Ok(text) = std::fs::read_to_string("/proc/net/if_inet6") {
-        for line in text.lines() {
-            let mut parts = line.split_whitespace();
-            // address, index, prefix length, scope, flags, name
-            let index = parts.nth(1).and_then(|v| u32::from_str_radix(v, 16).ok());
-            if let Some(i) = index {
-                if i != 0 && !out.contains(&i) {
-                    out.push(i);
-                }
-            }
-        }
-    }
-    out
+    netif::local_interface_indexes()
 }
 
 #[cfg(test)]

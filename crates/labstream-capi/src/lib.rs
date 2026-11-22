@@ -2900,9 +2900,52 @@ pub unsafe extern "C" fn lsl_time_correction_ex(
     offset
 }
 
+/// Run network and discovery diagnostics and return the report as JSON.
+///
+/// Pass null or an empty string for `peers` to skip remote peer checks, or a
+/// comma-separated list of IP addresses or hostnames. Pass a positive
+/// `timeout` in seconds, or zero to use the default (1.5 s).
+///
+/// The caller frees the returned string with `lsl_destroy_string`.
+///
+/// # Safety
+/// `peers` must be null or a valid zero-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_doctor_json(
+    peers: *const c_char,
+    timeout: c_double,
+) -> *mut c_char {
+    let mut opts = labstream_net::doctor::Options::default();
+    if timeout.is_finite() && timeout > 0.0 {
+        opts.timeout = Duration::from_secs_f64(timeout);
+    }
+    let raw_peers = cstr(peers);
+    for peer in raw_peers.split(',') {
+        let trimmed = peer.trim();
+        if !trimmed.is_empty() {
+            opts.peers.push(trimmed.to_string());
+        }
+    }
+    let report = labstream_net::doctor::diagnose(&opts);
+    out_string(&report.to_json())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctor_json_returns_report_and_frees_cleanly() {
+        unsafe {
+            let ptr = labstream_doctor_json(std::ptr::null(), 0.2);
+            assert!(!ptr.is_null());
+            let json = cstr(ptr);
+            lsl_destroy_string(ptr);
+            assert!(json.starts_with('{') && json.ends_with('}'));
+            assert!(json.contains("\"checks\":"));
+            assert!(json.contains("\"fallback_discovery\":"));
+        }
+    }
 
     #[test]
     fn a_count_is_unknown_for_no_inlet_and_for_a_closed_one() {

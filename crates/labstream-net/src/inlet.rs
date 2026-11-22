@@ -21,25 +21,88 @@ use std::time::{Duration, Instant};
 /// it, and drops any answer that carries a different value. It never derives
 /// the value of another implementation. SPEC.md 2.3.
 pub fn resolve(query: &str, minimum: usize, timeout: Duration) -> std::io::Result<Vec<StreamInfo>> {
+    let cfg = config::get();
     let mut wave = QueryWave::open()?;
     let end = Instant::now() + timeout;
     let mut found: Vec<StreamInfo> = Vec::new();
+    let mut round: u32 = 0;
 
     while Instant::now() < end {
         wave.send(query);
-        let seen: Vec<String> = found.iter().map(|f| f.uid.clone()).collect();
-        for info in wave.collect(Duration::from_millis(400), |uid| {
-            seen.iter().any(|u| u == uid)
-        }) {
-            if !found.iter().any(|f| f.uid == info.uid) {
-                found.push(info);
+        let run_fallback = match cfg.fallback_discovery {
+            config::FallbackDiscovery::Off => false,
+            config::FallbackDiscovery::Subnet => true,
+            config::FallbackDiscovery::Auto => round > 0 && found.len() < minimum,
+        };
+        if !run_fallback {
+            let left = end.saturating_duration_since(Instant::now());
+            let window = left.min(Duration::from_millis(300));
+            collect_into(&mut wave, window, &mut found);
+            if found.len() >= minimum {
+                return Ok(found);
+            }
+        } else {
+            // Phase A: directed subnet broadcast and ARP neighbors (zero cold ARP misses).
+            wave.send_fallback_fast(query);
+            let left = end.saturating_duration_since(Instant::now());
+            let fast_window = left.min(Duration::from_millis(150));
+            collect_into(&mut wave, fast_window, &mut found);
+            if found.len() >= minimum {
+                return Ok(found);
+            }
+
+            // Phase B: local /24 (or smaller) unicast probe on port 16571 first,
+            // then base_port range if still unanswered.
+            if Instant::now() < end {
+                wave.send_fallback_subnet_mcast_port(query);
+                let left = end.saturating_duration_since(Instant::now());
+                let sub_window = left.min(Duration::from_millis(150));
+                collect_into(&mut wave, sub_window, &mut found);
+                if found.len() >= minimum {
+                    return Ok(found);
+                }
+            }
+            if Instant::now() < end {
+                wave.send_fallback_subnet_data_ports(query, round.saturating_sub(1));
+                let left = end.saturating_duration_since(Instant::now());
+                let sub_window = left.min(Duration::from_millis(150));
+                collect_into(&mut wave, sub_window, &mut found);
+                if found.len() >= minimum {
+                    return Ok(found);
+                }
+            }
+
+            // Phase C: when UDP to KnownPeers finds nothing, try TCP LSL:shortinfo
+            // so a network that drops all UDP still discovers known peers.
+            if !cfg.known_peers.is_empty() && Instant::now() < end {
+                let tcp_budget = end
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(400));
+                for info in probe_peers_tcp(&cfg.known_peers, query, tcp_budget) {
+                    if !found.iter().any(|f| f.uid == info.uid) {
+                        found.push(info);
+                    }
+                }
+                if found.len() >= minimum {
+                    return Ok(found);
+                }
             }
         }
-        if found.len() >= minimum {
-            return Ok(found);
-        }
+        round = round.saturating_add(1);
     }
     Ok(found)
+}
+
+fn collect_into(wave: &mut QueryWave, window: Duration, found: &mut Vec<StreamInfo>) {
+    if window.is_zero() {
+        return;
+    }
+    let seen: Vec<String> = found.iter().map(|f| f.uid.clone()).collect();
+    for info in wave.collect(window, |uid| seen.iter().any(|u| u == uid)) {
+        if !found.iter().any(|f| f.uid == info.uid) {
+            found.push(info);
+        }
+    }
 }
 
 /// One set of sockets that sends a query and reads the answers.
@@ -63,7 +126,11 @@ pub(crate) struct QueryWave {
 }
 
 struct Leg {
-    /// The socket that answers arrive on.
+    /// True when this leg speaks IPv6.
+    v6: bool,
+    /// The socket that answers arrive on. Unicast queries leave from this
+    /// socket too, so the reply returns on the same 5-tuple and passes
+    /// stateful firewalls such as Windows Defender Firewall.
     rx: UdpSocket,
     /// One socket for each local address, plus one bound to any address.
     senders: Vec<UdpSocket>,
@@ -100,22 +167,135 @@ impl QueryWave {
     /// Send one wave of queries, on every protocol.
     pub(crate) fn send(&self, query: &str) {
         let cfg = config::get();
+        self.send_multicast_only(query);
+        if !cfg.known_peers.is_empty() {
+            self.send_peers_only(query, &cfg.known_peers);
+        }
+    }
+
+    /// Send only to configured multicast and broadcast targets, with no
+    /// `KnownPeers` and no fallback paths.
+    pub(crate) fn send_multicast_only(&self, query: &str) {
+        let cfg = config::get();
         for leg in &self.legs {
             let msg = discovery::build_query(query, leg.return_port, &self.query_id);
-            for s in &leg.senders {
+            for s in std::iter::once(&leg.rx).chain(leg.senders.iter()) {
                 // A multicast or broadcast query goes to the multicast port.
                 // SPEC.md 1.1.
                 for addr in &leg.targets {
                     let _ = s.send_to(&msg, (addr.as_str(), cfg.multicast_port));
                 }
-                // A unicast query walks the port range, and reaches every
-                // address that the configuration names as a peer.
                 for p in cfg.base_port..cfg.base_port + cfg.port_range {
                     for addr in &leg.targets {
                         let _ = s.send_to(&msg, (addr.as_str(), p));
                     }
-                    for addr in &cfg.known_peers {
-                        let _ = s.send_to(&msg, (addr.as_str(), p));
+                }
+            }
+        }
+    }
+
+    /// Send unicast queries to `peers` directly from `leg.rx` so the reply
+    /// returns on the same port and passes stateful firewalls.
+    pub(crate) fn send_peers_only(&self, query: &str, peers: &[String]) {
+        let cfg = config::get();
+        for leg in &self.legs {
+            let msg = discovery::build_query(query, leg.return_port, &self.query_id);
+            for addr in peers {
+                let _ = leg.rx.send_to(&msg, (addr.as_str(), cfg.multicast_port));
+                for p in cfg.base_port..cfg.base_port + cfg.port_range {
+                    let _ = leg.rx.send_to(&msg, (addr.as_str(), p));
+                }
+            }
+        }
+    }
+
+    /// Send all UDP fallback discovery paths (directed broadcast, ARP
+    /// neighbors, and local `/24` unicast probes). `docs/discovery.md`.
+    pub(crate) fn send_fallback(&self, query: &str, round: u32) {
+        self.send_fallback_fast(query);
+        self.send_fallback_subnet_mcast_port(query);
+        self.send_fallback_subnet_data_ports(query, round);
+    }
+
+    /// Send directed subnet broadcasts and ARP neighbor unicast queries.
+    pub(crate) fn send_fallback_fast(&self, query: &str) {
+        let cfg = config::get();
+        let ifaces = crate::netif::local_ipv4_interfaces();
+        let neighbors = crate::netif::local_ipv4_neighbors();
+        for leg in &self.legs {
+            if leg.v6 {
+                continue;
+            }
+            let msg = discovery::build_query(query, leg.return_port, &self.query_id);
+            // 1. Directed subnet broadcast on each active non-loopback IPv4 interface.
+            for iface in &ifaces {
+                if let Some(bcast) = iface.broadcast {
+                    let _ = leg.rx.send_to(&msg, (bcast, cfg.multicast_port));
+                    for s in &leg.senders {
+                        let _ = s.send_to(&msg, (bcast, cfg.multicast_port));
+                    }
+                    for p in cfg.base_port..cfg.base_port + cfg.port_range {
+                        let _ = leg.rx.send_to(&msg, (bcast, p));
+                    }
+                }
+            }
+            // 2. Unicast to known ARP/neighbor cache peers across the full port range.
+            for ip in &neighbors {
+                let _ = leg.rx.send_to(&msg, (*ip, cfg.multicast_port));
+                for p in cfg.base_port..cfg.base_port + cfg.port_range {
+                    let _ = leg.rx.send_to(&msg, (*ip, p));
+                }
+            }
+        }
+    }
+
+    /// Probe local `/24` (or smaller) hosts on `multicast_port` (`16571`).
+    ///
+    /// Both liblsl and labstream outlets answer unicast on port 16571, so one
+    /// packet per host stays well inside the kernel send buffer even on a cold
+    /// ARP table.
+    pub(crate) fn send_fallback_subnet_mcast_port(&self, query: &str) {
+        let cfg = config::get();
+        let ifaces = crate::netif::local_ipv4_interfaces();
+        let neighbors = crate::netif::local_ipv4_neighbors();
+        for leg in &self.legs {
+            if leg.v6 {
+                continue;
+            }
+            let msg = discovery::build_query(query, leg.return_port, &self.query_id);
+            for iface in &ifaces {
+                for peer in iface.subnet_peers() {
+                    if neighbors.contains(&peer) {
+                        continue;
+                    }
+                    let _ = leg.rx.send_to(&msg, (peer, cfg.multicast_port));
+                }
+            }
+        }
+    }
+
+    /// Probe local `/24` (or smaller) hosts on `base_port` and subsequent ports.
+    pub(crate) fn send_fallback_subnet_data_ports(&self, query: &str, round: u32) {
+        let cfg = config::get();
+        let ifaces = crate::netif::local_ipv4_interfaces();
+        let neighbors = crate::netif::local_ipv4_neighbors();
+        let extra_ports = if round == 0 {
+            1u16
+        } else {
+            8u16.min(cfg.port_range)
+        };
+        for leg in &self.legs {
+            if leg.v6 {
+                continue;
+            }
+            let msg = discovery::build_query(query, leg.return_port, &self.query_id);
+            for iface in &ifaces {
+                for peer in iface.subnet_peers() {
+                    if neighbors.contains(&peer) {
+                        continue;
+                    }
+                    for p in cfg.base_port..cfg.base_port + extra_ports {
+                        let _ = leg.rx.send_to(&msg, (peer, p));
                     }
                 }
             }
@@ -201,10 +381,18 @@ impl Leg {
             std::net::Ipv4Addr::UNSPECIFIED.into()
         };
         let rx = UdpSocket::bind((any, 0))?;
-        if !v6 {
+        if v6 {
+            let _ = rx.set_multicast_loop_v6(true);
+            let _ = socket2::SockRef::from(&rx).set_multicast_hops_v6(cfg.multicast_ttl);
+        } else {
             rx.set_broadcast(true)?;
+            let _ = rx.set_multicast_ttl_v4(cfg.multicast_ttl);
+            let _ = rx.set_multicast_loop_v4(true);
         }
-        rx.set_read_timeout(Some(Duration::from_millis(40)))?;
+        // Keep `rx` non-blocking so neither `collect` nor a cold-ARP `/24`
+        // fallback sweep ever stalls on a blocking send or receive timeout.
+        rx.set_nonblocking(true)?;
+        let _ = socket2::SockRef::from(&rx).set_send_buffer_size(1024 * 1024);
         let return_port = rx.local_addr()?.port();
 
         // A query must leave by every interface that carries multicast,
@@ -256,11 +444,88 @@ impl Leg {
         }
 
         Ok(Leg {
+            v6,
             rx,
             senders,
             return_port,
             targets,
         })
+    }
+}
+
+/// Probe `peers` over TCP using `LSL:shortinfo` on `base_port..base_port + port_range`.
+///
+/// Both liblsl (`src/tcp_server.cpp:502-555`) and labstream answer
+/// `LSL:shortinfo` on TCP, so this finds streams on `KnownPeers` even when a
+/// firewall drops all UDP packets.
+pub(crate) fn probe_peers_tcp(peers: &[String], query: &str, budget: Duration) -> Vec<StreamInfo> {
+    use std::net::ToSocketAddrs;
+    let cfg = config::get();
+    let mut targets: Vec<SocketAddr> = Vec::new();
+    for peer in peers {
+        let mut addrs: Vec<std::net::IpAddr> = Vec::new();
+        if let Ok(ip) = peer.parse::<std::net::IpAddr>() {
+            addrs.push(ip);
+        } else if let Ok(iter) = (peer.as_str(), cfg.base_port).to_socket_addrs() {
+            for sa in iter {
+                if !addrs.contains(&sa.ip()) {
+                    addrs.push(sa.ip());
+                }
+            }
+        }
+        for ip in addrs {
+            for p in cfg.base_port..cfg.base_port + cfg.port_range {
+                targets.push(SocketAddr::new(ip, p));
+            }
+        }
+    }
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let connect_timeout = budget.min(Duration::from_millis(200));
+    let req = format!("LSL:shortinfo\r\n{query}\r\n");
+    let found: Arc<Mutex<Vec<StreamInfo>>> = Arc::new(Mutex::new(Vec::new()));
+    // Probe in small concurrent batches so closed/filtered ports do not serialize.
+    let mut handles = Vec::new();
+    let chunk_size = (targets.len() / 8).max(1);
+    for chunk in targets.chunks(chunk_size) {
+        let chunk = chunk.to_vec();
+        let req = req.clone();
+        let found = Arc::clone(&found);
+        let deadline = Instant::now() + budget;
+        handles.push(std::thread::spawn(move || {
+            for addr in chunk {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                let left = deadline.saturating_duration_since(Instant::now());
+                let Ok(mut stream) = TcpStream::connect_timeout(&addr, connect_timeout.min(left))
+                else {
+                    continue;
+                };
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+                if stream.write_all(req.as_bytes()).is_err() || stream.flush().is_err() {
+                    continue;
+                }
+                let mut xml = String::new();
+                let _ = stream.read_to_string(&mut xml);
+                if let Some(mut info) = StreamInfo::from_shortinfo_xml(&xml) {
+                    stamp_address(&mut info, addr);
+                    let mut list = found.lock().unwrap();
+                    if !list.iter().any(|s| s.uid == info.uid) {
+                        list.push(info);
+                    }
+                }
+            }
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+    match Arc::try_unwrap(found) {
+        Ok(m) => m.into_inner().unwrap(),
+        Err(a) => a.lock().unwrap().clone(),
     }
 }
 

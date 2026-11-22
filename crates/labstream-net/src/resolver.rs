@@ -87,13 +87,28 @@ impl Drop for ContinuousResolver {
 
 /// Send a wave, collect the answers, wait, and repeat.
 fn wave_loop(query: &str, shared: Arc<Shared>) {
+    let cfg = crate::config::get();
     let mut wave = match crate::inlet::QueryWave::open() {
         Ok(w) => w,
         Err(_) => return,
     };
+    let mut round: u32 = 0;
     while !shared.stop.load(Ordering::SeqCst) {
         wave.send(query);
-        let answers = wave.collect(Duration::from_millis(400), |_| false);
+        let empty = shared.found.lock().unwrap().is_empty();
+        let run_fallback = match cfg.fallback_discovery {
+            crate::config::FallbackDiscovery::Off => false,
+            crate::config::FallbackDiscovery::Subnet => true,
+            crate::config::FallbackDiscovery::Auto => round > 0 && empty,
+        };
+        if run_fallback {
+            wave.send_fallback(query, round.saturating_sub(1));
+        }
+        let mut answers = wave.collect(Duration::from_millis(400), |_| false);
+        if answers.is_empty() && run_fallback && !cfg.known_peers.is_empty() {
+            answers =
+                crate::inlet::probe_peers_tcp(&cfg.known_peers, query, Duration::from_millis(400));
+        }
         if !answers.is_empty() {
             let now = crate::clock();
             let mut map = shared.found.lock().unwrap();
@@ -101,6 +116,7 @@ fn wave_loop(query: &str, shared: Arc<Shared>) {
                 map.insert(info.uid.clone(), (info, now));
             }
         }
+        round = round.saturating_add(1);
         // Sleep in short steps, so a dropped resolver stops without a wait.
         let mut left = wave_interval();
         while left > Duration::ZERO && !shared.stop.load(Ordering::SeqCst) {

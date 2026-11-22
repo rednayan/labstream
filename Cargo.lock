@@ -27,6 +27,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "labstream-cli"
+version = "0.1.2"
+dependencies = [
+ "labstream-net",
+]
+
+[[package]]
 name = "labstream-core"
 version = "0.1.2"
 dependencies = [

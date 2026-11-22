@@ -1,0 +1,23 @@
+[package]
+name = "labstream-cli"
+version.workspace = true
+description = "Command-line tools for labstream."
+# This binary is built locally or distributed in release archives, not as a
+# library dependency on crates.io.
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "labstream"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+labstream-net.workspace = true

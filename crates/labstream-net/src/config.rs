@@ -137,6 +137,37 @@ fn leading_number(text: &str) -> Option<f64> {
     t[..end].parse().ok()
 }
 
+/// When fallback discovery runs after multicast finds no stream.
+/// `labstream.FallbackDiscovery`. `docs/discovery.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackDiscovery {
+    /// Run fallback paths only after wave 1 finds no stream.
+    Auto,
+    /// Run classic LSL discovery only (multicast, `255.255.255.255`, `KnownPeers` UDP).
+    Off,
+    /// Run fallback paths on every wave, including wave 1.
+    Subnet,
+}
+
+impl FallbackDiscovery {
+    /// Lowercase name for display and JSON output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FallbackDiscovery::Auto => "auto",
+            FallbackDiscovery::Off => "off",
+            FallbackDiscovery::Subnet => "subnet",
+        }
+    }
+
+    fn parse(text: &str) -> FallbackDiscovery {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "off" | "0" | "false" | "none" => FallbackDiscovery::Off,
+            "subnet" | "always" | "on" => FallbackDiscovery::Subnet,
+            _ => FallbackDiscovery::Auto,
+        }
+    }
+}
+
 /// Every value that changes what travels on the wire.
 ///
 /// The names follow `src/api_config.cpp:168-322`. A value that this
@@ -200,6 +231,9 @@ pub struct Config {
     /// The memory limit of the `resume` history, in MiB.
     /// `labstream.ResumeMemory`.
     pub resume_memory_mib: f64,
+    /// When fallback discovery runs. `labstream.FallbackDiscovery`.
+    /// `docs/discovery.md`.
+    pub fallback_discovery: FallbackDiscovery,
     /// Where the values came from, for a report.
     pub source: String,
 }
@@ -302,6 +336,9 @@ impl Config {
             features: ini.set("labstream.Features", "{seq, resume, dgram}"),
             resume_seconds: ini.float("labstream.ResumeSeconds", 30.0).max(0.0),
             resume_memory_mib: ini.float("labstream.ResumeMemory", 64.0).max(0.0),
+            fallback_discovery: FallbackDiscovery::parse(
+                &ini.text("labstream.FallbackDiscovery", "auto"),
+            ),
             multicast_addresses: addresses,
             multicast_ttl: ttl,
             watchdog_time_threshold: ini.float("tuning.WatchdogTimeThreshold", 15.0),
@@ -542,5 +579,21 @@ mod tests {
         assert_eq!(Config::from_ini(&ini, "test").use_protocol_version, 110);
         let ini = Ini::parse("[tuning]\nUseProtocolVersion = 100\n").expect("a file");
         assert_eq!(Config::from_ini(&ini, "test").use_protocol_version, 100);
+    }
+
+    #[test]
+    fn fallback_discovery_defaults_to_auto_and_parses_modes() {
+        let def = Config::default();
+        assert_eq!(def.fallback_discovery, FallbackDiscovery::Auto);
+        let off = Ini::parse("[labstream]\nFallbackDiscovery = off\n").expect("a file");
+        assert_eq!(
+            Config::from_ini(&off, "test").fallback_discovery,
+            FallbackDiscovery::Off
+        );
+        let sub = Ini::parse("[labstream]\nFallbackDiscovery = subnet\n").expect("a file");
+        assert_eq!(
+            Config::from_ini(&sub, "test").fallback_discovery,
+            FallbackDiscovery::Subnet
+        );
     }
 }

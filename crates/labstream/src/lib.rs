@@ -70,6 +70,9 @@ pub use scalar::{as_f64, as_text, Scalar};
 /// The sample format of a stream.
 pub use labstream_wire::Format;
 
+/// Network diagnostics for LSL discovery (`labstream doctor`).
+pub use labstream_net::doctor;
+
 use std::time::Duration;
 
 /// What can go wrong.
