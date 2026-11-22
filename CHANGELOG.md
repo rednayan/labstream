@@ -102,6 +102,12 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Four C functions in `labstream-capi`: `labstream_inlet_health`,
   `labstream_inlet_gaps`, `labstream_inlet_take_gaps`, and
   `labstream_outlet_consumers`.
+- `labstream top` and `labstream play` in `crates/labstream-cli`
+  (`docs/tools.md`, roadmap step 12). `top` shows each live stream with its
+  measured rate, path, latency, and health counts from `Inlet::health` once
+  each second (text table or JSON). `play` reads an XDF 1.0 file and replays
+  its streams as live outlets with exact sample bits and file timestamp
+  intervals.
 
 ### Fixed
 

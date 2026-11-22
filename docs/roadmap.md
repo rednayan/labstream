@@ -1,8 +1,8 @@
 # Roadmap: features that liblsl does not have
 
 **Status:** approved by the user on 2026-11-16. The gate, step 0, step 1,
-step 5, step 10, and step 11 (library and C API) are complete. The other steps
-are not implemented.
+step 5, step 10, step 11 (library and C API), and step 12 are complete. The
+other steps are not implemented.
 
 This page gives the order of the labstream-only features, the success
 criterion of each feature, and the dependencies. Each feature follows the
@@ -444,6 +444,11 @@ file. A developer can then do a test of Phasic with no device.
 2. An inlet that reads from `play` gets the values of the file with the
    same bits. The intervals between the timestamps are the same as in the
    file.
+
+**Status:** complete (`docs/tools.md`, `crates/labstream-cli`). All 10 tests
+in `labstream-cli` pass, including bit-exact and interval-exact replay of
+synthetic seven-format XDF and `conformance/captures/verify.xdf`, and
+`TopMonitor` matching `Inlet::health` at 1 s updates.
 
 ### Step 13: browser reach
 

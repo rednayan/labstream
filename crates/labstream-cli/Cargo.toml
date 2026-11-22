@@ -21,3 +21,4 @@ doc = false
 
 [dependencies]
 labstream-net.workspace = true
+labstream-wire.workspace = true

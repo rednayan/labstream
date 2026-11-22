@@ -1,9 +1,18 @@
 //! Command-line tools for labstream.
 //!
-//! Run `labstream doctor` to diagnose LSL discovery, multicast, broadcast,
-//! interfaces, and remote peers.
+//! Commands:
+//! - `labstream doctor`: diagnose LSL discovery, multicast, broadcast,
+//!   interfaces, and remote peers (`docs/discovery.md`).
+//! - `labstream top`: live terminal monitor using `Inlet::health`
+//!   (`docs/tools.md`).
+//! - `labstream play`: replay an XDF 1.0 recording as live LSL outlets
+//!   (`docs/tools.md`).
 
 #![deny(unsafe_code)]
+
+mod play;
+mod top;
+mod xdf;
 
 use labstream_net::doctor::{self, Options};
 use std::process::ExitCode;
@@ -11,12 +20,14 @@ use std::time::Duration;
 
 fn usage() -> &'static str {
     "Usage:
-  labstream doctor [--peer IP[,IP]] [--timeout SECONDS] [--json]
+  labstream <COMMAND> [OPTIONS]
   labstream --help
   labstream --version
 
 Commands:
-  doctor    Run network and discovery diagnostics."
+  doctor    Run network and discovery diagnostics.
+  top       Monitor active LSL streams using the health API.
+  play      Replay an XDF 1.0 recording as live LSL outlets."
 }
 
 fn doctor_usage() -> &'static str {
@@ -129,6 +140,8 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        "top" => top::run_top(&args[1..]),
+        "play" => play::run_play(&args[1..]),
         other => {
             eprintln!("error: unknown command '{other}'\n\n{}", usage());
             ExitCode::from(2)

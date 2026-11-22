@@ -45,7 +45,7 @@ labstream/
 │   ├── labstream-time/       the timestamp filter
 │   ├── labstream-net/        sockets, outlet, inlet, resolver, doctor
 │   ├── labstream-capi/       the C ABI, built as liblsl.so
-│   └── labstream-cli/        the `labstream` command-line tool (`labstream doctor`)
+│   └── labstream-cli/        the `labstream` command-line tool (`doctor`, `top`, `play`)
 ├── conformance/          the tools that measure the crates against liblsl
 │   ├── peer/                 lsl-peer, the program that the interop tool drives
 │   ├── oracle/               the measurement tools and the Docker build of liblsl
@@ -76,7 +76,7 @@ labstream/
 | `labstream-time` | the timestamp filter, bit exact to liblsl. No input and no output | nothing | yes |
 | `labstream-net` | sockets, outlet, inlet, resolver, configuration, XPath, doctor | `-wire`, `-proto`, `-time` | yes |
 | `labstream-capi` | the C ABI. It builds `liblsl.so`, `liblsl.dylib`, or `lsl.dll` | `-wire`, `-net`, `-time` | no |
-| `labstream-cli` | the `labstream` binary (`labstream doctor`) | `-net` | no |
+| `labstream-cli` | the `labstream` binary (`doctor`, `top`, `play`) | `-net`, `-wire` | no |
 | `lsl-peer` | a program that the interop tool drives. It is at `conformance/peer/` | `-wire`, `-net` | no |
 
 This list gives which crate needs which:
@@ -298,6 +298,7 @@ release of a new crate therefore goes by hand, with a token.
 | `docs/extensions.md` | a proposal for features between two labstream peers |
 | `docs/discovery.md` | fallback discovery, cross-platform interfaces, and `labstream doctor` |
 | `docs/health.md` | stream health snapshots, gap timestamps, and C API layout |
+| `docs/tools.md` | `labstream top`, `labstream play`, and XDF 1.0 replay |
 | `SPEC.md` | the protocol, with a citation for every claim |
 | `CONTRIBUTING.md` | the rules for a change, and the style of the documents |
 | `CHANGELOG.md` | what changed in each version |
