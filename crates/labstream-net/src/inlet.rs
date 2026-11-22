@@ -317,21 +317,30 @@ impl QueryWave {
         while Instant::now() < end {
             let mut got_any = false;
             for leg in &self.legs {
-                while let Ok((n, from)) = leg.rx.recv_from(&mut self.buf) {
-                    got_any = true;
-                    let answer = match discovery::parse_answer(&self.buf[..n]) {
-                        Some(a) => a,
-                        None => continue,
-                    };
-                    // An answer to another query is dropped.
-                    if answer.query_id != self.query_id {
-                        continue;
-                    }
-                    if let Some(mut info) = StreamInfo::from_shortinfo_xml(&answer.xml) {
-                        stamp_address(&mut info, from);
-                        if !skip(&info.uid) && !out.iter().any(|f| f.uid == info.uid) {
-                            out.push(info);
+                loop {
+                    match leg.rx.recv_from(&mut self.buf) {
+                        Ok((n, from)) => {
+                            got_any = true;
+                            let answer = match discovery::parse_answer(&self.buf[..n]) {
+                                Some(a) => a,
+                                None => continue,
+                            };
+                            // An answer to another query is dropped.
+                            if answer.query_id != self.query_id {
+                                continue;
+                            }
+                            if let Some(mut info) = StreamInfo::from_shortinfo_xml(&answer.xml) {
+                                stamp_address(&mut info, from);
+                                if !skip(&info.uid) && !out.iter().any(|f| f.uid == info.uid) {
+                                    out.push(info);
+                                }
+                            }
                         }
+                        // Windows Winsock queues WSAECONNRESET (10054) on a UDP
+                        // socket when a prior send hits a closed port. Drain it
+                        // immediately so replies behind it are read without delay.
+                        Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
+                        Err(_) => break,
                     }
                 }
             }

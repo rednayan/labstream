@@ -558,7 +558,7 @@ fn check_local_multicast_and_broadcast(interfaces: &[Ipv4Interface]) -> (Check, 
         .multicast_addresses
         .iter()
         .filter_map(|a| a.parse::<Ipv4Addr>().ok())
-        .find(|a| a.is_multicast() && !a.is_broadcast())
+        .find(|a| a.is_multicast() && !a.is_broadcast() && *a != Ipv4Addr::new(224, 0, 0, 1))
         .unwrap_or(Ipv4Addr::new(224, 0, 0, 183));
 
     let mut joined = 0usize;
@@ -587,12 +587,19 @@ fn check_local_multicast_and_broadcast(interfaces: &[Ipv4Interface]) -> (Check, 
         fix: None,
     };
 
-    // Self-test multicast packet delivery.
+    // Self-test multicast packet delivery from every active IPv4 address.
     let token = format!("__doctor_mc_{}__", crate::make_query_id());
     let mc_ok = self_test_udp(&sock, &token, |tx| {
         let _ = tx.set_multicast_loop_v4(true);
         let _ = tx.set_multicast_ttl_v4(cfg.multicast_ttl);
         let _ = tx.send_to(token.as_bytes(), (group, cfg.multicast_port));
+        for iface in &join_addrs {
+            if let Ok(if_tx) = UdpSocket::bind((*iface, 0)) {
+                let _ = if_tx.set_multicast_loop_v4(true);
+                let _ = if_tx.set_multicast_ttl_v4(cfg.multicast_ttl);
+                let _ = if_tx.send_to(token.as_bytes(), (group, cfg.multicast_port));
+            }
+        }
     });
     let mcast_check = if mc_ok {
         Check {
