@@ -1,5 +1,6 @@
 //! The outlet: a discovery responder and a TCP feed server.
 
+use crate::health::{ConsumerHealth, OutletHealth};
 use crate::info::StreamInfo;
 use crate::queue::{Fanout, SampleQueue};
 use crate::{clock, config};
@@ -41,6 +42,8 @@ struct Shared {
 /// A blocking outlet holds the socket rather than a queue. Each consumer keeps
 /// its own codec, because two consumers can agree on different byte orders.
 struct SyncConsumer {
+    id: u64,
+    peer: String,
     stream: TcpStream,
     codec: Codec,
     /// The record state, when the consumer agreed to `seq/1`.
@@ -53,6 +56,7 @@ struct SyncConsumer {
 #[derive(Default)]
 struct SyncSet {
     list: Vec<SyncConsumer>,
+    next_consumer_id: u64,
     next: u64,
 }
 
@@ -223,6 +227,33 @@ impl Outlet {
             return self.shared.sync.lock().unwrap().list.len();
         }
         self.shared.fanout.count()
+    }
+
+    /// Snapshot the fill and drop state of every connected consumer queue.
+    ///
+    /// For a blocking outlet (`Outlet::new_blocking`), each consumer has no
+    /// queue and reports zero fill, zero capacity, and zero drops.
+    pub fn health(&self) -> OutletHealth {
+        if self.shared.sync_mode {
+            let set = self.shared.sync.lock().unwrap();
+            let consumers = set
+                .list
+                .iter()
+                .map(|c| ConsumerHealth {
+                    id: c.id,
+                    peer: c.peer.clone(),
+                    fill: 0,
+                    capacity: 0,
+                    dropped: 0,
+                })
+                .collect();
+            return OutletHealth {
+                consumers,
+                history_len: 0,
+                pushed: set.next,
+            };
+        }
+        self.shared.fanout.health()
     }
 
     /// Wait until at least one consumer is connected.
@@ -644,6 +675,11 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         .as_deref()
         .is_some_and(|a| features::has(a, features::SEQ, 1));
 
+    let peer_label = stream
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_default();
+
     // A `resume` consumer gets its queue before the answer, because the
     // answer holds the number of the first sample of the queue. liblsl makes
     // the queue later (`src/tcp_server.cpp:746`), which a peer cannot see.
@@ -654,9 +690,10 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
     if let (true, Some(o), Some(a)) = (queue_follows, offered.as_deref(), answered.as_mut()) {
         if let Some(request) = features::resume_request(o, a, allowed) {
             if shared.fanout.start_history() {
-                let (queue, n) = shared
-                    .fanout
-                    .add_resumable(accepted.max_buffer_length.max(1) as usize);
+                let (queue, n) = shared.fanout.add_resumable_with_peer(
+                    accepted.max_buffer_length.max(1) as usize,
+                    peer_label.clone(),
+                );
                 // A different epoch is a different run of the outlet. Its
                 // numbers mean nothing here, so nothing goes again.
                 let from = match request {
@@ -762,7 +799,11 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         } else {
             None
         };
+        set.next_consumer_id = set.next_consumer_id.wrapping_add(1);
+        let id = set.next_consumer_id;
         set.list.push(SyncConsumer {
+            id,
+            peer: peer_label,
             stream,
             codec,
             numbering,
@@ -779,7 +820,7 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
                 fanout: &shared.fanout,
                 queue: shared
                     .fanout
-                    .add(accepted.max_buffer_length.max(1) as usize),
+                    .add_with_peer(accepted.max_buffer_length.max(1) as usize, peer_label),
             },
             None,
         ),
@@ -822,6 +863,9 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         &stop,
         trace,
     );
+    // Shut down the shared TCP socket so the `dgram` request reader exits
+    // immediately and the peer receives FIN without waiting for a watchdog.
+    let _ = stream.shutdown(std::net::Shutdown::Both);
     if trace {
         eprintln!("TRACE session over after {sent} samples");
     }

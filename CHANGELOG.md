@@ -95,9 +95,19 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [--json]`), and the C function `labstream_doctor_json`.
 - `conformance/oracle/doctor_net.py`. It blocks multicast, broadcast, and UDP
   in two network namespaces against both `labstream` and `liblsl` outlets.
+- Stream health API (`docs/health.md`, roadmap step 11): `Inlet::health`,
+  `Inlet::gaps`, `Inlet::take_gaps`, and `Outlet::health` in both
+  `labstream-net` and `labstream`, with `InletHealth`, `OutletHealth`,
+  `ConsumerHealth`, `Gap`, and `GapKind`.
+- Four C functions in `labstream-capi`: `labstream_inlet_health`,
+  `labstream_inlet_gaps`, `labstream_inlet_take_gaps`, and
+  `labstream_outlet_consumers`.
 
 ### Fixed
 
+- When an outlet closes a `dgram/1` consumer session, it now shuts down the
+  shared TCP socket so the request reader thread exits at once and the inlet
+  receives TCP FIN without waiting for the 15 s watchdog.
 - Unicast discovery queries now leave from the receive socket so the reply
   returns on the same port and passes stateful firewalls such as Windows
   Defender Firewall with no inbound rule.

@@ -1,7 +1,8 @@
 # Roadmap: features that liblsl does not have
 
 **Status:** approved by the user on 2026-11-16. The gate, step 0, step 1,
-step 5, and step 10 are complete. The other steps are not implemented.
+step 5, step 10, and step 11 (library and C API) are complete. The other steps
+are not implemented.
 
 This page gives the order of the labstream-only features, the success
 criterion of each feature, and the dependencies. Each feature follows the
@@ -420,6 +421,11 @@ Phasic shows these values, and marks each gap in the plot.
 **Success criterion:** each value has a unit test and a live test. The calls
 add no measured latency. The C API gives the same values. Phasic shows them
 on a live stream.
+
+**Status:** library, C API, unit tests, live tests, and latency check complete
+(`docs/health.md`). `oracle/latency.py` shows no latency increase (p50 73 us
+and 45 us on loopback at 512 Hz x 8 and 4000 Hz x 64). Phasic integration
+remains in the Phasic repository.
 
 `Inlet::time_uncertainty()` exists already. Thus step 17 is a soft
 dependency only.

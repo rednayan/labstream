@@ -2900,6 +2900,233 @@ pub unsafe extern "C" fn lsl_time_correction_ex(
     offset
 }
 
+/// Gap kind for samples lost on the outlet or network (`GapKind::Lost`).
+pub const LABSTREAM_GAP_LOST: i32 = 0;
+/// Gap kind for samples dropped in the local inlet queue (`GapKind::Dropped`).
+pub const LABSTREAM_GAP_DROPPED: i32 = 1;
+
+/// Snapshot of the health of an inlet, for the C ABI (`docs/health.md`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct labstream_inlet_health {
+    /// Measured arrival latency in seconds, or `NaN` when unknown.
+    pub latency: f64,
+    /// Round-trip time of the latest clock offset estimate in seconds, or `NaN`
+    /// when unknown.
+    pub clock_uncertainty: f64,
+    /// Samples never delivered (`seq/1`), or `-1` when unknown.
+    pub lost: i64,
+    /// Samples dropped by this inlet's local buffer.
+    pub dropped: u64,
+    /// Samples delivered from the `resume/1` history, or `-1` when unknown.
+    pub resent: i64,
+    /// Number of times the connection was rebuilt.
+    pub recoveries: u64,
+    /// Samples currently waiting in the inlet buffer.
+    pub buffered: u64,
+    /// Capacity of the inlet buffer, in samples.
+    pub buffer_capacity: u64,
+    /// Number of gaps currently recorded on this inlet.
+    pub gap_count: u64,
+    /// `1` while connected, `0` otherwise.
+    pub connected: i32,
+    /// `1` while samples arrive over UDP (`dgram/1`), `0` otherwise.
+    pub on_udp: i32,
+}
+
+/// One missing interval in a stream, for the C ABI (`docs/health.md`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct labstream_gap {
+    /// Timestamp at the start of the gap.
+    pub start: f64,
+    /// Timestamp of the first sample after the gap.
+    pub end: f64,
+    /// Number of missing samples in the gap.
+    pub count: u64,
+    /// [`LABSTREAM_GAP_LOST`] or [`LABSTREAM_GAP_DROPPED`].
+    pub kind: i32,
+}
+
+/// Snapshot of one consumer queue on an outlet, for the C ABI (`docs/health.md`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct labstream_consumer_health {
+    /// Monotonic identifier assigned when the consumer connected.
+    pub id: u64,
+    /// Samples currently waiting in this consumer's queue.
+    pub fill: u64,
+    /// Maximum capacity of this consumer's queue, in samples.
+    pub capacity: u64,
+    /// Samples dropped from this consumer's queue.
+    pub dropped: u64,
+}
+
+fn gap_to_c(g: labstream_net::Gap) -> labstream_gap {
+    labstream_gap {
+        start: g.start,
+        end: g.end,
+        count: g.count,
+        kind: match g.kind {
+            labstream_net::GapKind::Lost => LABSTREAM_GAP_LOST,
+            labstream_net::GapKind::Dropped => LABSTREAM_GAP_DROPPED,
+        },
+    }
+}
+
+/// Fill `out` with the health snapshot of `inlet`.
+///
+/// Returns `LSL_NO_ERROR` on success, or `LSL_ARGUMENT_ERROR` when `inlet` or
+/// `out` is null. When the inlet has not opened its stream yet, unknown floats
+/// are `NaN`, unknown counts are `-1`, and `connected` is `0`.
+///
+/// # Safety
+/// `inlet` must be a valid handle from this library and `out` must point to
+/// writable storage for one `labstream_inlet_health`.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_inlet_health(
+    inlet: lsl_inlet,
+    out: *mut labstream_inlet_health,
+) -> i32 {
+    if out.is_null() {
+        return LSL_ARGUMENT_ERROR;
+    }
+    let Some(b) = (inlet as *mut InletBox).as_ref() else {
+        return LSL_ARGUMENT_ERROR;
+    };
+    let value = match b.inlet.as_ref() {
+        Some(i) => {
+            let h = i.health();
+            labstream_inlet_health {
+                latency: h.latency.unwrap_or(f64::NAN),
+                clock_uncertainty: h.clock_uncertainty.unwrap_or(f64::NAN),
+                lost: h.lost.map_or(-1, |n| n as i64),
+                dropped: h.dropped,
+                resent: h.resent.map_or(-1, |n| n as i64),
+                recoveries: h.recoveries,
+                buffered: h.buffered as u64,
+                buffer_capacity: h.buffer_capacity as u64,
+                gap_count: h.gap_count as u64,
+                connected: i32::from(h.connected),
+                on_udp: i32::from(h.on_udp),
+            }
+        }
+        None => labstream_inlet_health {
+            latency: f64::NAN,
+            clock_uncertainty: f64::NAN,
+            lost: -1,
+            dropped: 0,
+            resent: -1,
+            recoveries: 0,
+            buffered: 0,
+            buffer_capacity: b.buffer_samples.max(0) as u64,
+            gap_count: 0,
+            connected: 0,
+            on_udp: 0,
+        },
+    };
+    *out = value;
+    LSL_NO_ERROR
+}
+
+/// Copy recorded gaps from `inlet` into `out` (up to `max_gaps`).
+///
+/// Pass null for `out` to query the total number of recorded gaps without
+/// copying. Returns the count written (or total count when `out` is null), or
+/// `LSL_ARGUMENT_ERROR` when `inlet` is null.
+///
+/// # Safety
+/// `inlet` must be a valid handle from this library. If `out` is non-null, it
+/// must hold room for `max_gaps` entries.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_inlet_gaps(
+    inlet: lsl_inlet,
+    out: *mut labstream_gap,
+    max_gaps: u32,
+) -> i32 {
+    let Some(b) = (inlet as *mut InletBox).as_ref() else {
+        return LSL_ARGUMENT_ERROR;
+    };
+    let Some(i) = b.inlet.as_ref() else {
+        return 0;
+    };
+    let gaps = i.gaps();
+    if out.is_null() {
+        return gaps.len().min(i32::MAX as usize) as i32;
+    }
+    let n = gaps.len().min(max_gaps as usize);
+    for (k, g) in gaps.into_iter().take(n).enumerate() {
+        *out.add(k) = gap_to_c(g);
+    }
+    n as i32
+}
+
+/// Drain finalized gaps from `inlet` into `out` (up to `max_gaps`).
+///
+/// Returns the count written, or `LSL_ARGUMENT_ERROR` when `inlet` or `out` is
+/// null.
+///
+/// # Safety
+/// `inlet` must be a valid handle from this library and `out` must hold room
+/// for `max_gaps` entries.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_inlet_take_gaps(
+    inlet: lsl_inlet,
+    out: *mut labstream_gap,
+    max_gaps: u32,
+) -> i32 {
+    if out.is_null() {
+        return LSL_ARGUMENT_ERROR;
+    }
+    let Some(b) = (inlet as *mut InletBox).as_ref() else {
+        return LSL_ARGUMENT_ERROR;
+    };
+    let Some(i) = b.inlet.as_ref() else {
+        return 0;
+    };
+    let gaps = i.take_gaps();
+    let n = gaps.len().min(max_gaps as usize);
+    for (k, g) in gaps.into_iter().take(n).enumerate() {
+        *out.add(k) = gap_to_c(g);
+    }
+    n as i32
+}
+
+/// Copy consumer queue health snapshots from `outlet` into `out` (up to
+/// `max_consumers`).
+///
+/// Pass null for `out` to query the number of connected consumers without
+/// copying. Returns the count written (or total consumer count when `out` is
+/// null), or `LSL_ARGUMENT_ERROR` when `outlet` is null.
+///
+/// # Safety
+/// `outlet` must be a valid handle from this library. If `out` is non-null, it
+/// must hold room for `max_consumers` entries.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_outlet_consumers(
+    outlet: lsl_outlet,
+    out: *mut labstream_consumer_health,
+    max_consumers: u32,
+) -> i32 {
+    let Some(b) = (outlet as *mut OutletBox).as_ref() else {
+        return LSL_ARGUMENT_ERROR;
+    };
+    let health = b.outlet.health();
+    if out.is_null() {
+        return health.consumers.len().min(i32::MAX as usize) as i32;
+    }
+    let n = health.consumers.len().min(max_consumers as usize);
+    for (k, c) in health.consumers.into_iter().take(n).enumerate() {
+        *out.add(k) = labstream_consumer_health {
+            id: c.id,
+            fill: c.fill as u64,
+            capacity: c.capacity as u64,
+            dropped: c.dropped,
+        };
+    }
+    n as i32
+}
+
 /// Run network and discovery diagnostics and return the report as JSON.
 ///
 /// Pass null or an empty string for `peers` to skip remote peer checks, or a
@@ -2993,6 +3220,108 @@ mod tests {
             assert_eq!(ec, LSL_NO_ERROR);
             assert_eq!(labstream_samples_lost(inlet), 0);
             assert_eq!(labstream_samples_resent(inlet), 0);
+
+            let mut health = std::mem::zeroed::<labstream_inlet_health>();
+            assert_eq!(
+                labstream_inlet_health(std::ptr::null_mut(), &mut health),
+                LSL_ARGUMENT_ERROR
+            );
+            assert_eq!(labstream_inlet_health(inlet, &mut health), LSL_NO_ERROR);
+            assert_eq!(health.connected, 1);
+            assert_eq!(health.lost, 0);
+            assert_eq!(health.resent, 0);
+            assert_eq!(health.dropped, 0);
+            assert_eq!(health.recoveries, 0);
+            assert_eq!(health.gap_count, 0);
+
+            // Outlet consumer health reports the connected inlet.
+            let n_consumers = labstream_outlet_consumers(outlet, std::ptr::null_mut(), 0);
+            assert_eq!(n_consumers, 1);
+            let mut consumers = [std::mem::zeroed::<labstream_consumer_health>(); 4];
+            assert_eq!(
+                labstream_outlet_consumers(outlet, consumers.as_mut_ptr(), 4),
+                1
+            );
+            assert!(consumers[0].id >= 1);
+            assert!(consumers[0].capacity > 0);
+            assert_eq!(consumers[0].dropped, 0);
+
+            lsl_destroy_inlet(inlet);
+            lsl_destroy_streaminfo(full);
+            lsl_destroy_outlet(outlet);
+            lsl_destroy_streaminfo(info);
+        }
+    }
+
+    #[test]
+    fn capi_inlet_gaps_reports_dropped_interval() {
+        unsafe {
+            let info = lsl_create_streaminfo(
+                b"CapiGap0\0".as_ptr() as *const c_char,
+                b"Test\0".as_ptr() as *const c_char,
+                1,
+                LSL_IRREGULAR_RATE,
+                1,
+                b"capigap0\0".as_ptr() as *const c_char,
+            );
+            let outlet = lsl_create_outlet(info, 0, 360);
+            if outlet.is_null() {
+                eprintln!("no local network; skipping");
+                lsl_destroy_streaminfo(info);
+                return;
+            }
+            let full = lsl_get_info(outlet);
+            // For an irregular stream, `max_buflen = 1` sets a 100-sample buffer.
+            let inlet = lsl_create_inlet(full, 1, 0, 1);
+            let mut ec = 0;
+            lsl_open_stream(inlet, 5.0, &mut ec);
+            assert_eq!(ec, LSL_NO_ERROR);
+            assert_eq!(lsl_wait_for_consumers(outlet, 5.0), 1);
+
+            // Pull sample 0 at ts = 100.0 so the reader has a baseline.
+            let v0 = 0.0f32;
+            lsl_push_sample_ft(outlet, &v0, 100.0);
+            let mut got = 0.0f32;
+            let t0 = lsl_pull_sample_f(inlet, &mut got, 1, 2.0, &mut ec);
+            assert_eq!(ec, LSL_NO_ERROR);
+            assert_eq!(t0, 100.0);
+
+            // Push 150 samples in small paced groups so the outlet queue drains
+            // cleanly and the 100-sample inlet queue overflows by 50.
+            for k in 1..=150 {
+                let v = k as f32;
+                lsl_push_sample_ft(outlet, &v, 100.0 + k as f64);
+                if k % 25 == 0 {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            let mut health = std::mem::zeroed::<labstream_inlet_health>();
+            while std::time::Instant::now() < deadline {
+                labstream_inlet_health(inlet, &mut health);
+                if health.dropped >= 50 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(health.dropped >= 50, "expected drops, got {health:?}");
+
+            // Pull the surviving sample to finalize the drop gap.
+            let t_next = lsl_pull_sample_f(inlet, &mut got, 1, 2.0, &mut ec);
+            assert_eq!(ec, LSL_NO_ERROR);
+            assert!(t_next > 100.0);
+
+            let count = labstream_inlet_gaps(inlet, std::ptr::null_mut(), 0);
+            assert!(count >= 1, "expected at least one gap, got {count}");
+            let mut gaps = [std::mem::zeroed::<labstream_gap>(); 8];
+            let taken = labstream_inlet_take_gaps(inlet, gaps.as_mut_ptr(), 8);
+            assert!(taken >= 1);
+            assert_eq!(gaps[0].kind, LABSTREAM_GAP_DROPPED);
+            assert_eq!(gaps[0].start, 100.0);
+            assert_eq!(gaps[0].end, t_next);
+            assert_eq!(gaps[0].count, health.dropped);
+            assert_eq!(labstream_inlet_gaps(inlet, std::ptr::null_mut(), 0), 0);
+
             lsl_destroy_inlet(inlet);
             lsl_destroy_streaminfo(full);
             lsl_destroy_outlet(outlet);

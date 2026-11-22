@@ -129,4 +129,9 @@ impl Outlet {
     pub fn wait_for_consumers(&self, timeout: Duration) -> bool {
         self.inner.wait_for_consumers(timeout)
     }
+
+    /// Snapshot the fill and drop state of every connected consumer queue.
+    pub fn health(&self) -> crate::OutletHealth {
+        self.inner.health()
+    }
 }

@@ -10,6 +10,7 @@
 //! faster than the reader consumed them, delivered sample 0 and then samples
 //! 500 to 599. The writer never waited.
 
+use crate::health::{ConsumerHealth, Gap, GapKind, OutletHealth, MAX_GAPS};
 use crate::history::{History, HistoryLimits};
 use labstream_wire::{Sample, TimestampDeducer, IRREGULAR_RATE};
 use std::collections::VecDeque;
@@ -31,6 +32,14 @@ struct Ring {
     /// Only a queue for a `resume` consumer has one. `docs/extensions.md`,
     /// rule 5 of the resend timestamps.
     deducer: Option<TimestampDeducer>,
+    /// Timestamp of the last sample taken by the reader, for drop-gap tracking.
+    last_popped_ts: Option<f64>,
+    /// Samples dropped since the last sample taken by the reader.
+    pending_drop_count: u64,
+    /// Start timestamp latched when `pending_drop_count` became non-zero.
+    pending_drop_start: Option<f64>,
+    /// Completed drop gaps, bounded to `MAX_GAPS`.
+    drop_gaps: VecDeque<Gap>,
 }
 
 impl std::ops::Deref for Ring {
@@ -52,12 +61,46 @@ impl Ring {
         self.back.wrapping_sub(self.q.len() as u64)
     }
 
+    /// Record that `count` samples starting near `dropped_ts` were discarded.
+    fn note_drop(&mut self, dropped_ts: f64, count: u64) {
+        if count == 0 {
+            return;
+        }
+        if self.pending_drop_count == 0 {
+            self.pending_drop_start = self.last_popped_ts.or(Some(dropped_ts));
+        }
+        self.pending_drop_count = self.pending_drop_count.saturating_add(count);
+    }
+
+    /// Finalize any pending drop gap when the reader receives a sample at `end_ts`.
+    fn note_pop(&mut self, first_ts: f64, last_ts: f64) {
+        if self.pending_drop_count > 0 {
+            let count = self.pending_drop_count;
+            let start = self.pending_drop_start.unwrap_or(first_ts);
+            self.pending_drop_count = 0;
+            self.pending_drop_start = None;
+            if start.is_finite() && first_ts.is_finite() {
+                if self.drop_gaps.len() >= MAX_GAPS {
+                    self.drop_gaps.pop_front();
+                }
+                self.drop_gaps.push_back(Gap {
+                    start,
+                    end: first_ts,
+                    count,
+                    kind: GapKind::Dropped,
+                });
+            }
+        }
+        self.last_popped_ts = Some(last_ts);
+    }
+
     /// Remove the oldest sample because the queue is full.
     ///
     /// The deducer sees the sample, so the full timestamp of the next sample
     /// stays correct after the drop.
     fn drop_front(&mut self) {
         if let Some(old) = self.q.pop_front() {
+            self.note_drop(old.timestamp, 1);
             if let Some(d) = self.deducer.as_mut() {
                 d.apply(old.timestamp);
             }
@@ -110,6 +153,10 @@ impl SampleQueue {
                 q: VecDeque::with_capacity(capacity.min(4096)),
                 back: first,
                 deducer,
+                last_popped_ts: None,
+                pending_drop_count: 0,
+                pending_drop_start: None,
+                drop_gaps: VecDeque::new(),
             }),
             room: Condvar::new(),
             capacity,
@@ -208,15 +255,30 @@ impl SampleQueue {
         let skip = samples.len().saturating_sub(self.capacity);
         // Each sample takes a number, also the ones that are never moved in.
         q.back = q.back.wrapping_add(samples.len() as u64);
-        for s in samples.drain(..).skip(skip) {
-            if q.len() >= self.capacity {
-                q.pop_front();
-                lost += 1;
+        if skip > 0 {
+            let old_len = q.len() as u64;
+            if let Some(old) = q.q.front() {
+                let ts = old.timestamp;
+                q.note_drop(ts, old_len);
+                lost += old_len;
+                q.q.clear();
             }
-            q.push_back(s);
+            let skipped_ts = samples[0].timestamp;
+            q.note_drop(skipped_ts, skip as u64);
+            lost += skip as u64;
+            for s in samples.drain(..).skip(skip) {
+                q.push_back(s);
+            }
+        } else {
+            for s in samples.drain(..) {
+                if q.len() >= self.capacity {
+                    q.drop_front();
+                    lost += 1;
+                }
+                q.push_back(s);
+            }
         }
         drop(q);
-        lost += skip as u64;
         if lost > 0 {
             self.dropped.fetch_add(lost, Ordering::SeqCst);
         }
@@ -232,6 +294,7 @@ impl SampleQueue {
         let mut q = self.inner.lock().unwrap();
         loop {
             if let Some(s) = q.pop_front() {
+                q.note_pop(s.timestamp, s.timestamp);
                 return Some(s);
             }
             if *self.closed.lock().unwrap() {
@@ -247,7 +310,11 @@ impl SampleQueue {
                 .unwrap();
             q = guard;
             if result.timed_out() && Instant::now() >= end {
-                return q.pop_front();
+                if let Some(s) = q.pop_front() {
+                    q.note_pop(s.timestamp, s.timestamp);
+                    return Some(s);
+                }
+                return None;
             }
         }
     }
@@ -270,7 +337,10 @@ impl SampleQueue {
         loop {
             if !q.is_empty() {
                 let take = q.len().min(max);
+                let first_ts = q.q[0].timestamp;
+                let last_ts = q.q[take - 1].timestamp;
                 out.extend(q.drain(..take));
+                q.note_pop(first_ts, last_ts);
                 return take;
             }
             if *self.closed.lock().unwrap() {
@@ -287,7 +357,12 @@ impl SampleQueue {
             q = guard;
             if result.timed_out() && Instant::now() >= end {
                 let take = q.len().min(max);
-                out.extend(q.drain(..take));
+                if take > 0 {
+                    let first_ts = q.q[0].timestamp;
+                    let last_ts = q.q[take - 1].timestamp;
+                    out.extend(q.drain(..take));
+                    q.note_pop(first_ts, last_ts);
+                }
                 return take;
             }
         }
@@ -383,6 +458,63 @@ impl SampleQueue {
     pub fn is_closed(&self) -> bool {
         *self.closed.lock().unwrap()
     }
+
+    /// Number of recorded drop gaps (including any in-progress overflow).
+    pub(crate) fn drop_gap_count(&self) -> usize {
+        let q = self.inner.lock().unwrap();
+        let pending = usize::from(q.pending_drop_count > 0 && q.q.front().is_some());
+        q.drop_gaps.len() + pending
+    }
+
+    /// Snapshot all drop gaps on this queue, shifted by `shift`.
+    pub(crate) fn drop_gaps(&self, shift: f64) -> Vec<Gap> {
+        let q = self.inner.lock().unwrap();
+        let mut out: Vec<Gap> = q
+            .drop_gaps
+            .iter()
+            .map(|g| Gap {
+                start: g.start + shift,
+                end: g.end + shift,
+                count: g.count,
+                kind: g.kind,
+            })
+            .collect();
+        if q.pending_drop_count > 0 {
+            if let Some(front) = q.q.front() {
+                let start = q.pending_drop_start.unwrap_or(front.timestamp);
+                if start.is_finite() && front.timestamp.is_finite() {
+                    out.push(Gap {
+                        start: start + shift,
+                        end: front.timestamp + shift,
+                        count: q.pending_drop_count,
+                        kind: GapKind::Dropped,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Drain all finalized drop gaps on this queue, shifted by `shift`.
+    pub(crate) fn take_drop_gaps(&self, shift: f64) -> Vec<Gap> {
+        let mut q = self.inner.lock().unwrap();
+        q.drop_gaps
+            .drain(..)
+            .map(|g| Gap {
+                start: g.start + shift,
+                end: g.end + shift,
+                count: g.count,
+                kind: g.kind,
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug)]
+struct ConsumerEntry {
+    id: u64,
+    peer: String,
+    queue: Arc<SampleQueue>,
 }
 
 /// A set of consumers that all receive the same sample.
@@ -406,7 +538,8 @@ pub struct Fanout {
 /// the same numbers.
 #[derive(Debug)]
 struct Consumers {
-    list: Vec<Arc<SampleQueue>>,
+    list: Vec<ConsumerEntry>,
+    next_consumer_id: u64,
     next: u64,
     /// Calculates the full timestamp of each pushed sample, in the order of
     /// the numbers. It runs also when there is no history, so that a history
@@ -422,6 +555,7 @@ impl Default for Consumers {
     fn default() -> Self {
         Consumers {
             list: Vec::new(),
+            next_consumer_id: 1,
             next: 0,
             deducer: TimestampDeducer::new(IRREGULAR_RATE),
             srate: IRREGULAR_RATE,
@@ -509,9 +643,20 @@ impl Fanout {
 
     /// Add a consumer with its own queue.
     pub fn add(&self, capacity: usize) -> Arc<SampleQueue> {
+        self.add_with_peer(capacity, String::new())
+    }
+
+    /// Add a consumer with its own queue and peer label.
+    pub(crate) fn add_with_peer(&self, capacity: usize, peer: String) -> Arc<SampleQueue> {
         let mut set = self.consumers.lock().unwrap();
+        let id = set.next_consumer_id;
+        set.next_consumer_id = id.wrapping_add(1);
         let q = Arc::new(SampleQueue::with_first_number(capacity, set.next));
-        set.list.push(Arc::clone(&q));
+        set.list.push(ConsumerEntry {
+            id,
+            peer,
+            queue: Arc::clone(&q),
+        });
         q
     }
 
@@ -522,10 +667,25 @@ impl Fanout {
     /// ([`SampleQueue::pop_many_full`]). The history holds the samples below
     /// `N`. `docs/extensions.md`, resend rule 1.
     pub fn add_resumable(&self, capacity: usize) -> (Arc<SampleQueue>, u64) {
+        self.add_resumable_with_peer(capacity, String::new())
+    }
+
+    /// Add a resumable consumer with its peer label.
+    pub(crate) fn add_resumable_with_peer(
+        &self,
+        capacity: usize,
+        peer: String,
+    ) -> (Arc<SampleQueue>, u64) {
         let mut set = self.consumers.lock().unwrap();
+        let id = set.next_consumer_id;
+        set.next_consumer_id = id.wrapping_add(1);
         let n = set.next;
         let q = Arc::new(SampleQueue::with_deducer(capacity, n, set.deducer.clone()));
-        set.list.push(Arc::clone(&q));
+        set.list.push(ConsumerEntry {
+            id,
+            peer,
+            queue: Arc::clone(&q),
+        });
         (q, n)
     }
 
@@ -540,12 +700,34 @@ impl Fanout {
             .lock()
             .unwrap()
             .list
-            .retain(|c| !Arc::ptr_eq(c, q));
+            .retain(|c| !Arc::ptr_eq(&c.queue, q));
     }
 
     /// How many consumers are connected.
     pub fn count(&self) -> usize {
         self.consumers.lock().unwrap().list.len()
+    }
+
+    /// Snapshot the fill and drop state of every connected consumer queue.
+    pub fn health(&self) -> OutletHealth {
+        let mut set = self.consumers.lock().unwrap();
+        set.list.retain(|c| !c.queue.is_closed());
+        let consumers = set
+            .list
+            .iter()
+            .map(|c| ConsumerHealth {
+                id: c.id,
+                peer: c.peer.clone(),
+                fill: c.queue.len(),
+                capacity: c.queue.capacity(),
+                dropped: c.queue.dropped(),
+            })
+            .collect();
+        OutletHealth {
+            consumers,
+            history_len: set.history.as_ref().map_or(0, History::len),
+            pushed: set.next,
+        }
     }
 
     /// Give one sample to every consumer.
@@ -557,9 +739,9 @@ impl Fanout {
         // The consumers get the sample first, so that the copy into the
         // history does not delay them. The lock holds both steps, so a new
         // queue and the history still agree on each number.
-        set.list.retain(|q| !q.is_closed());
-        for q in set.list.iter() {
-            q.push(s.clone());
+        set.list.retain(|c| !c.queue.is_closed());
+        for c in set.list.iter() {
+            c.queue.push(s.clone());
         }
         set.record(s);
     }
@@ -574,9 +756,9 @@ impl Fanout {
         }
         let mut set = self.consumers.lock().unwrap();
         // The consumers first, as in [`Fanout::push`].
-        set.list.retain(|q| !q.is_closed());
-        for q in set.list.iter() {
-            q.push_many(samples);
+        set.list.retain(|c| !c.queue.is_closed());
+        for c in set.list.iter() {
+            c.queue.push_many(samples);
         }
         for s in samples {
             set.record(s);
@@ -585,8 +767,8 @@ impl Fanout {
 
     /// Close every consumer queue.
     pub fn close(&self) {
-        for q in self.consumers.lock().unwrap().list.iter() {
-            q.close();
+        for c in self.consumers.lock().unwrap().list.iter() {
+            c.queue.close();
         }
     }
 }
@@ -1069,5 +1251,61 @@ mod tests {
             out.iter().map(index).collect::<Vec<_>>(),
             (0..1000).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn a_full_queue_records_a_coalesced_drop_gap() {
+        let q = SampleQueue::new(4);
+        q.push(sample(10));
+        let first = q.pop(Duration::from_millis(10)).unwrap();
+        assert_eq!(first.timestamp, 10.0);
+
+        // Overflow the 4-sample queue with 10 samples (11..=20): drops 6 (11..=16).
+        let mut batch: Vec<Sample> = (11..=20).map(sample).collect();
+        q.push_owned(&mut batch);
+        assert_eq!(q.dropped(), 6);
+        let pending = q.drop_gaps(0.0);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].start, 10.0);
+        assert_eq!(pending[0].end, 17.0);
+        assert_eq!(pending[0].count, 6);
+        assert_eq!(pending[0].kind, GapKind::Dropped);
+
+        let next = q.pop(Duration::from_millis(10)).unwrap();
+        assert_eq!(next.timestamp, 17.0);
+        let taken = q.take_drop_gaps(50.0);
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].start, 60.0);
+        assert_eq!(taken[0].end, 67.0);
+        assert_eq!(taken[0].count, 6);
+        assert!(q.drop_gaps(0.0).is_empty());
+    }
+
+    #[test]
+    fn fanout_health_reports_fill_capacity_and_drops_per_consumer() {
+        let fan = Fanout::new();
+        let fast = fan.add_with_peer(10, "127.0.0.1:40001".to_string());
+        let slow = fan.add_with_peer(3, "127.0.0.1:40002".to_string());
+
+        for i in 0..8 {
+            fan.push(&sample(i));
+            let _ = fast.pop(Duration::from_millis(1));
+        }
+
+        let h = fan.health();
+        assert_eq!(h.pushed, 8);
+        assert_eq!(h.consumers.len(), 2);
+        assert_eq!(h.consumers[0].id, 1);
+        assert_eq!(h.consumers[0].peer, "127.0.0.1:40001");
+        assert_eq!(h.consumers[0].fill, 0);
+        assert_eq!(h.consumers[0].capacity, 10);
+        assert_eq!(h.consumers[0].dropped, 0);
+
+        assert_eq!(h.consumers[1].id, 2);
+        assert_eq!(h.consumers[1].peer, "127.0.0.1:40002");
+        assert_eq!(h.consumers[1].fill, 3);
+        assert_eq!(h.consumers[1].capacity, 3);
+        assert_eq!(h.consumers[1].dropped, 5);
+        drop(slow);
     }
 }

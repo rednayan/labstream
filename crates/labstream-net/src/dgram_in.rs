@@ -9,6 +9,7 @@
 //! and a thread for UDP both put samples into it, and both move the samples
 //! that are in order to the queue of the application, under one lock.
 
+use crate::health::{GapTracker, LatencyProbe};
 use crate::queue::SampleQueue;
 use labstream_proto::dgram::{self, Action, Datagram, LossMeter, Path, Reorder};
 use labstream_proto::features::DgramParam;
@@ -76,6 +77,12 @@ struct State {
     begin: Instant,
     /// `N` of the `resume` answer: the TCP resend gives the samples below it.
     resend_until: Option<u64>,
+    /// Reorder loss count already forwarded into `gaps`.
+    recorded_lost: u64,
+    /// Shared inlet gap ring for `GapKind::Lost`.
+    gaps: Arc<Mutex<GapTracker>>,
+    /// Lock-free latency probe updated once per delivered batch.
+    latency: Arc<LatencyProbe>,
 }
 
 /// The `dgram/1` part of one inlet connection.
@@ -87,12 +94,15 @@ pub(crate) struct DgramIn {
 impl DgramIn {
     /// Open the UDP socket, send the hellos, and start the thread for UDP.
     /// `peer` is the address of the TCP connection.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         param: DgramParam,
         tcp: &TcpStream,
         codec: Codec,
         queue: Arc<SampleQueue>,
         lost: Arc<std::sync::atomic::AtomicU64>,
+        gaps: Arc<Mutex<GapTracker>>,
+        latency: Arc<LatencyProbe>,
         resend_until: Option<u64>,
     ) -> Option<DgramIn> {
         let peer = tcp.peer_addr().ok()?;
@@ -128,6 +138,9 @@ impl DgramIn {
             closed: false,
             begin: Instant::now(),
             resend_until,
+            recorded_lost: 0,
+            gaps,
+            latency,
         }));
         let stop = Arc::new(AtomicBool::new(false));
         {
@@ -177,6 +190,7 @@ impl DgramIn {
                     eprintln!("TRACE dgram: the history starts at {number}, not {from}");
                 }
                 s.reorder.lost_below(number);
+                sync_lost_to_tracker(&mut s);
             }
         }
     }
@@ -248,6 +262,15 @@ fn deliver(s: &mut State, queue: &SampleQueue, lost: &std::sync::atomic::AtomicU
     deliver_into(s, &mut out, queue, lost);
 }
 
+fn sync_lost_to_tracker(s: &mut State) {
+    let cur = s.reorder.lost();
+    if cur > s.recorded_lost {
+        let delta = cur - s.recorded_lost;
+        s.recorded_lost = cur;
+        s.gaps.lock().unwrap().record_lost(delta);
+    }
+}
+
 fn deliver_into(
     s: &mut State,
     out: &mut Vec<Sample>,
@@ -258,8 +281,13 @@ fn deliver_into(
         out.clear();
         return;
     }
+    sync_lost_to_tracker(s);
     s.reorder.drain(out);
     if !out.is_empty() {
+        let first_ts = out[0].timestamp;
+        let last_ts = out[out.len() - 1].timestamp;
+        s.gaps.lock().unwrap().on_batch(first_ts, last_ts);
+        s.latency.record(last_ts);
         queue.push_owned(out);
     }
     lost.store(s.base_lost + s.reorder.lost(), Ordering::SeqCst);
@@ -461,7 +489,17 @@ mod tests {
         let codec = Codec::new(Format::Float32, 1, ByteOrder::native());
         let queue = Arc::new(SampleQueue::new(16));
         let lost = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let d = DgramIn::start(param, &stream, codec, queue, lost, None).expect("a UDP socket");
+        let d = DgramIn::start(
+            param,
+            &stream,
+            codec,
+            queue,
+            lost,
+            Arc::new(Mutex::new(GapTracker::new())),
+            Arc::new(LatencyProbe::default()),
+            None,
+        )
+        .expect("a UDP socket");
         let sock = socket2::SockRef::from(&stream);
         d.path(Path::Udp);
         // The timers read back only on the systems where the getters exist.

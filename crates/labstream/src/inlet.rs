@@ -257,6 +257,38 @@ impl Inlet {
         self.inner.samples_resent()
     }
 
+    /// The round-trip time of the latest clock offset estimate, in seconds.
+    pub fn time_uncertainty(&self) -> Option<f64> {
+        self.inner.time_uncertainty()
+    }
+
+    /// How many times the connection has been rebuilt after a source restart
+    /// or network dropout.
+    pub fn recoveries(&self) -> u64 {
+        self.inner.recoveries()
+    }
+
+    /// True while samples arrive over UDP (`dgram/1`).
+    pub fn on_udp(&self) -> bool {
+        self.inner.on_udp()
+    }
+
+    /// Snapshot the health of this inlet in one call.
+    pub fn health(&self) -> crate::InletHealth {
+        self.inner.health()
+    }
+
+    /// Snapshot every gap recorded on this inlet, sorted by start timestamp.
+    pub fn gaps(&self) -> Vec<crate::Gap> {
+        self.inner.gaps()
+    }
+
+    /// Drain and return every finalized gap recorded since the last call,
+    /// sorted by start timestamp.
+    pub fn take_gaps(&self) -> Vec<crate::Gap> {
+        self.inner.take_gaps()
+    }
+
     /// True when the source ended and the program read every sample.
     ///
     /// An inlet that recovers reconnects on its own, so this stays false while

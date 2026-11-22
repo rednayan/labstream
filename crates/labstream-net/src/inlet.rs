@@ -2,6 +2,7 @@
 
 use crate::clock::{ClockState, LiveSource};
 use crate::config;
+use crate::health::{Gap, GapTracker, InletHealth, LatencyProbe};
 use crate::info::StreamInfo;
 use crate::queue::SampleQueue;
 use labstream_proto::discovery;
@@ -624,6 +625,8 @@ pub struct Inlet {
     clock: Arc<ClockState>,
     source: LiveSource,
     post: PostProcessor,
+    /// Active post-processing flags so gap timestamps match `CLOCKSYNC`.
+    post_options: u32,
     /// Set once the reader thread stops.
     reader_done: Arc<AtomicBool>,
     conn: Arc<ConnState>,
@@ -652,6 +655,10 @@ struct ConnState {
     resumed: AtomicBool,
     /// The samples that came from the history of an outlet.
     resent: AtomicU64,
+    /// Recorded `GapKind::Lost` intervals from `seq/1` and `dgram/1`.
+    gaps: Arc<Mutex<GapTracker>>,
+    /// Lock-free latency probe updated once per delivered batch.
+    latency: Arc<LatencyProbe>,
 }
 
 /// How long without data before the reader treats the source as gone.
@@ -733,6 +740,8 @@ impl Inlet {
             on_udp: AtomicBool::new(false),
             resumed: AtomicBool::new(resume.is_some()),
             resent: AtomicU64::new(0),
+            gaps: Arc::new(Mutex::new(GapTracker::new())),
+            latency: Arc::new(LatencyProbe::default()),
         });
 
         // One thread owns the connection for its whole life: it reads, and when
@@ -769,6 +778,7 @@ impl Inlet {
             // No stage runs until a caller asks for one. liblsl uses the same
             // default (`include/lsl/common.h:103`).
             post: PostProcessor::new(),
+            post_options: 0,
         })
     }
 
@@ -776,13 +786,15 @@ impl Inlet {
     ///
     /// The default applies none, so a timestamp arrives as the sender wrote it.
     pub fn set_postprocessing(&mut self, options: u32) {
+        self.post_options = options;
         self.post.set_options(options);
     }
 
     /// Apply every stage: clock sync, then jitter removal, then the clamp.
     pub fn set_postprocessing_all(&mut self) {
-        self.post
-            .set_options(flags::CLOCKSYNC | flags::DEJITTER | flags::MONOTONIZE);
+        let all = flags::CLOCKSYNC | flags::DEJITTER | flags::MONOTONIZE;
+        self.post_options = all;
+        self.post.set_options(all);
     }
 
     /// The measured offset between the two clocks, or `None` before the first
@@ -943,6 +955,54 @@ impl Inlet {
     pub fn is_finished(&self) -> bool {
         self.reader_done.load(Ordering::SeqCst) && self.queue.is_empty()
     }
+
+    /// Snapshot the health of this inlet in one call. `docs/health.md`.
+    pub fn health(&self) -> InletHealth {
+        let gap_count = self.conn.gaps.lock().unwrap().len() + self.queue.drop_gap_count();
+        InletHealth {
+            latency: self.conn.latency.measure(self.clock.offset()),
+            lost: self.samples_lost(),
+            dropped: self.samples_dropped(),
+            resent: self.samples_resent(),
+            clock_uncertainty: self.time_uncertainty(),
+            recoveries: self.recoveries(),
+            connected: self.is_connected(),
+            on_udp: self.on_udp(),
+            buffered: self.samples_available(),
+            buffer_capacity: self.buffer_capacity(),
+            gap_count,
+        }
+    }
+
+    fn gap_clock_shift(&self) -> f64 {
+        if (self.post_options & flags::CLOCKSYNC) != 0 {
+            self.clock.offset().unwrap_or(0.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Snapshot every gap recorded on this inlet, sorted by start timestamp.
+    ///
+    /// Includes both network/outlet losses (`GapKind::Lost`) and local buffer
+    /// overflows (`GapKind::Dropped`).
+    pub fn gaps(&self) -> Vec<Gap> {
+        let shift = self.gap_clock_shift();
+        let mut out = self.conn.gaps.lock().unwrap().snapshot(shift);
+        out.extend(self.queue.drop_gaps(shift));
+        out.sort_by(|a, b| a.start.total_cmp(&b.start));
+        out
+    }
+
+    /// Drain and return every finalized gap recorded since the last call,
+    /// sorted by start timestamp.
+    pub fn take_gaps(&self) -> Vec<Gap> {
+        let shift = self.gap_clock_shift();
+        let mut out = self.conn.gaps.lock().unwrap().take(shift);
+        out.extend(self.queue.take_drop_gaps(shift));
+        out.sort_by(|a, b| a.start.total_cmp(&b.start));
+        out
+    }
 }
 
 impl Drop for Inlet {
@@ -1006,6 +1066,8 @@ fn read_and_recover(
             codec,
             Arc::clone(&queue),
             Arc::clone(&conn.lost),
+            Arc::clone(&conn.gaps),
+            Arc::clone(&conn.latency),
             until,
         )
     };
@@ -1026,6 +1088,7 @@ fn read_and_recover(
             numbered.then_some(&mut counter),
             until.map(|n| (n, &mut resent)),
             dg.as_ref(),
+            Some(&conn.gaps),
             &mut batch,
         );
         match dg.as_ref() {
@@ -1039,6 +1102,9 @@ fn read_and_recover(
         conn.resent.store(resent, Ordering::SeqCst);
         if !batch.is_empty() {
             last_data = Instant::now();
+            if let Some(last) = batch.last() {
+                conn.latency.record(last.timestamp);
+            }
             queue.push_owned(&mut batch);
         }
         if decoded.is_err() {
@@ -1159,6 +1225,7 @@ fn read_and_recover(
                             counter.restart();
                             deducer = labstream_wire::TimestampDeducer::new(known.nominal_srate);
                             clock.reset_offset();
+                            conn.gaps.lock().unwrap().reset_cursor();
                         }
                     }
                     if let Some(a) = answer {
@@ -1206,6 +1273,7 @@ fn read_and_recover(
                             deducer = labstream_wire::TimestampDeducer::new(fresh.nominal_srate);
                             // A new outlet has a new counter and a new epoch.
                             counter.restart();
+                            conn.gaps.lock().unwrap().reset_cursor();
                             let answer = features::resume_answer(c.features());
                             epoch = answer.map(|a| a.epoch);
                             until = answer.map(|a| a.number);
@@ -1261,6 +1329,7 @@ fn read_and_recover(
 /// `resent` holds `N`, the first live number of a `resume/1` connection, and
 /// the count of samples below it. A numbered sample below `N` came from the
 /// history of the outlet.
+#[allow(clippy::too_many_arguments)]
 fn decode_buffered(
     codec: &labstream_wire::Codec,
     carry: &mut Vec<u8>,
@@ -1268,6 +1337,7 @@ fn decode_buffered(
     mut counter: Option<&mut labstream_proto::seq::Counter>,
     mut resent: Option<(u64, &mut u64)>,
     dg: Option<&crate::dgram_in::DgramIn>,
+    tcp_gaps: Option<&Arc<Mutex<GapTracker>>>,
     out: &mut Vec<Sample>,
 ) -> Result<(), labstream_wire::Error> {
     use labstream_proto::dgram::{self, Record};
@@ -1279,7 +1349,14 @@ fn decode_buffered(
         if let Some(c) = counter.as_deref_mut() {
             match peek(&carry[pos..]) {
                 Next::Record(n) => {
+                    let before = c.lost();
                     c.record(n);
+                    let delta = c.lost().saturating_sub(before);
+                    if delta > 0 {
+                        if let Some(g) = tcp_gaps {
+                            g.lock().unwrap().record_lost(delta);
+                        }
+                    }
                     if let Some(d) = dg {
                         d.seq_record(n, c.lost());
                     }
@@ -1318,7 +1395,12 @@ fn decode_buffered(
                 // A `dgram` connection merges its two paths by number.
                 match (dg, number) {
                     (Some(d), Some(n)) => d.tcp_sample(n, sample),
-                    _ => out.push(sample),
+                    _ => {
+                        if let Some(g) = tcp_gaps {
+                            g.lock().unwrap().on_sample(sample.timestamp);
+                        }
+                        out.push(sample);
+                    }
                 }
             }
             Err(labstream_wire::Error::Truncated) => break Ok(()),
@@ -1550,7 +1632,17 @@ mod tests {
         let mut from = 0;
         for &to in cuts.iter().chain(std::iter::once(&bytes.len())) {
             carry.extend_from_slice(&bytes[from..to]);
-            decode_buffered(codec, &mut carry, &mut deducer, None, None, None, &mut out).unwrap();
+            decode_buffered(
+                codec,
+                &mut carry,
+                &mut deducer,
+                None,
+                None,
+                None,
+                None,
+                &mut out,
+            )
+            .unwrap();
             from = to;
         }
         assert!(carry.is_empty(), "no byte stays behind at the end");
@@ -1576,6 +1668,7 @@ mod tests {
                 &mut carry,
                 &mut deducer,
                 Some(&mut counter),
+                None,
                 None,
                 None,
                 &mut out,
@@ -1614,6 +1707,7 @@ mod tests {
             &mut deducer,
             Some(&mut counter),
             Some((27, &mut resent)),
+            None,
             None,
             &mut out,
         )
@@ -1702,10 +1796,71 @@ mod tests {
         let mut carry = bytes;
         let mut deducer = TimestampDeducer::new(100.0);
         let mut out = Vec::new();
-        assert!(
-            decode_buffered(&codec, &mut carry, &mut deducer, None, None, None, &mut out).is_err()
-        );
+        assert!(decode_buffered(
+            &codec,
+            &mut carry,
+            &mut deducer,
+            None,
+            None,
+            None,
+            None,
+            &mut out
+        )
+        .is_err());
         assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn decode_buffered_records_seq_gap_timestamps() {
+        use crate::health::{GapKind, GapTracker};
+        use labstream_proto::seq::{write_record, Counter};
+        let codec = Codec::new(Format::Float32, 3, ByteOrder::native());
+        let mut bytes = Vec::new();
+        write_record(&mut bytes, 10);
+        codec
+            .encode(
+                &Sample {
+                    timestamp: 50.0,
+                    values: vec![Value::F32(1.0), Value::F32(2.0), Value::F32(3.0)],
+                },
+                &mut bytes,
+            )
+            .unwrap();
+        // Jump from 11 to 16 -> 5 lost samples.
+        write_record(&mut bytes, 16);
+        codec
+            .encode(
+                &Sample {
+                    timestamp: 55.0,
+                    values: vec![Value::F32(4.0), Value::F32(5.0), Value::F32(6.0)],
+                },
+                &mut bytes,
+            )
+            .unwrap();
+        let mut carry = bytes;
+        let mut deducer = TimestampDeducer::new(100.0);
+        let mut counter = Counter::new();
+        let gaps = Arc::new(Mutex::new(GapTracker::new()));
+        let mut out = Vec::new();
+        decode_buffered(
+            &codec,
+            &mut carry,
+            &mut deducer,
+            Some(&mut counter),
+            None,
+            None,
+            Some(&gaps),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(counter.lost(), 5);
+        let recorded = gaps.lock().unwrap().snapshot(0.0);
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].start, 50.0);
+        assert_eq!(recorded[0].end, 55.0);
+        assert_eq!(recorded[0].count, 5);
+        assert_eq!(recorded[0].kind, GapKind::Lost);
     }
 
     #[test]

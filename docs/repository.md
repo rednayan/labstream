@@ -297,6 +297,7 @@ release of a new crate therefore goes by hand, with a token.
 | `docs/latency.md` | how to measure the latency and the CPU, and the results |
 | `docs/extensions.md` | a proposal for features between two labstream peers |
 | `docs/discovery.md` | fallback discovery, cross-platform interfaces, and `labstream doctor` |
+| `docs/health.md` | stream health snapshots, gap timestamps, and C API layout |
 | `SPEC.md` | the protocol, with a citation for every claim |
 | `CONTRIBUTING.md` | the rules for a change, and the style of the documents |
 | `CHANGELOG.md` | what changed in each version |

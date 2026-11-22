@@ -187,6 +187,16 @@ fn a_marker_stream_goes_out_and_comes_back_as_text() {
         }
     }
     assert_eq!(got, sent, "every marker arrives, in order");
+
+    // Step 11 health API works through the high-level `labstream` facade.
+    let oh = outlet.health();
+    assert_eq!(oh.consumers.len(), 1);
+    assert_eq!(oh.pushed, sent.len() as u64);
+    let ih = inlet.health();
+    assert!(ih.connected);
+    assert_eq!(ih.dropped, 0);
+    assert_eq!(ih.lost, Some(0));
+    assert!(inlet.gaps().is_empty());
 }
 
 /// Resolve one stream by predicate, or fail the test.
