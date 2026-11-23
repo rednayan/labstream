@@ -96,6 +96,15 @@ Both `labstream top` and `labstream play` use standard Rust threads, I/O, and
   discovered `Verify-rust` (EEG, 8 ch) and reported live rate (`98.0 Hz`),
   path (`UDP`), latency (`0.1 ms`), and zero loss, drop, resend, recovery,
   and gap counts.
+- Two machines (Linux and Windows over Wi-Fi):
+  - Windows `cargo test -p labstream-net --test health_live` (4/4 pass in
+    1.26 s) and `cargo test -p labstream-cli` (10/10 pass in 1.55 s).
+  - Linux `labstream play conformance/captures/verify.xdf --stream
+    Verify-rust,Verify-Markers-rust --loop` watched by Windows
+    `labstream.exe top` with no `--peer` flag: discovered both streams over
+    Wi-Fi, reported `1.0 Hz` (`Verify-Markers-rust`) and `98-100 Hz`
+    (`Verify-rust`) on `UDP` with `2-3 ms` latency and zero loss, drops,
+    resends, recoveries, or gaps.
 
 ## Conformance plan
 

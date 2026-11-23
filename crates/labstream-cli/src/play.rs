@@ -321,11 +321,12 @@ pub fn play_xdf(file: &XdfFile, opts: &PlayOptions) -> io::Result<u64> {
         .max(0.001);
 
     let mut total_pushed = 0u64;
-    let mut loop_index = 0u64;
-    let first_origin = clock();
+    let mut min_next_origin = clock();
 
     loop {
-        let play_origin = first_origin + (loop_index as f64) * (recording_span + 0.01);
+        // Align each loop iteration with the current wall clock while keeping
+        // timestamps strictly monotonic across loop boundaries.
+        let play_origin = clock().max(min_next_origin);
         let wall_start = Instant::now();
         let mut heap = BinaryHeap::with_capacity(active.len());
         for (idx, a) in active.iter().enumerate() {
@@ -369,7 +370,7 @@ pub fn play_xdf(file: &XdfFile, opts: &PlayOptions) -> io::Result<u64> {
         if !opts.loop_play {
             break;
         }
-        loop_index += 1;
+        min_next_origin = play_origin + recording_span + 0.001;
     }
 
     if !opts.linger.is_zero() {
