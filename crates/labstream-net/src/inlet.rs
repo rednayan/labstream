@@ -627,6 +627,8 @@ pub struct Inlet {
     post: PostProcessor,
     /// Active post-processing flags so gap timestamps match `CLOCKSYNC`.
     post_options: u32,
+    /// Reusable scratch buffer for sparse skip offsets during `pull_chunk`.
+    skip_scratch: Vec<(usize, u64)>,
     /// Set once the reader thread stops.
     reader_done: Arc<AtomicBool>,
     conn: Arc<ConnState>,
@@ -779,6 +781,7 @@ impl Inlet {
             // default (`include/lsl/common.h:103`).
             post: PostProcessor::new(),
             post_options: 0,
+            skip_scratch: Vec::new(),
         })
     }
 
@@ -846,8 +849,14 @@ impl Inlet {
     /// measurement, for up to 5 s. The timeout of the call does not limit that
     /// wait. liblsl waits the same time (`src/stream_inlet_impl.h:44`).
     pub fn pull(&mut self, timeout: Duration) -> std::io::Result<Option<Sample>> {
-        match self.queue.pop(timeout) {
-            Some(mut s) => {
+        match self.queue.pop_with_skip(timeout) {
+            Some((mut s, skipped)) => {
+                // Step 2: advance the dejitterer across lost/dropped samples
+                // only when `seq/1` is active on this connection.
+                if skipped > 0 && self.conn.numbered.load(Ordering::Relaxed) {
+                    self.post
+                        .skip_samples(u32::try_from(skipped).unwrap_or(u32::MAX));
+                }
                 // Every stage runs here, in the fixed order. SPEC.md 8.5.
                 s.timestamp = self.post.process(s.timestamp, &mut self.source);
                 Ok(Some(s))
@@ -881,12 +890,31 @@ impl Inlet {
         timeout: Duration,
     ) -> std::io::Result<usize> {
         let first = out.len();
-        let got = self.queue.pop_many(out, max, timeout);
+        self.skip_scratch.clear();
+        let numbered = self.conn.numbered.load(Ordering::Relaxed);
+        let got = self.queue.pop_many_with_skips(
+            out,
+            numbered.then_some(&mut self.skip_scratch),
+            max,
+            timeout,
+        );
         // Every stage runs here, in the fixed order, one sample after another.
         // SPEC.md 8.5. The state of the filter carries across the block, so a
         // block gives the timestamps that the same samples get one at a time.
-        for s in &mut out[first..] {
-            s.timestamp = self.post.process(s.timestamp, &mut self.source);
+        if self.skip_scratch.is_empty() {
+            for s in &mut out[first..] {
+                s.timestamp = self.post.process(s.timestamp, &mut self.source);
+            }
+        } else {
+            let mut next_skip = 0usize;
+            for (idx, s) in out[first..].iter_mut().enumerate() {
+                while next_skip < self.skip_scratch.len() && self.skip_scratch[next_skip].0 == idx {
+                    let n = self.skip_scratch[next_skip].1;
+                    self.post.skip_samples(u32::try_from(n).unwrap_or(u32::MAX));
+                    next_skip += 1;
+                }
+                s.timestamp = self.post.process(s.timestamp, &mut self.source);
+            }
         }
         Ok(got)
     }
@@ -1033,6 +1061,7 @@ fn read_and_recover(
 ) {
     let mut tmp = vec![0u8; 65536];
     let mut batch: Vec<Sample> = Vec::new();
+    let mut batch_skips: Vec<(usize, u64)> = Vec::new();
     let _ = sock.set_read_timeout(Some(Duration::from_millis(200)));
     let mut last_data = Instant::now();
 
@@ -1081,6 +1110,7 @@ fn read_and_recover(
         // Decode everything already buffered before reading more. The whole
         // read goes into the queue with one lock.
         let numbered = conn.numbered.load(Ordering::SeqCst);
+        batch_skips.clear();
         let decoded = decode_buffered(
             &codec,
             &mut carry,
@@ -1089,10 +1119,12 @@ fn read_and_recover(
             until.map(|n| (n, &mut resent)),
             dg.as_ref(),
             Some(&conn.gaps),
+            &mut batch_skips,
             &mut batch,
         );
         match dg.as_ref() {
-            // The merged stream gives the loss count of a `dgram` connection.
+            // The merged stream owns loss, gaps, and dejitter skips for a
+            // `dgram` connection.
             Some(d) => {
                 d.deliver(&queue, &conn.lost);
                 conn.on_udp.store(d.on_udp(), Ordering::SeqCst);
@@ -1105,7 +1137,11 @@ fn read_and_recover(
             if let Some(last) = batch.last() {
                 conn.latency.record(last.timestamp);
             }
-            queue.push_owned(&mut batch);
+            queue.push_owned_with_skips(&mut batch, &batch_skips);
+        } else if dg.is_none() && !batch_skips.is_empty() {
+            for &(_, count) in &batch_skips {
+                queue.record_skipped(count);
+            }
         }
         if decoded.is_err() {
             // A stream that cannot be decoded is not worth recovering.
@@ -1226,6 +1262,7 @@ fn read_and_recover(
                             deducer = labstream_wire::TimestampDeducer::new(known.nominal_srate);
                             clock.reset_offset();
                             conn.gaps.lock().unwrap().reset_cursor();
+                            queue.clear_skips();
                         }
                     }
                     if let Some(a) = answer {
@@ -1274,6 +1311,7 @@ fn read_and_recover(
                             // A new outlet has a new counter and a new epoch.
                             counter.restart();
                             conn.gaps.lock().unwrap().reset_cursor();
+                            queue.clear_skips();
                             let answer = features::resume_answer(c.features());
                             epoch = answer.map(|a| a.epoch);
                             until = answer.map(|a| a.number);
@@ -1338,6 +1376,7 @@ fn decode_buffered(
     mut resent: Option<(u64, &mut u64)>,
     dg: Option<&crate::dgram_in::DgramIn>,
     tcp_gaps: Option<&Arc<Mutex<GapTracker>>>,
+    batch_skips: &mut Vec<(usize, u64)>,
     out: &mut Vec<Sample>,
 ) -> Result<(), labstream_wire::Error> {
     use labstream_proto::dgram::{self, Record};
@@ -1352,13 +1391,13 @@ fn decode_buffered(
                     let before = c.lost();
                     c.record(n);
                     let delta = c.lost().saturating_sub(before);
-                    if delta > 0 {
+                    if let Some(d) = dg {
+                        d.seq_record(n, c.lost(), delta);
+                    } else if delta > 0 {
                         if let Some(g) = tcp_gaps {
                             g.lock().unwrap().record_lost(delta);
                         }
-                    }
-                    if let Some(d) = dg {
-                        d.seq_record(n, c.lost());
+                        batch_skips.push((out.len(), delta));
                     }
                     pos += RECORD_LEN;
                     continue;
@@ -1640,6 +1679,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &mut Vec::new(),
                 &mut out,
             )
             .unwrap();
@@ -1671,6 +1711,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &mut Vec::new(),
                 &mut out,
             )
             .unwrap();
@@ -1709,6 +1750,7 @@ mod tests {
             Some((27, &mut resent)),
             None,
             None,
+            &mut Vec::new(),
             &mut out,
         )
         .unwrap();
@@ -1804,6 +1846,7 @@ mod tests {
             None,
             None,
             None,
+            &mut Vec::new(),
             &mut out
         )
         .is_err());
@@ -1841,6 +1884,7 @@ mod tests {
         let mut deducer = TimestampDeducer::new(100.0);
         let mut counter = Counter::new();
         let gaps = Arc::new(Mutex::new(GapTracker::new()));
+        let mut skips = Vec::new();
         let mut out = Vec::new();
         decode_buffered(
             &codec,
@@ -1850,11 +1894,13 @@ mod tests {
             None,
             None,
             Some(&gaps),
+            &mut skips,
             &mut out,
         )
         .unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(counter.lost(), 5);
+        assert_eq!(skips, vec![(1, 5)]);
         let recorded = gaps.lock().unwrap().snapshot(0.0);
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].start, 50.0);

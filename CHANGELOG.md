@@ -102,6 +102,12 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Four C functions in `labstream-capi`: `labstream_inlet_health`,
   `labstream_inlet_gaps`, `labstream_inlet_take_gaps`, and
   `labstream_outlet_consumers`.
+- Loss-aware dejitter (roadmap step 2). On connections that negotiate `seq/1`,
+  `Inlet::pull` and `Inlet::pull_chunk` advance `PostProcessor::skip_samples`
+  at the exact position of each lost or dropped gap so the first smoothed
+  timestamp after a gap stays within one sample interval. Plain LSL
+  connections without `seq/1`, and streams with zero loss, keep bit-exact
+  liblsl timestamps.
 - `labstream top` and `labstream play` in `crates/labstream-cli`
   (`docs/tools.md`, roadmap step 12). `top` shows each live stream with its
   measured rate, path, latency, and health counts from `Inlet::health` once

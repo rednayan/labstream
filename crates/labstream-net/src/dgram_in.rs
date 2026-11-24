@@ -79,6 +79,9 @@ struct State {
     resend_until: Option<u64>,
     /// Reorder loss count already forwarded into `gaps`.
     recorded_lost: u64,
+    /// Loss delta waiting to attach to the next delivered sample batch for
+    /// loss-aware dejitter (`docs/roadmap.md`, step 2).
+    pending_skip: u64,
     /// Shared inlet gap ring for `GapKind::Lost`.
     gaps: Arc<Mutex<GapTracker>>,
     /// Lock-free latency probe updated once per delivered batch.
@@ -139,6 +142,7 @@ impl DgramIn {
             begin: Instant::now(),
             resend_until,
             recorded_lost: 0,
+            pending_skip: 0,
             gaps,
             latency,
         }));
@@ -161,14 +165,19 @@ impl DgramIn {
         Some(DgramIn { state, stop })
     }
 
-    /// A `seq` record on TCP. The first one starts the buffer. A record
-    /// that answers a resend request, with a number above the request,
-    /// shows samples that the history no longer holds.
-    pub fn seq_record(&self, number: u64, counter_lost: u64) {
+    /// A `seq` record on TCP. The first one starts the buffer (forwarding any
+    /// reconnect gap `reconnect_delta` that occurred before `dgram` started).
+    /// A later record that answers a resend request, with a number above the
+    /// request, shows samples that the history no longer holds.
+    pub fn seq_record(&self, number: u64, counter_lost: u64, reconnect_delta: u64) {
         let mut s = self.state.lock().unwrap();
         if !s.started {
             s.started = true;
             s.base_lost = counter_lost;
+            if reconnect_delta > 0 {
+                s.pending_skip = s.pending_skip.saturating_add(reconnect_delta);
+                s.gaps.lock().unwrap().record_lost(reconnect_delta);
+            }
             s.reorder.start(number);
             // The `resume` resend is on the way on TCP. Asking for it again
             // only adds a second copy to the link.
@@ -267,6 +276,7 @@ fn sync_lost_to_tracker(s: &mut State) {
     if cur > s.recorded_lost {
         let delta = cur - s.recorded_lost;
         s.recorded_lost = cur;
+        s.pending_skip = s.pending_skip.saturating_add(delta);
         s.gaps.lock().unwrap().record_lost(delta);
     }
 }
@@ -288,7 +298,13 @@ fn deliver_into(
         let last_ts = out[out.len() - 1].timestamp;
         s.gaps.lock().unwrap().on_batch(first_ts, last_ts);
         s.latency.record(last_ts);
-        queue.push_owned(out);
+        let skip = s.pending_skip;
+        s.pending_skip = 0;
+        if skip > 0 {
+            queue.push_owned_with_skips(out, &[(0, skip)]);
+        } else {
+            queue.push_owned(out);
+        }
     }
     lost.store(s.base_lost + s.reorder.lost(), Ordering::SeqCst);
 }

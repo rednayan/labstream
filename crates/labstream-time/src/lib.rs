@@ -457,6 +457,45 @@ mod tests {
     }
 
     #[test]
+    fn loss_aware_skip_keeps_first_timestamp_after_100_sample_gap_accurate() {
+        let srate = 100.0;
+        let dt = 1.0 / srate;
+        let t0 = 5000.0;
+
+        let mut with_skip = PostProcessor::new();
+        with_skip.set_options(flags::DEJITTER);
+        let mut without_skip = PostProcessor::new();
+        without_skip.set_options(flags::DEJITTER);
+        let mut s = src(srate);
+
+        // Warm up on 200 contiguous samples with zero loss: both must be bit-exact.
+        for i in 0..200 {
+            let t = t0 + i as f64 * dt;
+            let a = with_skip.process(t, &mut s);
+            let b = without_skip.process(t, &mut s);
+            assert_eq!(a.to_bits(), b.to_bits(), "bit-exact with zero loss at {i}");
+        }
+
+        // Remove 100 samples (200..300) and feed sample 300.
+        let true_after = t0 + 300.0 * dt;
+        with_skip.skip_samples(100);
+        let smoothed_with = with_skip.process(true_after, &mut s);
+        let smoothed_without = without_skip.process(true_after, &mut s);
+
+        assert!(
+            (smoothed_with - true_after).abs() < dt,
+            "expected error < {dt} s, got {}",
+            (smoothed_with - true_after).abs()
+        );
+        // Without `skip_samples`, the filter lags by nearly a full second (~100 intervals).
+        assert!(
+            (true_after - smoothed_without) > 50.0 * dt,
+            "expected large lag without skip_samples, got {}",
+            true_after - smoothed_without
+        );
+    }
+
+    #[test]
     fn clock_sync_refreshes_at_most_twice_per_second() {
         let mut p = PostProcessor::new();
         p.set_options(flags::CLOCKSYNC);

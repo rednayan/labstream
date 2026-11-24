@@ -1,8 +1,8 @@
 # Roadmap: features that liblsl does not have
 
 **Status:** approved by the user on 2026-11-16. The gate, step 0, step 1,
-step 5, step 10, step 11 (library and C API), and step 12 are complete. The
-other steps are not implemented.
+step 2, step 5, step 10, step 11 (library and C API), and step 12 are
+complete. The other steps are not implemented.
 
 This page gives the order of the labstream-only features, the success
 criterion of each feature, and the dependencies. Each feature follows the
@@ -277,6 +277,12 @@ filter by this count.
    first smoothed timestamp after the gap is correct to less than one
    sample interval. Without the change, the test fails.
 3. The change is on only when the connection uses `seq/1`.
+
+**Status:** complete. `SampleQueue` tracks exact skip positions with zero
+allocation on clean streams, and `Inlet::pull` and `Inlet::pull_chunk` call
+`PostProcessor::skip_samples` only when `seq/1` is active. Unit tests in
+`labstream-time` and `labstream-net`, plus live tests in
+`crates/labstream-net/tests/dejitter_live.rs`, confirm all three criteria.
 
 ### Step 3: store-and-forward
 

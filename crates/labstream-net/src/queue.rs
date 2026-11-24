@@ -40,6 +40,10 @@ struct Ring {
     pending_drop_start: Option<f64>,
     /// Completed drop gaps, bounded to `MAX_GAPS`.
     drop_gaps: VecDeque<Gap>,
+    /// Sparse `(ring_pos, skipped_count)` markers recording wire-lost or
+    /// queue-dropped samples immediately before `ring_pos`, for loss-aware
+    /// dejitter (`docs/roadmap.md`, step 2). Always empty on a clean stream.
+    skips: VecDeque<(u64, u64)>,
 }
 
 impl std::ops::Deref for Ring {
@@ -94,13 +98,78 @@ impl Ring {
         self.last_popped_ts = Some(last_ts);
     }
 
+    /// Record that `count` samples were skipped immediately before `pos`,
+    /// keeping `self.skips` sorted by ascending position.
+    fn push_skip(&mut self, pos: u64, count: u64) {
+        if count == 0 {
+            return;
+        }
+        if let Some((last_pos, last_count)) = self.skips.back_mut() {
+            if *last_pos == pos {
+                *last_count = last_count.saturating_add(count);
+                return;
+            }
+            if *last_pos < pos {
+                self.skips.push_back((pos, count));
+                return;
+            }
+        } else {
+            self.skips.push_back((pos, count));
+            return;
+        }
+        // Front insertion (e.g. `drop_front` while a later wire skip exists).
+        if let Some((first_pos, first_count)) = self.skips.front_mut() {
+            if *first_pos == pos {
+                *first_count = first_count.saturating_add(count);
+                return;
+            }
+            if pos < *first_pos {
+                self.skips.push_front((pos, count));
+                return;
+            }
+        }
+        for i in 0..self.skips.len() {
+            let (p, c) = &mut self.skips[i];
+            if *p == pos {
+                *c = c.saturating_add(count);
+                return;
+            }
+            if pos < *p {
+                self.skips.insert(i, (pos, count));
+                return;
+            }
+        }
+        self.skips.push_back((pos, count));
+    }
+
+    /// Take all skipped-sample counts that precede `ring_pos`.
+    fn take_skips_at(&mut self, ring_pos: u64) -> u64 {
+        if self.skips.is_empty() {
+            return 0;
+        }
+        let mut total = 0u64;
+        while let Some(&(pos, count)) = self.skips.front() {
+            if pos <= ring_pos {
+                total = total.saturating_add(count);
+                self.skips.pop_front();
+            } else {
+                break;
+            }
+        }
+        total
+    }
+
     /// Remove the oldest sample because the queue is full.
     ///
     /// The deducer sees the sample, so the full timestamp of the next sample
     /// stays correct after the drop.
     fn drop_front(&mut self) {
+        let front_pos = self.front_number();
         if let Some(old) = self.q.pop_front() {
             self.note_drop(old.timestamp, 1);
+            // The next surviving sample is at `front_pos + 1`; attach 1 skipped
+            // sample there so loss-aware dejitter accounts for inlet drops too.
+            self.push_skip(front_pos.wrapping_add(1), 1);
             if let Some(d) = self.deducer.as_mut() {
                 d.apply(old.timestamp);
             }
@@ -157,6 +226,7 @@ impl SampleQueue {
                 pending_drop_count: 0,
                 pending_drop_start: None,
                 drop_gaps: VecDeque::new(),
+                skips: VecDeque::new(),
             }),
             room: Condvar::new(),
             capacity,
@@ -245,11 +315,28 @@ impl SampleQueue {
     /// A queue with a deducer must not use this call, because the samples
     /// that the queue drops at once never pass the deducer.
     pub fn push_owned(&self, samples: &mut Vec<Sample>) {
+        self.push_owned_with_skips(samples, &[]);
+    }
+
+    /// Like [`SampleQueue::push_owned`], and attach sparse `(batch_index, count)`
+    /// skipped-sample counts for loss-aware dejitter (`docs/roadmap.md`, step 2).
+    pub(crate) fn push_owned_with_skips(&self, samples: &mut Vec<Sample>, skips: &[(usize, u64)]) {
         if samples.is_empty() {
+            if !skips.is_empty() {
+                let mut q = self.inner.lock().unwrap();
+                let pos = q.back;
+                for &(_, count) in skips {
+                    q.push_skip(pos, count);
+                }
+            }
             return;
         }
         let mut q = self.inner.lock().unwrap();
         debug_assert!(q.deducer.is_none());
+        let base_pos = q.back;
+        for &(offset, count) in skips {
+            q.push_skip(base_pos.wrapping_add(offset as u64), count);
+        }
         let mut lost = 0u64;
         // Samples that the queue drops at once are never moved in.
         let skip = samples.len().saturating_sub(self.capacity);
@@ -266,6 +353,8 @@ impl SampleQueue {
             let skipped_ts = samples[0].timestamp;
             q.note_drop(skipped_ts, skip as u64);
             lost += skip as u64;
+            let first_kept_pos = base_pos.wrapping_add(skip as u64);
+            q.push_skip(first_kept_pos, lost);
             for s in samples.drain(..).skip(skip) {
                 q.push_back(s);
             }
@@ -285,17 +374,41 @@ impl SampleQueue {
         self.room.notify_all();
     }
 
+    /// Record `count` skipped samples before the next sample that enters this queue.
+    pub(crate) fn record_skipped(&self, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let mut q = self.inner.lock().unwrap();
+        let pos = q.back;
+        q.push_skip(pos, count);
+    }
+
+    /// Drop any pending skip markers (used when attaching to a new outlet run).
+    pub(crate) fn clear_skips(&self) {
+        self.inner.lock().unwrap().skips.clear();
+    }
+
     /// Take the oldest sample, waiting up to `timeout`.
     ///
     /// Returns `None` when the timeout passes with nothing waiting, or when the
     /// queue is closed and empty.
     pub fn pop(&self, timeout: Duration) -> Option<Sample> {
+        self.pop_with_skip(timeout).map(|(s, _)| s)
+    }
+
+    /// Take the oldest sample and the count of skipped samples immediately
+    /// before it, waiting up to `timeout`.
+    pub(crate) fn pop_with_skip(&self, timeout: Duration) -> Option<(Sample, u64)> {
         let end = Instant::now() + timeout;
         let mut q = self.inner.lock().unwrap();
         loop {
-            if let Some(s) = q.pop_front() {
+            if !q.is_empty() {
+                let pos = q.front_number();
+                let skipped = q.take_skips_at(pos);
+                let s = q.pop_front().unwrap();
                 q.note_pop(s.timestamp, s.timestamp);
-                return Some(s);
+                return Some((s, skipped));
             }
             if *self.closed.lock().unwrap() {
                 return None;
@@ -310,9 +423,12 @@ impl SampleQueue {
                 .unwrap();
             q = guard;
             if result.timed_out() && Instant::now() >= end {
-                if let Some(s) = q.pop_front() {
+                if !q.is_empty() {
+                    let pos = q.front_number();
+                    let skipped = q.take_skips_at(pos);
+                    let s = q.pop_front().unwrap();
                     q.note_pop(s.timestamp, s.timestamp);
-                    return Some(s);
+                    return Some((s, skipped));
                 }
                 return None;
             }
@@ -329,19 +445,70 @@ impl SampleQueue {
     ///
     /// A closed and empty queue gives zero.
     pub fn pop_many(&self, out: &mut Vec<Sample>, max: usize, timeout: Duration) -> usize {
+        self.pop_many_with_skips(out, None, max, timeout)
+    }
+
+    /// Like [`SampleQueue::pop_many`], and append `(offset_in_popped, skipped)`
+    /// pairs to `skips_out` when any samples were skipped within this block.
+    pub(crate) fn pop_many_with_skips(
+        &self,
+        out: &mut Vec<Sample>,
+        mut skips_out: Option<&mut Vec<(usize, u64)>>,
+        max: usize,
+        timeout: Duration,
+    ) -> usize {
         if max == 0 {
             return 0;
         }
         let end = Instant::now() + timeout;
         let mut q = self.inner.lock().unwrap();
+        let drain_into = |q: &mut Ring,
+                          out: &mut Vec<Sample>,
+                          skips_out: &mut Option<&mut Vec<(usize, u64)>>,
+                          max: usize|
+         -> usize {
+            let take = q.len().min(max);
+            if take == 0 {
+                return 0;
+            }
+            let first_pos = q.front_number();
+            if !q.skips.is_empty() {
+                if let Some(dst) = skips_out.as_mut() {
+                    let lead = q.take_skips_at(first_pos);
+                    if lead > 0 {
+                        dst.push((0, lead));
+                    }
+                    let end_pos = first_pos.wrapping_add(take as u64);
+                    while let Some(&(pos, count)) = q.skips.front() {
+                        if pos < end_pos {
+                            let idx = (pos.wrapping_sub(first_pos)) as usize;
+                            dst.push((idx, count));
+                            q.skips.pop_front();
+                        } else {
+                            break;
+                        }
+                    }
+                } else {
+                    let end_pos = first_pos.wrapping_add(take as u64);
+                    while let Some(&(pos, _)) = q.skips.front() {
+                        if pos < end_pos {
+                            q.skips.pop_front();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            let first_ts = q.q[0].timestamp;
+            let last_ts = q.q[take - 1].timestamp;
+            out.extend(q.drain(..take));
+            q.note_pop(first_ts, last_ts);
+            take
+        };
+
         loop {
             if !q.is_empty() {
-                let take = q.len().min(max);
-                let first_ts = q.q[0].timestamp;
-                let last_ts = q.q[take - 1].timestamp;
-                out.extend(q.drain(..take));
-                q.note_pop(first_ts, last_ts);
-                return take;
+                return drain_into(&mut q, out, &mut skips_out, max);
             }
             if *self.closed.lock().unwrap() {
                 return 0;
@@ -356,14 +523,7 @@ impl SampleQueue {
                 .unwrap();
             q = guard;
             if result.timed_out() && Instant::now() >= end {
-                let take = q.len().min(max);
-                if take > 0 {
-                    let first_ts = q.q[0].timestamp;
-                    let last_ts = q.q[take - 1].timestamp;
-                    out.extend(q.drain(..take));
-                    q.note_pop(first_ts, last_ts);
-                }
-                return take;
+                return drain_into(&mut q, out, &mut skips_out, max);
             }
         }
     }
@@ -1307,5 +1467,33 @@ mod tests {
         assert_eq!(h.consumers[1].capacity, 3);
         assert_eq!(h.consumers[1].dropped, 5);
         drop(slow);
+    }
+
+    #[test]
+    fn queue_delivers_exact_skip_positions_on_pop_and_pop_many() {
+        let q = SampleQueue::new(32);
+        let mut batch: Vec<Sample> = (0..6).map(sample).collect();
+        // 100 samples lost between sample 2 and sample 3.
+        q.push_owned_with_skips(&mut batch, &[(3, 100)]);
+
+        let mut out = Vec::new();
+        let mut skips = Vec::new();
+        let got = q.pop_many_with_skips(&mut out, Some(&mut skips), 32, Duration::ZERO);
+        assert_eq!(got, 6);
+        assert_eq!(skips, vec![(3, 100)]);
+
+        // Also test combining a front drop with a later wire skip.
+        let q2 = SampleQueue::new(3);
+        let mut b1: Vec<Sample> = vec![sample(0), sample(1), sample(2)];
+        q2.push_owned_with_skips(&mut b1, &[(2, 50)]);
+        // Push one more sample -> drops sample 0 at front (1 drop skip before sample 1),
+        // while keeping the 50-sample wire skip before sample 2.
+        q2.push(sample(3));
+        let (s1, sk1) = q2.pop_with_skip(Duration::ZERO).unwrap();
+        assert_eq!(index(&s1), 1);
+        assert_eq!(sk1, 1);
+        let (s2, sk2) = q2.pop_with_skip(Duration::ZERO).unwrap();
+        assert_eq!(index(&s2), 2);
+        assert_eq!(sk2, 50);
     }
 }
