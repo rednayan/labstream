@@ -326,6 +326,52 @@ impl Outlet {
         }
         self.shared.fanout.push_packed(s);
     }
+
+    /// Send one numeric sample directly from raw native-endian bytes.
+    ///
+    /// When only `shm/1` consumers are attached and `resume` history is off,
+    /// this avoids heap allocation completely.
+    pub fn push_numeric_raw(&self, timestamp: f64, format: labstream_wire::Format, bytes: &[u8]) {
+        let ts = self.stamp(timestamp);
+        if self.shared.sync_mode {
+            let s = PackedSample::from_raw_bytes(ts, format, Arc::from(bytes));
+            write_blocking_packed(&self.shared, &s);
+            return;
+        }
+        self.shared.fanout.push_numeric_raw(ts, format, bytes);
+    }
+
+    /// Send a flat contiguous numeric chunk with per-sample timestamps,
+    /// writing directly into `shm/1` consumer rings before allocating any
+    /// queued samples.
+    pub fn push_chunk_numeric_raw(
+        &self,
+        format: labstream_wire::Format,
+        raw: &[u8],
+        row_bytes: usize,
+        timestamps: &[f64],
+    ) {
+        if timestamps.is_empty() || row_bytes == 0 {
+            return;
+        }
+        let stamped: Vec<f64> = timestamps.iter().map(|&t| self.stamp(t)).collect();
+        if self.shared.sync_mode {
+            let block: Vec<PackedSample> = (0..stamped.len())
+                .map(|k| {
+                    PackedSample::from_raw_bytes(
+                        stamped[k],
+                        format,
+                        Arc::from(&raw[k * row_bytes..(k + 1) * row_bytes]),
+                    )
+                })
+                .collect();
+            write_blocking_many_packed(&self.shared, &block);
+            return;
+        }
+        self.shared
+            .fanout
+            .push_chunk_numeric_raw(format, raw, row_bytes, &stamped);
+    }
 }
 
 /// Write one packed sample to every consumer, and wait for each write to finish.
@@ -736,47 +782,91 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
     // the queue later (`src/tcp_server.cpp:746`), which a peer cannot see.
     // `docs/extensions.md`, resend rule 1.
     let mut resumed: Option<(Registered, Resend)> = None;
+    let mut resume_fresh_for_shm = false;
     let queue_follows =
         !shared.sync_mode && accepted.max_buffer_length > 0 && accepted.codec_order().is_some();
     let allow_resume = queue_follows && !decimating;
+
+    // Check `shm/1` eligibility up front so fresh connections can negotiate
+    // `shm/1` cleanly alongside `resume/1` without allocating a redundant queue.
+    let wants_shm = queue_follows
+        && info.format != labstream_wire::Format::String
+        && !decimating
+        && crate::shm::supported()
+        && offered
+            .as_deref()
+            .is_some_and(|o| features::shm_request(o, allowed));
+
     if let (true, Some(o), Some(a)) = (allow_resume, offered.as_deref(), answered.as_mut()) {
         if let Some(request) = features::resume_request(o, a, allowed) {
             if shared.fanout.start_history() {
-                let (queue, n) = shared.fanout.add_resumable_with_peer(
-                    accepted.max_buffer_length.max(1) as usize,
-                    peer_label.clone(),
-                );
-                // A different epoch is a different run of the outlet. Its
-                // numbers mean nothing here, so nothing goes again.
                 let from = match request {
                     features::ResumeRequest::From(p) if p.epoch == shared.epoch => Some(p.number),
                     _ => None,
                 };
-                a.push(
-                    features::ResumeParam {
-                        epoch: shared.epoch,
-                        number: n,
+                if wants_shm && from.is_none() {
+                    let n = shared.fanout.next_number();
+                    a.push(
+                        features::ResumeParam {
+                            epoch: shared.epoch,
+                            number: n,
+                        }
+                        .token(),
+                    );
+                    resume_fresh_for_shm = true;
+                } else {
+                    let (queue, n) = shared.fanout.add_resumable_with_peer(
+                        accepted.max_buffer_length.max(1) as usize,
+                        peer_label.clone(),
+                    );
+                    a.push(
+                        features::ResumeParam {
+                            epoch: shared.epoch,
+                            number: n,
+                        }
+                        .token(),
+                    );
+                    if trace {
+                        eprintln!("TRACE resume: from {from:?}, first live sample {n}");
                     }
-                    .token(),
-                );
-                if trace {
-                    eprintln!("TRACE resume: from {from:?}, first live sample {n}");
+                    resumed = Some((
+                        Registered {
+                            fanout: &shared.fanout,
+                            queue,
+                        },
+                        Resend { from, until: n },
+                    ));
                 }
-                resumed = Some((
-                    Registered {
-                        fanout: &shared.fanout,
-                        queue,
-                    },
-                    Resend { from, until: n },
-                ));
             }
+        }
+    }
+
+    // Negotiate `shm/1` on fresh numeric non-decimated sessions
+    // (`docs/extensions.md`, section `shm`).
+    let mut shm_writer: Option<Arc<crate::shm::ShmWriter>> = None;
+    if let (true, true, Some(a)) = (wants_shm, resumed.is_none(), answered.as_mut()) {
+        if let Ok(writer) = crate::shm::ShmWriter::create(
+            info.format,
+            out_channels,
+            accepted.max_buffer_length.max(1) as usize,
+        ) {
+            a.push(features::ShmParam { id: writer.id() }.token());
+            if trace {
+                eprintln!("TRACE shm: offered segment {:016x}", writer.id());
+            }
+            shm_writer = Some(Arc::new(writer));
         }
     }
 
     // A `dgram` consumer gets a UDP socket of its own, and the answer gives
     // its port and a cookie. `docs/extensions.md`, section `dgram`.
+    // When `shm/1` is offered on loopback, skip `dgram/1` so a container
+    // fallback uses pure TCP (`docs/roadmap.md`, step 9, criterion 3).
+    let peer_is_loopback = stream.peer_addr().is_ok_and(|p| p.ip().is_loopback());
+    let can_dgram =
+        (resumed.is_some() || resume_fresh_for_shm) && !(shm_writer.is_some() && peer_is_loopback);
     let mut dgram_socket: Option<(std::net::UdpSocket, u64, std::net::IpAddr)> = None;
-    if let (true, Some(o), Some(a)) = (resumed.is_some(), offered.as_deref(), answered.as_mut()) {
+    if let (true, Some(o), Some(a)) = (can_dgram, offered.as_deref(), answered.as_mut()) {
         let fits = crate::dgram_out::sample_fits(info.format, out_channels);
         if fits && features::dgram_request(o, a, allowed) {
             let peer = stream.peer_addr()?;
@@ -865,10 +955,73 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         return Ok(());
     }
 
+    // Step 5 of `docs/extensions.md` (`shm`): wait up to 1 s for `shm-ok <token>`.
+    // If the token matches, register the SHM ring directly in the fanout and
+    // keep the TCP socket open to detect end-of-stream and recovery.
+    // Otherwise unlink the segment and fall back cleanly to TCP/dgram.
+    if let Some(writer) = shm_writer {
+        if crate::shm::read_shm_reply(&mut stream, writer.token(), Duration::from_secs(1)) {
+            if trace {
+                eprintln!("TRACE shm: active on segment {:016x}", writer.id());
+            }
+            writer.unlink_name();
+            drop(dgram_socket);
+            let proj_channels = selected
+                .as_ref()
+                .and_then(|s| (!s.channels.is_empty()).then(|| s.channels.clone()));
+            let _first_seq =
+                shared
+                    .fanout
+                    .add_shm_with_peer(Arc::clone(&writer), peer_label, proj_channels);
+            let _guard = RegisteredShm {
+                fanout: &shared.fanout,
+                writer: Arc::clone(&writer),
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            let mut probe = [0u8; 64];
+            loop {
+                if *shared.stop.lock().unwrap() || writer.is_closed() {
+                    break;
+                }
+                match stream.read(&mut probe) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut => {}
+                    Err(_) => break,
+                }
+            }
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            return Ok(());
+        } else if trace {
+            eprintln!(
+                "TRACE shm: fallback to TCP for segment {:016x}",
+                writer.id()
+            );
+        }
+        // `writer` drops here, unlinking the unused SHM segment immediately.
+    }
+
     // The header carries a count of samples, already converted from whatever
     // unit the peer's API used. SPEC.md 8.6.
     let (consumer, resend) = match resumed {
         Some((c, r)) => (c, Some(r)),
+        None if resume_fresh_for_shm => {
+            let (queue, n) = shared
+                .fanout
+                .add_resumable_with_peer(accepted.max_buffer_length.max(1) as usize, peer_label);
+            (
+                Registered {
+                    fanout: &shared.fanout,
+                    queue,
+                },
+                Some(Resend {
+                    from: None,
+                    until: n,
+                }),
+            )
+        }
         None if decimating => (
             Registered {
                 fanout: &shared.fanout,
@@ -951,6 +1104,20 @@ struct Registered<'a> {
 impl Drop for Registered<'_> {
     fn drop(&mut self) {
         self.fanout.remove(&self.queue);
+    }
+}
+
+/// An active `shm/1` consumer ring in the fanout. Removing it on drop closes
+/// the segment and unregisters it from future pushes.
+struct RegisteredShm<'a> {
+    fanout: &'a Fanout,
+    writer: Arc<crate::shm::ShmWriter>,
+}
+
+impl Drop for RegisteredShm<'_> {
+    fn drop(&mut self) {
+        self.writer.close();
+        self.fanout.remove_shm(&self.writer);
     }
 }
 

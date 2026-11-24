@@ -2,7 +2,7 @@
 
 use crate::clock::{ClockState, LiveSource};
 use crate::config;
-use crate::health::{Gap, GapTracker, InletHealth, LatencyProbe};
+use crate::health::{Gap, GapKind, GapTracker, InletHealth, LatencyProbe, MAX_GAPS};
 use crate::info::StreamInfo;
 use crate::queue::SampleQueue;
 use labstream_proto::discovery;
@@ -10,8 +10,9 @@ use labstream_proto::features;
 use labstream_proto::feed::{FeedClient, FeedParams, State, TestPatternError};
 use labstream_time::{flags, PostProcessor};
 use labstream_wire::{PackedSample, Sample};
+use std::collections::VecDeque;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, UdpSocket};
+use std::net::{Shutdown, SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -631,6 +632,18 @@ pub struct Inlet {
     skip_scratch: Vec<(usize, u64)>,
     /// Reusable scratch buffer for packed samples during typed chunk pulls.
     packed_scratch: Vec<PackedSample>,
+    /// Reusable scratch buffer for SHM metadata during chunk pulls.
+    shm_meta_scratch: Vec<crate::shm::ShmSampleMeta>,
+    /// Fast-path handle to the active `shm/1` ring (no mutex on `pull`).
+    shm: Option<Arc<crate::shm::ShmReader>>,
+    /// Matches `conn.shm_gen`; refreshed only across a recovery transition.
+    shm_gen: u64,
+    /// Next expected `seq/1` sample number on the current SHM segment.
+    shm_expected_seq: Option<u64>,
+    /// Timestamp of the last sample pulled from the current SHM segment.
+    shm_last_ts: Option<f64>,
+    /// Counter used to sample latency probe once per 32 SHM samples.
+    shm_latency_ticks: u64,
     /// Set once the reader thread stops.
     reader_done: Arc<AtomicBool>,
     conn: Arc<ConnState>,
@@ -649,6 +662,22 @@ struct ConnState {
     info: Mutex<StreamInfo>,
     /// Active `select/1` parameters agreed with the outlet, if any.
     selection: Mutex<Option<features::SelectParam>>,
+    /// Active `shm/1` shared-memory ring, if negotiated.
+    shm: Mutex<Option<Arc<crate::shm::ShmReader>>>,
+    /// Bumped whenever `shm` is replaced or cleared on recovery.
+    shm_gen: AtomicU64,
+    /// True while samples arrive through shared memory (`shm/1`).
+    on_shm: AtomicBool,
+    /// Next expected `seq/1` number observed on SHM (`u64::MAX` = none yet).
+    shm_next_expected: AtomicU64,
+    /// Cumulative SHM drops from earlier recovered SHM segments.
+    shm_dropped_prev: AtomicU64,
+    /// Finalized `GapKind::Dropped` intervals observed on SHM.
+    shm_drop_gaps: Mutex<VecDeque<Gap>>,
+    /// Timestamp bits of the last pulled SHM sample (for pending drop gaps).
+    shm_last_ts_bits: AtomicU64,
+    /// Cloned TCP handle so `Inlet::drop` wakes the SHM watcher immediately.
+    tcp_shutdown: Mutex<Option<TcpStream>>,
     /// True when the current connection uses `seq/1`. `docs/extensions.md`.
     numbered: AtomicBool,
     /// The samples that never arrived, from the `seq/1` numbers. The thread
@@ -661,7 +690,7 @@ struct ConnState {
     resumed: AtomicBool,
     /// The samples that came from the history of an outlet.
     resent: AtomicU64,
-    /// Recorded `GapKind::Lost` intervals from `seq/1` and `dgram/1`.
+    /// Recorded `GapKind::Lost` intervals from `seq/1`, `dgram/1`, and `shm/1`.
     gaps: Arc<Mutex<GapTracker>>,
     /// Lock-free latency probe updated once per delivered batch.
     latency: Arc<LatencyProbe>,
@@ -741,12 +770,22 @@ impl Inlet {
             None,
             requested_selection.as_ref(),
         )?;
-        let (stream, client, data_codec, active_selection, buf) =
-            (hs.stream, hs.client, hs.codec, hs.selection, hs.carry);
+        let (stream, client, data_codec, active_selection, shm, buf) = (
+            hs.stream,
+            hs.client,
+            hs.codec,
+            hs.selection,
+            hs.shm,
+            hs.carry,
+        );
         debug_assert_eq!(client.state(), State::Streaming);
         let numbered = uses_seq(&client);
         let resume = features::resume_answer(client.features());
-        let dgram = features::dgram_answer(client.features());
+        let dgram = if shm.is_some() {
+            None
+        } else {
+            features::dgram_answer(client.features())
+        };
 
         let effective_info = match &active_selection {
             Some(sel) => info.apply_selection(sel),
@@ -769,12 +808,22 @@ impl Inlet {
             crate::clock::start(target, Arc::clone(&clock), seed);
         }
 
+        let tcp_shutdown = stream.try_clone().ok();
+        let on_shm_init = shm.is_some();
         let conn = Arc::new(ConnState {
             recover,
             recoveries: AtomicU64::new(0),
             connected: AtomicBool::new(true),
             info: Mutex::new(info.clone()),
             selection: Mutex::new(active_selection),
+            shm: Mutex::new(shm.clone()),
+            shm_gen: AtomicU64::new(0),
+            on_shm: AtomicBool::new(on_shm_init),
+            shm_next_expected: AtomicU64::new(u64::MAX),
+            shm_dropped_prev: AtomicU64::new(0),
+            shm_drop_gaps: Mutex::new(VecDeque::new()),
+            shm_last_ts_bits: AtomicU64::new(f64::NAN.to_bits()),
+            tcp_shutdown: Mutex::new(tcp_shutdown),
             numbered: AtomicBool::new(numbered),
             lost: Arc::new(AtomicU64::new(0)),
             on_udp: AtomicBool::new(false),
@@ -791,6 +840,7 @@ impl Inlet {
             let done = Arc::clone(&reader_done);
             let clk = Arc::clone(&clock);
             let state = Arc::clone(&conn);
+            let shm_bg = shm.clone();
             std::thread::spawn(move || {
                 read_and_recover(
                     stream,
@@ -803,6 +853,7 @@ impl Inlet {
                     buffer_samples,
                     resume,
                     dgram,
+                    shm_bg,
                     requested_selection,
                 );
             });
@@ -821,6 +872,12 @@ impl Inlet {
             post_options: 0,
             skip_scratch: Vec::new(),
             packed_scratch: Vec::new(),
+            shm_meta_scratch: Vec::new(),
+            shm,
+            shm_gen: 0,
+            shm_expected_seq: None,
+            shm_last_ts: None,
+            shm_latency_ticks: 0,
         })
     }
 
@@ -906,8 +963,182 @@ impl Inlet {
         Ok(self.pull_packed(timeout)?.map(|s| s.to_sample()))
     }
 
+    /// Refresh the local SHM handle if a recovery replaced or cleared it.
+    #[inline]
+    fn sync_shm(&mut self) {
+        let gen = self.conn.shm_gen.load(Ordering::Acquire);
+        if gen == self.shm_gen {
+            return;
+        }
+        if let Some(old) = self.shm.take() {
+            self.conn
+                .shm_dropped_prev
+                .fetch_add(old.total_dropped(), Ordering::Release);
+        }
+        self.shm = self.conn.shm.lock().unwrap().clone();
+        self.shm_gen = gen;
+        self.shm_expected_seq = None;
+        self.shm_last_ts = None;
+    }
+
+    /// Update sequence loss, drop gaps, dejitter skips, latency probe, and
+    /// post-processing for one sample popped from SHM.
+    #[inline]
+    fn apply_shm_meta(&mut self, meta: crate::shm::ShmSampleMeta) -> f64 {
+        if meta.lapped_drops > 0 {
+            let start = self.shm_last_ts.unwrap_or(meta.timestamp);
+            if start.is_finite() && meta.timestamp.is_finite() {
+                let mut q = self.conn.shm_drop_gaps.lock().unwrap();
+                if q.len() >= MAX_GAPS {
+                    q.pop_front();
+                }
+                q.push_back(Gap {
+                    start,
+                    end: meta.timestamp,
+                    count: meta.lapped_drops,
+                    kind: GapKind::Dropped,
+                });
+            }
+        }
+        let mut lost_delta = 0u64;
+        if let Some(exp) = self.shm_expected_seq {
+            let total_gap = meta.sample_seq.saturating_sub(exp);
+            lost_delta = total_gap.saturating_sub(meta.lapped_drops);
+            if lost_delta > 0 {
+                self.conn.lost.fetch_add(lost_delta, Ordering::Relaxed);
+                let mut g = self.conn.gaps.lock().unwrap();
+                if let Some(prev) = self.shm_last_ts {
+                    g.on_sample(prev);
+                }
+                g.record_lost(lost_delta);
+                g.on_sample(meta.timestamp);
+            }
+        }
+        let total_skip = lost_delta.saturating_add(meta.lapped_drops);
+        if total_skip > 0 && self.conn.numbered.load(Ordering::Relaxed) {
+            self.post
+                .skip_samples(u32::try_from(total_skip).unwrap_or(u32::MAX));
+        }
+        let next_exp = meta.sample_seq.wrapping_add(1);
+        self.shm_expected_seq = Some(next_exp);
+        self.conn
+            .shm_next_expected
+            .store(next_exp, Ordering::Relaxed);
+        self.shm_last_ts = Some(meta.timestamp);
+        self.conn
+            .shm_last_ts_bits
+            .store(meta.timestamp.to_bits(), Ordering::Relaxed);
+        if self.shm_latency_ticks & 31 == 0 {
+            self.conn.latency.record(meta.timestamp);
+        }
+        self.shm_latency_ticks = self.shm_latency_ticks.wrapping_add(1);
+        self.post.process(meta.timestamp, &mut self.source)
+    }
+
+    /// Read one numeric sample directly into `dst` (native-endian bytes),
+    /// returning its timestamp.
+    ///
+    /// On a `shm/1` connection, copies directly from shared memory into `dst`
+    /// with zero heap allocation and zero mutex locks.
+    pub fn pull_numeric_into(
+        &mut self,
+        format: labstream_wire::Format,
+        dst: &mut [u8],
+        timeout: Duration,
+    ) -> std::io::Result<Option<f64>> {
+        // Ultra-fast path: already-ready sample in SHM avoids `Instant::now()`
+        // and `Arc::clone()` completely.
+        self.sync_shm();
+        if let Some(ref reader) = self.shm {
+            if reader.format() == format {
+                if let Some(meta) = reader.try_pop_into(dst) {
+                    let ts = self.apply_shm_meta(meta);
+                    return Ok(Some(ts));
+                }
+            }
+        }
+        let deadline = if timeout.is_zero() {
+            None
+        } else {
+            Some(Instant::now() + timeout)
+        };
+        loop {
+            self.sync_shm();
+            if let Some(reader) = self.shm.as_ref().cloned() {
+                if reader.format() == format {
+                    let wait = match deadline {
+                        Some(d) => d.saturating_duration_since(Instant::now()),
+                        None => Duration::ZERO,
+                    };
+                    if let Some(meta) = reader.pop_into(dst, wait) {
+                        let ts = self.apply_shm_meta(meta);
+                        return Ok(Some(ts));
+                    }
+                    if reader.is_closed()
+                        && self.conn.recover
+                        && !self.reader_done.load(Ordering::Acquire)
+                        && deadline.is_some_and(|d| Instant::now() < d)
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    return Ok(None);
+                }
+            }
+            let wait = match deadline {
+                Some(d) => d.saturating_duration_since(Instant::now()),
+                None => Duration::ZERO,
+            };
+            return match self.pull_packed_queue(wait)? {
+                Some(s) => {
+                    if let Some(bytes) = s.as_numeric_bytes(format) {
+                        let n = bytes.len().min(dst.len());
+                        dst[..n].copy_from_slice(&bytes[..n]);
+                    }
+                    Ok(Some(s.timestamp))
+                }
+                None => Ok(None),
+            };
+        }
+    }
+
     /// Read one [`PackedSample`] without allocating a `Vec<Value>`.
     pub fn pull_packed(&mut self, timeout: Duration) -> std::io::Result<Option<PackedSample>> {
+        let deadline = if timeout.is_zero() {
+            None
+        } else {
+            Some(Instant::now() + timeout)
+        };
+        loop {
+            self.sync_shm();
+            if let Some(reader) = self.shm.as_ref().cloned() {
+                let wait = match deadline {
+                    Some(d) => d.saturating_duration_since(Instant::now()),
+                    None => Duration::ZERO,
+                };
+                if let Some((mut sample, meta)) = reader.pop_packed(wait) {
+                    sample.timestamp = self.apply_shm_meta(meta);
+                    return Ok(Some(sample));
+                }
+                if reader.is_closed()
+                    && self.conn.recover
+                    && !self.reader_done.load(Ordering::Acquire)
+                    && deadline.is_some_and(|d| Instant::now() < d)
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                return Ok(None);
+            }
+            let wait = match deadline {
+                Some(d) => d.saturating_duration_since(Instant::now()),
+                None => Duration::ZERO,
+            };
+            return self.pull_packed_queue(wait);
+        }
+    }
+
+    fn pull_packed_queue(&mut self, timeout: Duration) -> std::io::Result<Option<PackedSample>> {
         match self.queue.pop_packed_with_skip(timeout) {
             Some((mut s, skipped)) => {
                 // Step 2: advance the dejitterer across lost/dropped samples
@@ -964,34 +1195,75 @@ impl Inlet {
         max: usize,
         timeout: Duration,
     ) -> std::io::Result<usize> {
-        let first = out.len();
-        self.skip_scratch.clear();
-        let numbered = self.conn.numbered.load(Ordering::Relaxed);
-        let got = self.queue.pop_many_packed_with_skips(
-            out,
-            numbered.then_some(&mut self.skip_scratch),
-            max,
-            timeout,
-        );
-        // Every stage runs here, in the fixed order, one sample after another.
-        // SPEC.md 8.5. The state of the filter carries across the block, so a
-        // block gives the timestamps that the same samples get one at a time.
-        if self.skip_scratch.is_empty() {
-            for s in &mut out[first..] {
-                s.timestamp = self.post.process(s.timestamp, &mut self.source);
-            }
+        let deadline = if timeout.is_zero() {
+            None
         } else {
-            let mut next_skip = 0usize;
-            for (idx, s) in out[first..].iter_mut().enumerate() {
-                while next_skip < self.skip_scratch.len() && self.skip_scratch[next_skip].0 == idx {
-                    let n = self.skip_scratch[next_skip].1;
-                    self.post.skip_samples(u32::try_from(n).unwrap_or(u32::MAX));
-                    next_skip += 1;
+            Some(Instant::now() + timeout)
+        };
+        loop {
+            self.sync_shm();
+            if let Some(reader) = self.shm.as_ref().cloned() {
+                let first = out.len();
+                let mut metas = std::mem::take(&mut self.shm_meta_scratch);
+                metas.clear();
+                let wait = match deadline {
+                    Some(d) => d.saturating_duration_since(Instant::now()),
+                    None => Duration::ZERO,
+                };
+                let got = reader.pop_many_packed(out, &mut metas, max, wait);
+                if got > 0 {
+                    for (s, meta) in out[first..].iter_mut().zip(metas.iter().copied()) {
+                        s.timestamp = self.apply_shm_meta(meta);
+                    }
+                    self.shm_meta_scratch = metas;
+                    return Ok(got);
                 }
-                s.timestamp = self.post.process(s.timestamp, &mut self.source);
+                self.shm_meta_scratch = metas;
+                if reader.is_closed()
+                    && self.conn.recover
+                    && !self.reader_done.load(Ordering::Acquire)
+                    && deadline.is_some_and(|d| Instant::now() < d)
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                return Ok(0);
             }
+            let first = out.len();
+            self.skip_scratch.clear();
+            let numbered = self.conn.numbered.load(Ordering::Relaxed);
+            let wait = match deadline {
+                Some(d) => d.saturating_duration_since(Instant::now()),
+                None => Duration::ZERO,
+            };
+            let got = self.queue.pop_many_packed_with_skips(
+                out,
+                numbered.then_some(&mut self.skip_scratch),
+                max,
+                wait,
+            );
+            // Every stage runs here, in the fixed order, one sample after another.
+            // SPEC.md 8.5. The state of the filter carries across the block, so a
+            // block gives the timestamps that the same samples get one at a time.
+            if self.skip_scratch.is_empty() {
+                for s in &mut out[first..] {
+                    s.timestamp = self.post.process(s.timestamp, &mut self.source);
+                }
+            } else {
+                let mut next_skip = 0usize;
+                for (idx, s) in out[first..].iter_mut().enumerate() {
+                    while next_skip < self.skip_scratch.len()
+                        && self.skip_scratch[next_skip].0 == idx
+                    {
+                        let n = self.skip_scratch[next_skip].1;
+                        self.post.skip_samples(u32::try_from(n).unwrap_or(u32::MAX));
+                        next_skip += 1;
+                    }
+                    s.timestamp = self.post.process(s.timestamp, &mut self.source);
+                }
+            }
+            return Ok(got);
         }
-        Ok(got)
     }
 
     /// Read up to `max_samples` into flat `f32` and timestamp buffers with one lock.
@@ -1120,7 +1392,14 @@ impl Inlet {
 
     /// How many samples wait for the application.
     pub fn samples_available(&self) -> usize {
-        self.queue.len()
+        let shm_len = self
+            .conn
+            .shm
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(0, |r| r.len());
+        self.queue.len() + shm_len
     }
 
     /// How many samples the queue has dropped.
@@ -1128,7 +1407,14 @@ impl Inlet {
     /// Nothing on the wire carries this number, so a peer cannot learn it.
     /// SPEC.md 8.7. This exists for a local report only.
     pub fn samples_dropped(&self) -> u64 {
-        self.queue.dropped()
+        let shm_cur = self
+            .conn
+            .shm
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(0, |r| r.total_dropped());
+        self.queue.dropped() + self.conn.shm_dropped_prev.load(Ordering::Acquire) + shm_cur
     }
 
     /// How many samples never reached this inlet, since it opened.
@@ -1173,6 +1459,12 @@ impl Inlet {
         self.conn.on_udp.load(Ordering::SeqCst)
     }
 
+    /// True while the samples of the connection arrive through shared memory,
+    /// with the `shm/1` feature (`docs/extensions.md`, section `shm`).
+    pub fn on_shm(&self) -> bool {
+        self.conn.on_shm.load(Ordering::SeqCst)
+    }
+
     /// The size of the queue, in samples.
     pub fn buffer_capacity(&self) -> usize {
         self.queue.capacity()
@@ -1180,12 +1472,28 @@ impl Inlet {
 
     /// True once the connection ended and every sample has been pulled.
     pub fn is_finished(&self) -> bool {
-        self.reader_done.load(Ordering::SeqCst) && self.queue.is_empty()
+        self.reader_done.load(Ordering::SeqCst) && self.samples_available() == 0
     }
 
     /// Snapshot the health of this inlet in one call. `docs/health.md`.
     pub fn health(&self) -> InletHealth {
-        let gap_count = self.conn.gaps.lock().unwrap().len() + self.queue.drop_gap_count();
+        let pending_shm_drop = {
+            let guard = self.conn.shm.lock().unwrap();
+            if let Some(r) = guard.as_ref() {
+                if self.conn.latency.measure(self.clock.offset()).is_none() {
+                    if let Some(ts) = r.peek_latest_timestamp() {
+                        self.conn.latency.record(ts);
+                    }
+                }
+                usize::from(r.pending_drops() > 0)
+            } else {
+                0
+            }
+        };
+        let gap_count = self.conn.gaps.lock().unwrap().len()
+            + self.queue.drop_gap_count()
+            + self.conn.shm_drop_gaps.lock().unwrap().len()
+            + pending_shm_drop;
         InletHealth {
             latency: self.conn.latency.measure(self.clock.offset()),
             lost: self.samples_lost(),
@@ -1195,6 +1503,7 @@ impl Inlet {
             recoveries: self.recoveries(),
             connected: self.is_connected(),
             on_udp: self.on_udp(),
+            on_shm: self.on_shm(),
             buffered: self.samples_available(),
             buffer_capacity: self.buffer_capacity(),
             gap_count,
@@ -1217,6 +1526,29 @@ impl Inlet {
         let shift = self.gap_clock_shift();
         let mut out = self.conn.gaps.lock().unwrap().snapshot(shift);
         out.extend(self.queue.drop_gaps(shift));
+        for g in self.conn.shm_drop_gaps.lock().unwrap().iter() {
+            out.push(Gap {
+                start: g.start + shift,
+                end: g.end + shift,
+                count: g.count,
+                kind: g.kind,
+            });
+        }
+        if let Some(r) = self.conn.shm.lock().unwrap().as_ref() {
+            let pending = r.pending_drops();
+            if pending > 0 {
+                if let Some(end_ts) = r.peek_latest_timestamp() {
+                    let last = f64::from_bits(self.conn.shm_last_ts_bits.load(Ordering::Relaxed));
+                    let start = if last.is_finite() { last } else { end_ts };
+                    out.push(Gap {
+                        start: start + shift,
+                        end: end_ts + shift,
+                        count: pending,
+                        kind: GapKind::Dropped,
+                    });
+                }
+            }
+        }
         out.sort_by(|a, b| a.start.total_cmp(&b.start));
         out
     }
@@ -1227,6 +1559,14 @@ impl Inlet {
         let shift = self.gap_clock_shift();
         let mut out = self.conn.gaps.lock().unwrap().take(shift);
         out.extend(self.queue.take_drop_gaps(shift));
+        for g in self.conn.shm_drop_gaps.lock().unwrap().drain(..) {
+            out.push(Gap {
+                start: g.start + shift,
+                end: g.end + shift,
+                count: g.count,
+                kind: g.kind,
+            });
+        }
         out.sort_by(|a, b| a.start.total_cmp(&b.start));
         out
     }
@@ -1236,6 +1576,12 @@ impl Drop for Inlet {
     fn drop(&mut self) {
         self.clock.stop();
         self.queue.close();
+        if let Some(r) = self.conn.shm.lock().unwrap().as_ref() {
+            r.close_local();
+        }
+        if let Some(s) = self.conn.tcp_shutdown.lock().unwrap().take() {
+            let _ = s.shutdown(Shutdown::Both);
+        }
     }
 }
 
@@ -1257,6 +1603,7 @@ fn read_and_recover(
     buffer_samples: i32,
     resume: Option<features::ResumeParam>,
     dgram: Option<features::DgramParam>,
+    mut shm: Option<Arc<crate::shm::ShmReader>>,
     requested_selection: Option<features::SelectParam>,
 ) {
     let mut tmp = vec![0u8; 65536];
@@ -1313,74 +1660,91 @@ fn read_and_recover(
             break;
         }
 
-        // Decode everything already buffered before reading more. The whole
-        // read goes into the queue with one lock.
-        let numbered = conn.numbered.load(Ordering::SeqCst);
-        batch_skips.clear();
-        let decoded = decode_buffered(
-            &codec,
-            &mut carry,
-            &mut deducer,
-            numbered.then_some(&mut counter),
-            until.map(|n| (n, &mut resent)),
-            dg.as_ref(),
-            Some(&conn.gaps),
-            &mut batch_skips,
-            &mut batch,
-        );
-        match dg.as_ref() {
-            // The merged stream owns loss, gaps, and dejitter skips for a
-            // `dgram` connection.
-            Some(d) => {
-                d.deliver(&queue, &conn.lost);
-                conn.on_udp.store(d.on_udp(), Ordering::SeqCst);
-            }
-            None => conn.lost.store(counter.lost(), Ordering::SeqCst),
-        }
-        conn.resent.store(resent, Ordering::SeqCst);
-        if !batch.is_empty() {
-            last_data = Instant::now();
-            if let Some(last) = batch.last() {
-                conn.latency.record(last.timestamp);
-            }
-            queue.push_owned_packed_with_skips(&mut batch, &batch_skips);
-        } else if dg.is_none() && !batch_skips.is_empty() {
-            for &(_, count) in &batch_skips {
-                queue.record_skipped(count);
-            }
-        }
-        if decoded.is_err() {
-            // A stream that cannot be decoded is not worth recovering.
-            // The bytes are wrong, not missing.
-            done.store(true, Ordering::SeqCst);
-            clock.stop();
-            queue.close();
-            return;
-        }
-
-        let ended = match sock.read(&mut tmp) {
-            Ok(0) => Some(Ending::Closed),
-            Ok(n) => {
-                carry.extend_from_slice(&tmp[..n]);
-                last_data = Instant::now();
-                None
-            }
-            Err(ref e) if read_timed_out(e) => {
-                // A source that stopped without closing looks exactly like a
-                // quiet one. The watchdog is what tells them apart. On UDP,
-                // no byte arrives on TCP, and the datagrams are the data.
-                let threshold = watchdog_threshold();
-                let on_udp = dg.as_ref().is_some_and(|d| d.heard_within(threshold));
-                if on_udp {
-                    last_data = Instant::now();
+        // While `shm/1` is active, samples travel through shared memory and
+        // the TCP socket only carries end-of-stream and recovery triggers.
+        let ended = if let Some(ref reader) = shm {
+            match sock.read(&mut tmp) {
+                Ok(0) => Some(Ending::Closed),
+                Ok(_) => None,
+                Err(ref e) if read_timed_out(e) => {
+                    if reader.is_closed() {
+                        Some(Ending::Closed)
+                    } else {
+                        None
+                    }
                 }
-                if last_data.elapsed() > threshold {
-                    Some(Ending::Quiet)
-                } else {
+                Err(_) => Some(Ending::Closed),
+            }
+        } else {
+            // Decode everything already buffered before reading more. The whole
+            // read goes into the queue with one lock.
+            let numbered = conn.numbered.load(Ordering::SeqCst);
+            batch_skips.clear();
+            let decoded = decode_buffered(
+                &codec,
+                &mut carry,
+                &mut deducer,
+                numbered.then_some(&mut counter),
+                until.map(|n| (n, &mut resent)),
+                dg.as_ref(),
+                Some(&conn.gaps),
+                &mut batch_skips,
+                &mut batch,
+            );
+            match dg.as_ref() {
+                // The merged stream owns loss, gaps, and dejitter skips for a
+                // `dgram` connection.
+                Some(d) => {
+                    d.deliver(&queue, &conn.lost);
+                    conn.on_udp.store(d.on_udp(), Ordering::SeqCst);
+                }
+                None => conn.lost.store(counter.lost(), Ordering::SeqCst),
+            }
+            conn.resent.store(resent, Ordering::SeqCst);
+            if !batch.is_empty() {
+                last_data = Instant::now();
+                if let Some(last) = batch.last() {
+                    conn.latency.record(last.timestamp);
+                }
+                queue.push_owned_packed_with_skips(&mut batch, &batch_skips);
+            } else if dg.is_none() && !batch_skips.is_empty() {
+                for &(_, count) in &batch_skips {
+                    queue.record_skipped(count);
+                }
+            }
+            if decoded.is_err() {
+                // A stream that cannot be decoded is not worth recovering.
+                // The bytes are wrong, not missing.
+                done.store(true, Ordering::SeqCst);
+                clock.stop();
+                queue.close();
+                return;
+            }
+
+            match sock.read(&mut tmp) {
+                Ok(0) => Some(Ending::Closed),
+                Ok(n) => {
+                    carry.extend_from_slice(&tmp[..n]);
+                    last_data = Instant::now();
                     None
                 }
+                Err(ref e) if read_timed_out(e) => {
+                    // A source that stopped without closing looks exactly like a
+                    // quiet one. The watchdog is what tells them apart. On UDP,
+                    // no byte arrives on TCP, and the datagrams are the data.
+                    let threshold = watchdog_threshold();
+                    let on_udp = dg.as_ref().is_some_and(|d| d.heard_within(threshold));
+                    if on_udp {
+                        last_data = Instant::now();
+                    }
+                    if last_data.elapsed() > threshold {
+                        Some(Ending::Quiet)
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => Some(Ending::Closed),
             }
-            Err(_) => Some(Ending::Closed),
         };
 
         let ending = match ended {
@@ -1390,6 +1754,18 @@ fn read_and_recover(
         let trace = std::env::var_os("LSL_TRACE_RECOVER").is_some();
         if trace {
             eprintln!("TRACE recover: {ending:?}, recover={}", conn.recover);
+        }
+        if ending == Ending::Closed {
+            if let Some(old_shm) = shm.take() {
+                if conn.recover {
+                    if let Some(exp) = old_shm.close_for_recovery() {
+                        counter.resync(exp);
+                    }
+                } else {
+                    old_shm.close_local();
+                }
+            }
+            conn.on_shm.store(false, Ordering::SeqCst);
         }
         if !conn.recover {
             break;
@@ -1451,12 +1827,19 @@ fn read_and_recover(
                     from,
                     requested_selection.as_ref(),
                 ) {
-                    let (s, c, new_codec, new_sel, rest) =
-                        (hs.stream, hs.client, hs.codec, hs.selection, hs.carry);
+                    let (s, c, new_codec, new_sel, new_shm, rest) = (
+                        hs.stream,
+                        hs.client,
+                        hs.codec,
+                        hs.selection,
+                        hs.shm,
+                        hs.carry,
+                    );
                     if trace {
                         eprintln!("TRACE recover: connected again to {}", known.uid);
                     }
                     let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
+                    *conn.tcp_shutdown.lock().unwrap() = s.try_clone().ok();
                     sock = s;
                     carry = rest;
                     codec = new_codec;
@@ -1475,6 +1858,7 @@ fn read_and_recover(
                                 eprintln!("TRACE recover: a new run of the outlet");
                             }
                             counter.restart();
+                            conn.shm_next_expected.store(u64::MAX, Ordering::Release);
                             deducer = labstream_wire::TimestampDeducer::new(eff_srate);
                             clock.reset_offset();
                             conn.gaps.lock().unwrap().reset_cursor();
@@ -1485,7 +1869,15 @@ fn read_and_recover(
                         epoch = Some(a.epoch);
                     }
                     until = answer.map(|a| a.number);
-                    dg = start_dgram(features::dgram_answer(c.features()), &sock, codec, until);
+                    *conn.shm.lock().unwrap() = new_shm.clone();
+                    conn.on_shm.store(new_shm.is_some(), Ordering::SeqCst);
+                    conn.shm_gen.fetch_add(1, Ordering::Release);
+                    shm = new_shm;
+                    dg = if shm.is_some() {
+                        None
+                    } else {
+                        start_dgram(features::dgram_answer(c.features()), &sock, codec, until)
+                    };
                     conn.resumed.store(answer.is_some(), Ordering::SeqCst);
                     conn.numbered.store(uses_seq(&c), Ordering::SeqCst);
                     conn.recoveries.fetch_add(1, Ordering::SeqCst);
@@ -1509,8 +1901,14 @@ fn read_and_recover(
                         requested_selection.as_ref(),
                     ) {
                         Ok(hs) => {
-                            let (s, c, new_codec, new_sel, rest) =
-                                (hs.stream, hs.client, hs.codec, hs.selection, hs.carry);
+                            let (s, c, new_codec, new_sel, new_shm, rest) = (
+                                hs.stream,
+                                hs.client,
+                                hs.codec,
+                                hs.selection,
+                                hs.shm,
+                                hs.carry,
+                            );
                             // The old connection ends here. No sample of it
                             // goes to the queue after this point.
                             if let Some(old) = dg.take() {
@@ -1518,6 +1916,7 @@ fn read_and_recover(
                             }
                             conn.on_udp.store(false, Ordering::SeqCst);
                             let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
+                            *conn.tcp_shutdown.lock().unwrap() = s.try_clone().ok();
                             sock = s;
                             carry = rest;
                             codec = new_codec;
@@ -1538,17 +1937,26 @@ fn read_and_recover(
                             deducer = labstream_wire::TimestampDeducer::new(eff_srate);
                             // A new outlet has a new counter and a new epoch.
                             counter.restart();
+                            conn.shm_next_expected.store(u64::MAX, Ordering::Release);
                             conn.gaps.lock().unwrap().reset_cursor();
                             queue.clear_skips();
                             let answer = features::resume_answer(c.features());
                             epoch = answer.map(|a| a.epoch);
                             until = answer.map(|a| a.number);
-                            dg = start_dgram(
-                                features::dgram_answer(c.features()),
-                                &sock,
-                                codec,
-                                until,
-                            );
+                            *conn.shm.lock().unwrap() = new_shm.clone();
+                            conn.on_shm.store(new_shm.is_some(), Ordering::SeqCst);
+                            conn.shm_gen.fetch_add(1, Ordering::Release);
+                            shm = new_shm;
+                            dg = if shm.is_some() {
+                                None
+                            } else {
+                                start_dgram(
+                                    features::dgram_answer(c.features()),
+                                    &sock,
+                                    codec,
+                                    until,
+                                )
+                            };
                             conn.resumed.store(answer.is_some(), Ordering::SeqCst);
                             conn.numbered.store(uses_seq(&c), Ordering::SeqCst);
                             *conn.info.lock().unwrap() = *fresh;
@@ -1578,6 +1986,10 @@ fn read_and_recover(
     }
 
     conn.connected.store(false, Ordering::SeqCst);
+    conn.on_shm.store(false, Ordering::SeqCst);
+    if let Some(old_shm) = shm.take() {
+        old_shm.close_local();
+    }
     done.store(true, Ordering::SeqCst);
     // No new offset can matter now. A stop also ends a wait for the first one.
     clock.stop();
@@ -1794,6 +2206,7 @@ struct HandshakeResult {
     client: FeedClient,
     codec: labstream_wire::Codec,
     selection: Option<features::SelectParam>,
+    shm: Option<Arc<crate::shm::ShmReader>>,
     carry: Vec<u8>,
 }
 
@@ -1823,6 +2236,12 @@ fn handshake(
     offer.extend(features::offer_resume(allowed, resume_from));
     offer.extend(features::offer_dgram(allowed));
     offer.extend(features::offer_select(allowed, selection));
+    if crate::shm::supported()
+        && info.format != labstream_wire::Format::String
+        && selection.map_or(true, |s| s.decimate <= 1)
+    {
+        offer.extend(features::offer_shm(allowed));
+    }
     let (mut client, request) =
         FeedClient::start_with(params, info.format, info.channel_count as usize, offer);
     stream.write_all(&request)?;
@@ -1875,20 +2294,40 @@ fn handshake(
 
     debug_assert_eq!(client.state(), State::Streaming);
     let active_selection = features::select_answer(client.features());
+    let out_channels = active_selection
+        .as_ref()
+        .map_or(info.channel_count as usize, |sel| {
+            sel.output_channels(info.channel_count as usize)
+        });
     let data_codec = match (&active_selection, client.agreement()) {
-        (Some(sel), Some(ag)) => labstream_wire::Codec::new(
-            info.format,
-            sel.output_channels(info.channel_count as usize),
-            ag.order,
-        )
-        .with_suppress_subnormals(ag.suppress_subnormals),
+        (Some(_), Some(ag)) => labstream_wire::Codec::new(info.format, out_channels, ag.order)
+            .with_suppress_subnormals(ag.suppress_subnormals),
         _ => *client.codec().expect("the handshake set the codec"),
     };
+
+    // Steps 3-4 of `docs/extensions.md` (`shm`): open the segment, verify its
+    // random token, and reply `shm-ok <token>` or `shm-no` on TCP.
+    let shm = if let Some(sp) = features::shm_answer(client.features()) {
+        match crate::shm::ShmReader::open(sp.id, info.format, out_channels) {
+            Ok(reader) => {
+                crate::shm::write_shm_ok(&mut stream, reader.token())?;
+                Some(Arc::new(reader))
+            }
+            Err(_) => {
+                crate::shm::write_shm_no(&mut stream)?;
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     Ok(HandshakeResult {
         stream,
         client,
         codec: data_codec,
         selection: active_selection,
+        shm,
         carry: buf,
     })
 }

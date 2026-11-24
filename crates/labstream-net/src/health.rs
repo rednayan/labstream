@@ -107,6 +107,8 @@ pub struct InletHealth {
     pub connected: bool,
     /// True while samples arrive over UDP (`dgram/1`).
     pub on_udp: bool,
+    /// True while samples arrive through shared memory (`shm/1`).
+    pub on_shm: bool,
     /// Number of samples currently waiting in the inlet buffer.
     pub buffered: usize,
     /// Capacity of the inlet buffer, in samples.

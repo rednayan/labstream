@@ -355,6 +355,37 @@ not share a monotonic clock, so the table gives the tail jitter above p50
 - **History memory.** A 64-channel `f32` sample takes 272 bytes in the
   `resume` history instead of 2064 bytes with `Vec<Value>` (7.6x reduction).
 
+## Step 9: `shm/1` shared memory on one machine
+
+`oracle/latency.py` ran on 2026-11-24 with `oracle` (liblsl) and `shm`
+(`feat/shm`, owner-only lock-free seqlock SPSC ring with Linux `SYS_futex`
+predictive pre-wake and zero-allocation numeric C ABI paths), 3 runs of 5 s
+for each cell:
+
+| outlet -> inlet | load | p50 us | p99 us | p99.9 us | max us | lost | CPU outlet % | CPU inlet % |
+|---|---|---|---|---|---|---|---|---|
+| oracle -> oracle | 512 Hz x 8, chunk 1 | 100 (98-106) | 287 (212-793) | 3478 (275-4419) | 6025 | 0 | 5.6 | 3.3 |
+| shm -> shm | 512 Hz x 8, chunk 1 | 10 (4-10) | 42 (33-45) | 55 (55-56) | 127 | 0 | 1.6 | 1.3 |
+| oracle -> oracle | 512 Hz x 8, chunk 16 | 188 (174-192) | 292 (289-297) | 320 (310-3024) | 3024 | 0 | 0.6 | 0.4 |
+| shm -> shm | 512 Hz x 8, chunk 16 | 38 (34-43) | 69 (59-97) | 72 (60-222) | 223 | 0 | 0.8 | 0.2 |
+| oracle -> oracle | 4000 Hz x 64, chunk 1 | 75 (75-76) | 116 (114-117) | 203 (181-209) | 960 | 0 | 32.2 | 19.3 |
+| shm -> shm | 4000 Hz x 64, chunk 1 | 1 (1-1) | 23 (19-23) | 38 (35-54) | 728 | 0 | 6.4 | 8.6 |
+| oracle -> oracle | 4000 Hz x 64, chunk 32 | 157 (157-166) | 300 (293-310) | 349 (320-363) | 365 | 0 | 2.1 | 1.3 |
+| shm -> shm | 4000 Hz x 64, chunk 32 | 37 (34-38) | 73 (73-79) | 93 (81-97) | 111 | 0 | 1.4 | 0.6 |
+
+- **Latency.** At 4000 Hz x 64 channels, chunk 1, `shm -> shm` reaches 1 us
+  p50 across all 3 runs (75x below liblsl at 75 us and well below the 10 us
+  criterion), 23 us p99, and 38 us p99.9. At chunk 32, p50 drops to 37 us
+  (4.2x below liblsl at 157 us) with max 111 us.
+- **CPU.** At 4000 Hz x 64 channels, chunk 1, outlet plus inlet CPU drops to
+  15.0 % (6.4 % + 8.6 %), down 2.5x from the 38 % baseline and 3.4x below
+  liblsl (51.5 %). At 512 Hz x 8, chunk 1, total CPU drops from 8.9 %
+  (liblsl) to 2.9 %.
+- **Container fallback.** `conformance/oracle/shm_container_test.py` runs an
+  inlet in a separate mount namespace with an isolated `/dev/shm` over
+  loopback: the inlet replies `shm-no`, `labstream_inlet_on_shm` returns 0,
+  and all 200 samples arrive over TCP with 0 errors and 0 lost.
+
 ## What this benchmark does not measure
 
 - **One-way latency between two machines.** Two machines do not share a

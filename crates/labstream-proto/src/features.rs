@@ -39,6 +39,13 @@ pub const DGRAM: &str = "dgram";
 /// [`select_answer`] handle it.
 pub const SELECT: &str = "select";
 
+/// The name of the same-machine shared-memory transport (`docs/extensions.md`,
+/// section `shm`, `docs/roadmap.md`, step 9).
+///
+/// `shm` carries a 16-hex-digit segment identifier in the outlet answer.
+/// [`offer_shm`], [`shm_request`], and [`shm_answer`] handle it.
+pub const SHM: &str = "shm";
+
 /// The features with no parameter that this library implements, each with
 /// its versions.
 pub const SUPPORTED: &[(&str, &[u32])] = &[(SEQ, &[1])];
@@ -554,6 +561,70 @@ pub fn select_answer(agreed: &[Token]) -> Option<SelectParam> {
     param.is_active().then_some(param)
 }
 
+/// The parameter of a `shm/1` answer: a 64-bit random segment identifier
+/// encoded as exactly 16 lowercase hexadecimal digits (`docs/extensions.md`,
+/// section `shm`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShmParam {
+    /// Random 64-bit identifier naming the shared-memory segment.
+    pub id: u64,
+}
+
+impl ShmParam {
+    /// Read a `shm/1` parameter. Returns `None` unless the string holds
+    /// exactly 16 lowercase hexadecimal digits.
+    pub fn parse(param: &str) -> Option<ShmParam> {
+        if param.len() != 16
+            || !param
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return None;
+        }
+        Some(ShmParam {
+            id: u64::from_str_radix(param, 16).ok()?,
+        })
+    }
+
+    /// Encode this parameter as 16 lowercase hexadecimal digits.
+    pub fn to_param(&self) -> String {
+        format!("{:016x}", self.id)
+    }
+
+    /// Build the `shm/1=<id>` wire token.
+    pub fn token(&self) -> Token {
+        Token {
+            name: SHM.to_string(),
+            version: 1,
+            param: Some(self.to_param()),
+        }
+    }
+}
+
+/// True when the configuration allows `shm`.
+fn shm_allowed(allowed: &[String]) -> bool {
+    allowed.iter().any(|a| a == SHM)
+}
+
+/// The `shm/1` token that an inlet offers, or `None` when `shm` is disabled.
+pub fn offer_shm(allowed: &[String]) -> Option<Token> {
+    shm_allowed(allowed).then(|| Token::new(SHM, 1))
+}
+
+/// True when the outlet can answer `shm/1` for this request.
+pub fn shm_request(offered: &[Token], allowed: &[String]) -> bool {
+    shm_allowed(allowed)
+        && offered
+            .iter()
+            .any(|t| t.name == SHM && t.version == 1 && t.param.is_none())
+}
+
+/// Read the outlet's `shm/1=<id>` answer on the inlet side.
+pub fn shm_answer(agreed: &[Token]) -> Option<ShmParam> {
+    let token = agreed.iter().find(|t| t.name == SHM && t.version == 1)?;
+    ShmParam::parse(token.param.as_deref()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,5 +901,32 @@ mod tests {
             &[Token::new(SEQ, 1), P.token(), G.token()],
         );
         assert_eq!(dgram_answer(&unasked), None);
+    }
+
+    #[test]
+    fn shm_token_round_trips_and_negotiates() {
+        let p = ShmParam {
+            id: 0x00ab_cd12_34ef_5678,
+        };
+        assert_eq!(p.to_param(), "00abcd1234ef5678");
+        assert_eq!(ShmParam::parse(&p.to_param()), Some(p));
+        assert_eq!(ShmParam::parse("00abcd1234ef567"), None);
+        assert_eq!(ShmParam::parse("00ABCD1234EF5678"), None);
+
+        let allowed = vec![SEQ.to_string(), SHM.to_string()];
+        assert_eq!(offer_shm(&allowed), Some(Token::new(SHM, 1)));
+        assert_eq!(offer_shm(&all()), None);
+
+        let offered = parse("seq/1 shm/1");
+        assert!(shm_request(&offered, &allowed));
+        assert!(!shm_request(&offered, &all()));
+        assert!(!shm_request(
+            &parse("seq/1 shm/1=00abcd1234ef5678"),
+            &allowed
+        ));
+
+        let on = agreed(&offered, &[Token::new(SEQ, 1), p.token()]);
+        assert_eq!(shm_answer(&on), Some(p));
+        assert_eq!(shm_answer(&agreed(&parse("seq/1"), &[p.token()])), None);
     }
 }

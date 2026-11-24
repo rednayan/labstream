@@ -787,6 +787,14 @@ struct ConsumerEntry {
     queue: Arc<SampleQueue>,
 }
 
+#[derive(Debug)]
+struct ShmConsumerEntry {
+    id: u64,
+    peer: String,
+    writer: Arc<crate::shm::ShmWriter>,
+    channels: Option<Vec<u16>>,
+}
+
 /// A set of consumers that all receive the same sample.
 ///
 /// liblsl calls this the send buffer (`src/send_buffer.h`). Each consumer holds
@@ -809,6 +817,8 @@ pub struct Fanout {
 #[derive(Debug)]
 struct Consumers {
     list: Vec<ConsumerEntry>,
+    shm_list: Vec<ShmConsumerEntry>,
+    ts_scratch: Vec<f64>,
     next_consumer_id: u64,
     next: u64,
     /// Calculates the full timestamp of each pushed sample, in the order of
@@ -825,6 +835,8 @@ impl Default for Consumers {
     fn default() -> Self {
         Consumers {
             list: Vec::new(),
+            shm_list: Vec::new(),
+            ts_scratch: Vec::new(),
             next_consumer_id: 1,
             next: 0,
             deducer: TimestampDeducer::new(IRREGULAR_RATE),
@@ -838,8 +850,7 @@ impl Default for Consumers {
 impl Consumers {
     /// Give one sample its number, its full timestamp, and its place in the
     /// history.
-    fn record_packed(&mut self, s: &PackedSample) {
-        let full = self.deducer.apply(s.timestamp);
+    fn record_packed_with_full(&mut self, s: &PackedSample, full: f64) {
         if let Some(h) = self.history.as_mut() {
             debug_assert_eq!(h.next(), self.next);
             h.push_packed(s.with_timestamp(full));
@@ -1006,6 +1017,35 @@ impl Fanout {
         self.consumers.lock().unwrap().next
     }
 
+    /// Add a direct `shm/1` consumer ring to the fanout.
+    pub(crate) fn add_shm_with_peer(
+        &self,
+        writer: Arc<crate::shm::ShmWriter>,
+        peer: String,
+        channels: Option<Vec<u16>>,
+    ) -> u64 {
+        let mut set = self.consumers.lock().unwrap();
+        let id = set.next_consumer_id;
+        set.next_consumer_id = id.wrapping_add(1);
+        let n = set.next;
+        set.shm_list.push(ShmConsumerEntry {
+            id,
+            peer,
+            writer,
+            channels,
+        });
+        n
+    }
+
+    /// Remove a `shm/1` consumer ring from the fanout.
+    pub(crate) fn remove_shm(&self, writer: &Arc<crate::shm::ShmWriter>) {
+        self.consumers
+            .lock()
+            .unwrap()
+            .shm_list
+            .retain(|c| !Arc::ptr_eq(&c.writer, writer));
+    }
+
     /// Remove a consumer.
     pub fn remove(&self, q: &Arc<SampleQueue>) {
         self.consumers
@@ -1017,14 +1057,16 @@ impl Fanout {
 
     /// How many consumers are connected.
     pub fn count(&self) -> usize {
-        self.consumers.lock().unwrap().list.len()
+        let set = self.consumers.lock().unwrap();
+        set.list.len() + set.shm_list.len()
     }
 
     /// Snapshot the fill and drop state of every connected consumer queue.
     pub fn health(&self) -> OutletHealth {
         let mut set = self.consumers.lock().unwrap();
         set.list.retain(|c| !c.queue.is_closed());
-        let consumers = set
+        set.shm_list.retain(|c| !c.writer.is_closed());
+        let mut consumers: Vec<ConsumerHealth> = set
             .list
             .iter()
             .map(|c| ConsumerHealth {
@@ -1035,6 +1077,13 @@ impl Fanout {
                 dropped: c.queue.dropped(),
             })
             .collect();
+        consumers.extend(set.shm_list.iter().map(|c| ConsumerHealth {
+            id: c.id,
+            peer: c.peer.clone(),
+            fill: c.writer.fill(),
+            capacity: c.writer.requested_capacity(),
+            dropped: c.writer.outlet_dropped(),
+        }));
         OutletHealth {
             consumers,
             history_len: set.history.as_ref().map_or(0, History::len),
@@ -1050,10 +1099,53 @@ impl Fanout {
         self.push_packed(PackedSample::from_sample(s));
     }
 
+    /// Zero-allocation numeric single-sample push: writes directly to any
+    /// `shm/1` consumer rings first, and allocates a [`PackedSample`] only if
+    /// queued consumers or `resume/1` history exist.
+    pub(crate) fn push_numeric_raw(
+        &self,
+        timestamp: f64,
+        format: labstream_wire::Format,
+        bytes: &[u8],
+    ) {
+        let mut set = self.consumers.lock().unwrap();
+        let seq = set.next;
+        let full = set.deducer.apply(timestamp);
+        if !set.shm_list.is_empty() {
+            set.shm_list.retain(|c| !c.writer.is_closed());
+            for c in set.shm_list.iter() {
+                c.writer
+                    .push_raw_one(seq, full, bytes, c.channels.as_deref());
+            }
+        }
+        if !set.list.is_empty() || set.history.is_some() {
+            let s = PackedSample::from_raw_bytes(timestamp, format, Arc::from(bytes));
+            set.list.retain(|c| !c.queue.is_closed());
+            for c in set.list.iter() {
+                c.queue.push_packed(s.clone());
+            }
+            set.record_packed_with_full(&s, full);
+        } else {
+            set.next = set.next.wrapping_add(1);
+        }
+    }
+
     /// Give one [`PackedSample`] to every consumer and the `resume` history,
     /// sharing its `Arc` payload with zero byte copies.
     pub fn push_packed(&self, s: PackedSample) {
         let mut set = self.consumers.lock().unwrap();
+        let seq = set.next;
+        let full = set.deducer.apply(s.timestamp);
+        // SHM consumers get the sample first (zero-hop direct write + wake).
+        if !set.shm_list.is_empty() {
+            set.shm_list.retain(|c| !c.writer.is_closed());
+            if let labstream_wire::PackedValues::Numeric { bytes, .. } = &s.values {
+                for c in set.shm_list.iter() {
+                    c.writer
+                        .push_raw_one(seq, full, bytes, c.channels.as_deref());
+                }
+            }
+        }
         // The consumers get the sample first, so that recording into the
         // history does not delay them. The lock holds both steps, so a new
         // queue and the history still agree on each number.
@@ -1061,7 +1153,7 @@ impl Fanout {
         for c in set.list.iter() {
             c.queue.push_packed(s.clone());
         }
-        set.record_packed(&s);
+        set.record_packed_with_full(&s, full);
     }
 
     /// Give several samples to every consumer, with one lock for the set.
@@ -1083,20 +1175,91 @@ impl Fanout {
             return;
         }
         let mut set = self.consumers.lock().unwrap();
+        let first_seq = set.next;
+        let mut full_ts = std::mem::take(&mut set.ts_scratch);
+        full_ts.clear();
+        full_ts.reserve(samples.len());
+        for s in samples {
+            full_ts.push(set.deducer.apply(s.timestamp));
+        }
+        if !set.shm_list.is_empty() {
+            set.shm_list.retain(|c| !c.writer.is_closed());
+            for c in set.shm_list.iter() {
+                c.writer
+                    .push_batch(first_seq, samples, &full_ts, c.channels.as_deref());
+            }
+        }
         // The consumers first, as in [`Fanout::push_packed`].
         set.list.retain(|c| !c.queue.is_closed());
         for c in set.list.iter() {
             c.queue.push_many_packed(samples);
         }
-        for s in samples {
-            set.record_packed(s);
+        for (s, &full) in samples.iter().zip(&full_ts) {
+            set.record_packed_with_full(s, full);
         }
+        set.ts_scratch = full_ts;
     }
 
-    /// Close every consumer queue.
+    /// Push a flat contiguous numeric chunk with per-sample timestamps, writing
+    /// directly to any `shm/1` consumers before allocating `PackedSample`s for
+    /// queued consumers or `resume/1` history.
+    pub(crate) fn push_chunk_numeric_raw(
+        &self,
+        format: labstream_wire::Format,
+        raw: &[u8],
+        row_bytes: usize,
+        timestamps: &[f64],
+    ) {
+        let n = timestamps.len();
+        if n == 0 || row_bytes == 0 || raw.len() < n * row_bytes {
+            return;
+        }
+        let mut set = self.consumers.lock().unwrap();
+        let first_seq = set.next;
+        let mut full_ts = std::mem::take(&mut set.ts_scratch);
+        full_ts.clear();
+        full_ts.reserve(n);
+        for &t in timestamps {
+            full_ts.push(set.deducer.apply(t));
+        }
+        if !set.shm_list.is_empty() {
+            set.shm_list.retain(|c| !c.writer.is_closed());
+            for c in set.shm_list.iter() {
+                c.writer
+                    .push_chunk_raw(first_seq, raw, row_bytes, &full_ts, c.channels.as_deref());
+            }
+        }
+        if !set.list.is_empty() || set.history.is_some() {
+            let block: Vec<PackedSample> = (0..n)
+                .map(|k| {
+                    PackedSample::from_raw_bytes(
+                        timestamps[k],
+                        format,
+                        Arc::from(&raw[k * row_bytes..(k + 1) * row_bytes]),
+                    )
+                })
+                .collect();
+            set.list.retain(|c| !c.queue.is_closed());
+            for c in set.list.iter() {
+                c.queue.push_many_packed(&block);
+            }
+            for (s, &full) in block.iter().zip(&full_ts) {
+                set.record_packed_with_full(s, full);
+            }
+        } else {
+            set.next = set.next.wrapping_add(n as u64);
+        }
+        set.ts_scratch = full_ts;
+    }
+
+    /// Close every consumer queue and shared-memory ring.
     pub fn close(&self) {
-        for c in self.consumers.lock().unwrap().list.iter() {
+        let set = self.consumers.lock().unwrap();
+        for c in set.list.iter() {
             c.queue.close();
+        }
+        for c in set.shm_list.iter() {
+            c.writer.close();
         }
     }
 }

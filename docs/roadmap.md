@@ -462,6 +462,22 @@ through shared memory. The design is in `docs/extensions.md`, section `shm`.
 3. In a container or on a second machine, the connection uses TCP with no
    error.
 
+**Status:** complete on 2026-11-24. `shm/1` is on by default in
+`labstream.Features` (`docs/extensions.md`, section `shm`).
+`crates/labstream-net/src/shm.rs` implements an owner-only (`0600` on Unix,
+`Local\` on Windows) lock-free seqlock SPSC ring with direct zero-hop writes
+from `Fanout`, direct zero-allocation numeric reads in `Inlet::pull_numeric_into`
+and `labstream-capi`, immediate `shm_unlink` after `shm-ok` on Unix, and Linux
+cross-process `SYS_futex` wakeup with predictive pre-wake. `Inlet::on_shm`
+(`labstream-net`, `labstream`) and `labstream_inlet_on_shm` (`labstream-capi`)
+report active SHM transport. `oracle/latency.py` measures 1 us p50 (23 us p99)
+and 15.0 % total CPU (6.4 % outlet + 8.6 % inlet, down from ~38 % baseline and
+51.5 % liblsl) at 4000 Hz x 64 channels, chunk 1 (`docs/latency.md`).
+`crates/labstream-net/tests/shm_live.rs` and
+`conformance/oracle/shm_container_test.py` (isolated `/dev/shm` mount namespace)
+verify bit-exact delivery, zero `/dev/shm` leftovers, and clean TCP fallback
+with 0 errors. `oracle/interop.py` passes (28 of 28).
+
 ### Step 10: doctor and fallback discovery
 
 Multicast often fails on Wi-Fi and on company networks. `labstream doctor`

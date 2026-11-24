@@ -135,9 +135,10 @@ fn a_cut_connection_to_a_running_outlet_connects_again() {
     proxy.cut();
     let cut_at = k;
 
-    // Push until samples from after the cut arrive. The stale consumer can
-    // still be registered in the outlet, so a wait for consumers proves
-    // nothing here.
+    // Push until the cut triggers a recovery and samples from after the cut
+    // arrive. With `shm/1`, samples can still cross the open ring during the
+    // microseconds before the TCP FIN reaches the background watcher, so keep
+    // pushing until at least one recovery completes.
     let mut after = Vec::new();
     let end = Instant::now() + Duration::from_secs(10);
     while Instant::now() < end {
@@ -145,9 +146,13 @@ fn a_cut_connection_to_a_running_outlet_connects_again() {
         k += 1;
         let mut block = Vec::new();
         let _ = inlet.pull_chunk(&mut block, 1000, Duration::from_millis(20));
-        after.extend(block.into_iter().filter(|s| value(s) as usize > cut_at));
-        if after.len() >= 10 {
-            break;
+        if inlet.recoveries() >= 1 {
+            after.extend(block.into_iter().filter(|s| value(s) as usize > cut_at));
+            if after.len() >= 10 {
+                break;
+            }
+        } else {
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
     assert!(

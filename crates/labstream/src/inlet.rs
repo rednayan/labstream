@@ -366,6 +366,11 @@ impl Inlet {
         self.inner.on_udp()
     }
 
+    /// True while samples arrive through shared memory (`shm/1`).
+    pub fn on_shm(&self) -> bool {
+        self.inner.on_shm()
+    }
+
     /// Snapshot the health of this inlet in one call.
     pub fn health(&self) -> crate::InletHealth {
         self.inner.health()

@@ -286,6 +286,8 @@ pub fn format_table(snap: &TopSnapshot) -> String {
         let host = truncate(&r.hostname, 12);
         let path = if !r.health.connected {
             "DOWN"
+        } else if r.health.on_shm {
+            "SHM"
         } else if r.health.on_udp {
             "UDP"
         } else {

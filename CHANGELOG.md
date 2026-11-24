@@ -7,6 +7,19 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Same-machine shared-memory transport via `shm/1` (`docs/roadmap.md`, step 9,
+  `docs/extensions.md`, section `shm`): `ShmParam` negotiation in
+  `labstream-proto`, owner-only lock-free seqlock SPSC ring in
+  `labstream-net` (`shm.rs`, Linux `shm_open`/`SYS_futex` with predictive
+  pre-wake, macOS POSIX shm, Windows `CreateFileMappingW`/`CreateEventW`),
+  zero-hop `Fanout` writes and zero-allocation `Outlet::push_numeric_raw`,
+  `Outlet::push_chunk_numeric_raw`, and `Inlet::pull_numeric_into` paths,
+  `Inlet::on_shm` (`labstream-net`, `labstream`), `InletHealth::on_shm` (shown
+  as `SHM` in `labstream top`), and `labstream_inlet_on_shm` in
+  `labstream-capi`. At 4000 Hz x 64 channels, chunk 1, `oracle/latency.py`
+  measures 1 us p50 latency and 15.0 % total CPU (down from ~38 % baseline and
+  51.5 % liblsl). Verified with `crates/labstream-net/tests/shm_live.rs` and
+  `conformance/oracle/shm_container_test.py` (isolated `/dev/shm` TCP fallback).
 - Channel and rate selection via `select/1` (`docs/roadmap.md`, step 6,
   `docs/extensions.md`, section `select`): `SelectParam`, `fir_taps`,
   `project_packed`, and `StreamSelector` in `labstream-proto` (bit-exact

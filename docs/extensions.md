@@ -1136,8 +1136,22 @@ host. Thus `shm` needs one more step after the headers:
 The outlet does not send data before step 5. The TCP connection stays open
 in both cases. It carries the end of the stream and the recovery.
 
-The segment must allow access only by the user that owns the outlet. The
-wake-up method and the code for each platform are not part of this page.
+The segment must allow access only by the user that owns the outlet.
+
+Platform behavior:
+
+- **Linux:** `shm_open(O_CREAT | O_EXCL | O_RDWR, 0o600)` plus `fchmod(0o600)`
+  and `mmap(MAP_SHARED)` under `/ls-shm-<id>` (24 bytes, within POSIX name
+  limits). Once the inlet confirms `shm-ok`, the outlet calls `shm_unlink` at
+  once so the entry leaves `/dev/shm` while the kernel holds the mapping until
+  both processes exit. Cross-process wakeup uses `SYS_futex` (`FUTEX_WAIT` and
+  `FUTEX_WAKE` without `FUTEX_PRIVATE_FLAG`) with predictive pre-wake on
+  steady high-rate streams.
+- **macOS and other Unix:** `shm_open(0o600)`, `ftruncate`, `mmap`, and
+  `shm_unlink`, with short spin and 50 us sleep backoff.
+- **Windows:** `CreateFileMappingW` and `OpenFileMappingW` in the session-only
+  `Local\ls-shm-<id>` namespace with `MapViewOfFile`, paired with a named
+  auto-reset `CreateEventW` / `OpenEventW` (`Local\ls-ev-<id>`) for wakeup.
 
 ### A clock model with drift
 

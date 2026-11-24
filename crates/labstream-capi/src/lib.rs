@@ -1190,8 +1190,7 @@ unsafe fn push_packed_numeric<T>(
     };
     let byte_len = n * std::mem::size_of::<T>();
     let raw = std::slice::from_raw_parts(data as *const u8, byte_len);
-    b.outlet
-        .push_packed(PackedSample::from_raw_bytes(t, format, Arc::from(raw)));
+    b.outlet.push_numeric_raw(t, format, raw);
     LSL_NO_ERROR
 }
 
@@ -1359,16 +1358,9 @@ unsafe fn push_chunk_stamped_packed_numeric<T>(
     }
     let row_bytes = chans * std::mem::size_of::<T>();
     let raw = std::slice::from_raw_parts(data as *const u8, samples * row_bytes);
-    let block: Vec<PackedSample> = (0..samples)
-        .map(|k| {
-            PackedSample::from_raw_bytes(
-                *stamps.add(k),
-                format,
-                Arc::from(&raw[k * row_bytes..(k + 1) * row_bytes]),
-            )
-        })
-        .collect();
-    b.outlet.push_samples_packed(block);
+    let stamp_slice = std::slice::from_raw_parts(stamps, samples);
+    b.outlet
+        .push_chunk_numeric_raw(format, raw, row_bytes, stamp_slice);
     LSL_NO_ERROR
 }
 
@@ -2141,17 +2133,14 @@ unsafe fn pull_packed_numeric<T>(
         }
     };
     let cap = buffer_elements.max(0) as usize;
-    match i.pull_packed(Duration::from_secs_f64(timeout.max(0.0))) {
-        Ok(Some(s)) => {
-            if let Some(bytes) = s.as_numeric_bytes(format) {
-                let width = std::mem::size_of::<T>();
-                let copy_bytes = bytes.len().min(cap * width);
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer as *mut u8, copy_bytes);
-            }
+    let width = std::mem::size_of::<T>();
+    let dst = std::slice::from_raw_parts_mut(buffer as *mut u8, cap * width);
+    match i.pull_numeric_into(format, dst, Duration::from_secs_f64(timeout.max(0.0))) {
+        Ok(Some(ts)) => {
             if !ec.is_null() {
                 *ec = LSL_NO_ERROR;
             }
-            s.timestamp
+            ts
         }
         Ok(None) => {
             if !ec.is_null() {
@@ -3514,6 +3503,19 @@ pub unsafe extern "C" fn labstream_outlet_history_disk_bytes(outlet: lsl_outlet)
     b.outlet.history_disk_bytes().min(i64::MAX as u64) as i64
 }
 
+/// True (`1`) when `inlet` is actively receiving samples over shared memory
+/// (`shm/1`, `docs/roadmap.md`, step 9), or `0` otherwise.
+///
+/// # Safety
+/// `inlet` must be null or a valid handle from this library.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_inlet_on_shm(inlet: lsl_inlet) -> i32 {
+    let Some(b) = (inlet as *mut InletBox).as_ref() else {
+        return 0;
+    };
+    b.inlet.as_ref().map_or(0, |i| i32::from(i.on_shm()))
+}
+
 /// True (`1`) when `info` describes a stream published by a `labstream` relay,
 /// or `0` otherwise (`docs/roadmap.md`, step 4).
 ///
@@ -3619,6 +3621,7 @@ mod tests {
             let mut ec = 0;
             lsl_open_stream(inlet, 5.0, &mut ec);
             assert_eq!(ec, LSL_NO_ERROR);
+            assert_eq!(labstream_inlet_on_shm(inlet), 1);
             assert_eq!(labstream_samples_lost(inlet), 0);
             assert_eq!(labstream_samples_resent(inlet), 0);
 

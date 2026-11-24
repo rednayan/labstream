@@ -30,6 +30,7 @@ pub mod outlet;
 pub mod queue;
 pub mod relay;
 pub mod resolver;
+pub(crate) mod shm;
 pub mod xpath;
 
 pub use clock::{ClockState, LiveSource};
