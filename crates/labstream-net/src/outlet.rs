@@ -79,7 +79,16 @@ impl Outlet {
     /// The call binds a TCP port for the data and a UDP port for discovery and
     /// time probes, then starts one thread for each.
     pub fn new(info: StreamInfo) -> std::io::Result<Self> {
-        Outlet::with_flags(info, false)
+        Outlet::with_flags(info, false, config::get().history_limits())
+    }
+
+    /// Publish a stream with explicit `resume` history and disk-spool limits
+    /// (`docs/roadmap.md`, step 3).
+    pub fn new_with_limits(
+        info: StreamInfo,
+        limits: crate::history::HistoryLimits,
+    ) -> std::io::Result<Self> {
+        Outlet::with_flags(info, false, limits)
     }
 
     /// Publish a stream that writes each sample before the push returns.
@@ -102,10 +111,14 @@ impl Outlet {
                 "Synchronous (zero-copy) mode is not supported for string-format streams",
             ));
         }
-        Outlet::with_flags(info, true)
+        Outlet::with_flags(info, true, config::get().history_limits())
     }
 
-    fn with_flags(mut info: StreamInfo, sync_mode: bool) -> std::io::Result<Self> {
+    fn with_flags(
+        mut info: StreamInfo,
+        sync_mode: bool,
+        limits: crate::history::HistoryLimits,
+    ) -> std::io::Result<Self> {
         let cfg = config::get();
         // One stack for each protocol that the configuration allows, the way
         // `stream_outlet_impl::instantiate_stack` builds them.
@@ -158,7 +171,7 @@ impl Outlet {
 
         let shared = Arc::new(Shared {
             info: Mutex::new(info.clone()),
-            fanout: Fanout::with_rate(info.nominal_srate, config::get().history_limits()),
+            fanout: Fanout::with_rate(info.nominal_srate, limits),
             sync: Mutex::new(SyncSet::default()),
             sync_mode,
             stop: Mutex::new(false),
@@ -212,11 +225,26 @@ impl Outlet {
         self.multicast_bound
     }
 
-    /// How many samples the `resume` history holds. Zero when the history
-    /// is off, which is the case until a consumer agrees to `resume/1`.
-    /// `docs/extensions.md`, section `resume`.
+    /// How many samples the `resume` history holds across RAM and disk. Zero
+    /// when the history is off, which is the case until a consumer agrees to
+    /// `resume/1`. `docs/extensions.md`, section `resume`.
     pub fn history_len(&self) -> usize {
         self.shared.fanout.history_len()
+    }
+
+    /// Bytes currently held by the `resume` history in RAM.
+    pub fn history_ram_bytes(&self) -> usize {
+        self.shared.fanout.history_ram_bytes()
+    }
+
+    /// Bytes currently held by the `resume` history in disk spool segments.
+    pub fn history_disk_bytes(&self) -> u64 {
+        self.shared.fanout.history_disk_bytes()
+    }
+
+    /// Path of the active disk spool directory, if disk spilling has started.
+    pub fn history_spool_dir(&self) -> Option<std::path::PathBuf> {
+        self.shared.fanout.history_spool_dir()
     }
 
     /// The number of connected consumers.
@@ -1565,6 +1593,7 @@ mod tests {
         let limits = crate::history::HistoryLimits {
             seconds: 20.0 / RATE,
             bytes: usize::MAX,
+            ..crate::history::HistoryLimits::DEFAULT
         };
         let f = Fanout::with_rate(RATE, limits);
         f.start_history();
@@ -1681,6 +1710,7 @@ mod tests {
         let limits = crate::history::HistoryLimits {
             seconds: 2.0,
             bytes: usize::MAX,
+            ..crate::history::HistoryLimits::DEFAULT
         };
         let f = Fanout::with_rate(RATE, limits);
         f.start_history();

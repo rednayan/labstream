@@ -7,6 +7,20 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Disk-backed store-and-forward for `resume/1` (`docs/roadmap.md`, step 3).
+  When `labstream.ResumeDisk` (in MiB, default 0) is above zero, `History`
+  spills oldest samples from RAM into bounded immutable segment files on
+  disk (optional directory `labstream.ResumeDiskPath`, default system
+  temporary directory) while keeping RAM within `labstream.ResumeMemory`.
+  `Fanout::read_history_packed` reads disk segments outside the `Fanout`
+  lock so resends do not delay live consumers. The outlet removes all spool
+  files and its temporary directory on drop.
+- `Outlet::new_with_limits`, `Outlet::history_ram_bytes`, and
+  `Outlet::history_disk_bytes` in `labstream-net` (plus RAM and disk byte
+  getters on `labstream::Outlet`), and C functions
+  `labstream_outlet_history_ram_bytes` and
+  `labstream_outlet_history_disk_bytes` in `labstream-capi`, with live tests
+  in `crates/labstream-net/tests/store_and_forward_live.rs`.
 - Flat typed chunk methods `push_chunk_{f32,f64,i32,i16,i8,i64}` on
   `Outlet` and `pull_chunk_{f32,f64,i32,i16,i8,i64}` on `Inlet` in both
   `labstream` and `labstream-net` (`docs/roadmap.md`, step 8).

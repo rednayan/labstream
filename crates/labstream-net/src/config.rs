@@ -65,6 +65,11 @@ impl Ini {
         Ok(Ini { values })
     }
 
+    /// True when the file explicitly set `key`.
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.values.contains_key(key)
+    }
+
     /// The text of a key, or a default.
     pub fn text(&self, key: &str, default: &str) -> String {
         self.values
@@ -231,6 +236,13 @@ pub struct Config {
     /// The memory limit of the `resume` history, in MiB.
     /// `labstream.ResumeMemory`.
     pub resume_memory_mib: f64,
+    /// The disk spool limit of the `resume` history, in MiB.
+    /// `labstream.ResumeDisk`, 0 by default (memory only).
+    /// `docs/roadmap.md`, step 3.
+    pub resume_disk_mib: f64,
+    /// Optional directory for disk spool files (`labstream.ResumeDiskPath`).
+    /// `None` uses the system temporary directory.
+    pub resume_disk_path: Option<String>,
     /// When fallback discovery runs. `labstream.FallbackDiscovery`.
     /// `docs/discovery.md`.
     pub fallback_discovery: FallbackDiscovery,
@@ -245,10 +257,12 @@ impl Default for Config {
 }
 
 impl Config {
-    /// The limits of the `resume` history from `labstream.ResumeSeconds`
-    /// and `labstream.ResumeMemory`.
+    /// The limits of the `resume` history from `labstream.ResumeSeconds`,
+    /// `labstream.ResumeMemory`, `labstream.ResumeDisk`, and
+    /// `labstream.ResumeDiskPath`.
     pub fn history_limits(&self) -> crate::history::HistoryLimits {
         let bytes = self.resume_memory_mib * (1u64 << 20) as f64;
+        let disk_bytes = self.resume_disk_mib * (1u64 << 20) as f64;
         crate::history::HistoryLimits {
             seconds: self.resume_seconds,
             bytes: if bytes >= usize::MAX as f64 {
@@ -256,6 +270,12 @@ impl Config {
             } else {
                 bytes as usize
             },
+            disk_bytes: if disk_bytes >= u64::MAX as f64 {
+                u64::MAX
+            } else {
+                disk_bytes as u64
+            },
+            disk_dir: self.resume_disk_path.as_ref().map(std::path::PathBuf::from),
         }
     }
 
@@ -327,6 +347,23 @@ impl Config {
             Err(_) => false,
         });
 
+        let resume_disk_mib = ini.float("labstream.ResumeDisk", 0.0).max(0.0);
+        let resume_disk_path_raw = ini.text("labstream.ResumeDiskPath", "");
+        let resume_disk_path = if resume_disk_path_raw.is_empty() {
+            None
+        } else {
+            Some(resume_disk_path_raw)
+        };
+        // When disk spooling is enabled and `ResumeSeconds` is not explicitly
+        // set, let `ResumeDisk` bound retention instead of cutting off at the
+        // 30 s RAM default.
+        let resume_seconds =
+            if resume_disk_mib > 0.0 && !ini.contains_key("labstream.ResumeSeconds") {
+                f64::INFINITY
+            } else {
+                ini.float("labstream.ResumeSeconds", 30.0).max(0.0)
+            };
+
         Config {
             multicast_port: ini.int("ports.MulticastPort", 16571) as u16,
             base_port: ini.int("ports.BasePort", 16572) as u16,
@@ -334,8 +371,10 @@ impl Config {
             session_id: ini.text("lab.SessionID", "default"),
             known_peers: ini.set("lab.KnownPeers", "{}"),
             features: ini.set("labstream.Features", "{seq, resume, dgram}"),
-            resume_seconds: ini.float("labstream.ResumeSeconds", 30.0).max(0.0),
+            resume_seconds,
             resume_memory_mib: ini.float("labstream.ResumeMemory", 64.0).max(0.0),
+            resume_disk_mib,
+            resume_disk_path,
             fallback_discovery: FallbackDiscovery::parse(
                 &ini.text("labstream.FallbackDiscovery", "auto"),
             ),
@@ -519,6 +558,15 @@ mod tests {
         assert!(!Config::from_ini(&negative, "test")
             .history_limits()
             .allow_history());
+        let disk = Ini::parse("[labstream]\nResumeDisk = 512\nResumeDiskPath = /tmp/spool\n")
+            .expect("a file");
+        let dlimits = Config::from_ini(&disk, "test").history_limits();
+        assert_eq!(dlimits.disk_bytes, 512 << 20);
+        assert_eq!(
+            dlimits.disk_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/spool"))
+        );
+        assert!(dlimits.seconds.is_infinite());
     }
 
     #[test]

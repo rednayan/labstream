@@ -162,4 +162,14 @@ impl Outlet {
     pub fn health(&self) -> crate::OutletHealth {
         self.inner.health()
     }
+
+    /// Bytes currently held by the `resume` history in RAM.
+    pub fn history_ram_bytes(&self) -> usize {
+        self.inner.history_ram_bytes()
+    }
+
+    /// Bytes currently held by the `resume` history in disk spool segments.
+    pub fn history_disk_bytes(&self) -> u64 {
+        self.inner.history_disk_bytes()
+    }
 }

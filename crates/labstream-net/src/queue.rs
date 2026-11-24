@@ -11,7 +11,7 @@
 //! 500 to 599. The writer never waited.
 
 use crate::health::{ConsumerHealth, Gap, GapKind, OutletHealth, MAX_GAPS};
-use crate::history::{History, HistoryLimits};
+use crate::history::{History, HistoryLimits, HistoryRead};
 use labstream_wire::{PackedSample, Sample, TimestampDeducer, IRREGULAR_RATE};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -878,16 +878,34 @@ impl Fanout {
     pub fn start_history(&self) -> bool {
         let mut set = self.consumers.lock().unwrap();
         if set.history.is_none() && set.limits.allow_history() {
-            let h = History::new(set.limits, set.srate, set.next);
+            let h = History::new(set.limits.clone(), set.srate, set.next);
             set.history = Some(h);
         }
         set.history.is_some()
     }
 
-    /// How many samples the history holds. Zero when it is off.
+    /// How many samples the history holds across RAM and disk. Zero when it is off.
     pub fn history_len(&self) -> usize {
         let set = self.consumers.lock().unwrap();
         set.history.as_ref().map_or(0, History::len)
+    }
+
+    /// Bytes currently held by the history in RAM. Zero when it is off.
+    pub fn history_ram_bytes(&self) -> usize {
+        let set = self.consumers.lock().unwrap();
+        set.history.as_ref().map_or(0, History::bytes)
+    }
+
+    /// Bytes currently held by the history in disk spool segments. Zero when off.
+    pub fn history_disk_bytes(&self) -> u64 {
+        let set = self.consumers.lock().unwrap();
+        set.history.as_ref().map_or(0, History::disk_bytes)
+    }
+
+    /// Path of the active disk spool directory, if disk spilling has started.
+    pub fn history_spool_dir(&self) -> Option<std::path::PathBuf> {
+        let set = self.consumers.lock().unwrap();
+        set.history.as_ref().and_then(History::spool_dir)
     }
 
     /// Copy at most `max` samples of the history to the end of `out`, from
@@ -895,8 +913,8 @@ impl Fanout {
     /// full timestamp.
     ///
     /// The call takes the lock of the set one time. A push thus waits for at
-    /// most the copy of `max` samples. [`History::read`] gives the rules and
-    /// the result.
+    /// most the copy of `max` samples (and never for disk I/O).
+    /// [`History::read`] gives the rules and the result.
     pub fn read_history(
         &self,
         from: u64,
@@ -904,12 +922,17 @@ impl Fanout {
         max: usize,
         out: &mut Vec<Sample>,
     ) -> Option<(u64, usize)> {
-        let set = self.consumers.lock().unwrap();
-        set.history.as_ref()?.read(from, until, max, out)
+        let mut packed = Vec::new();
+        let res = self.read_history_packed(from, until, max, &mut packed)?;
+        out.extend(packed.iter().map(PackedSample::to_sample));
+        Some(res)
     }
 
-    /// Share at most `max` packed samples of the history to the end of `out`
-    /// (`Arc` clone only, no payload copy).
+    /// Share at most `max` packed samples of the history to the end of `out`.
+    ///
+    /// RAM reads clone `Arc` handles under the lock; disk reads execute
+    /// outside the `Fanout` lock so live pushes and other consumers never
+    /// wait on disk I/O.
     pub fn read_history_packed(
         &self,
         from: u64,
@@ -917,8 +940,17 @@ impl Fanout {
         max: usize,
         out: &mut Vec<PackedSample>,
     ) -> Option<(u64, usize)> {
-        let set = self.consumers.lock().unwrap();
-        set.history.as_ref()?.read_packed(from, until, max, out)
+        let plan = {
+            let set = self.consumers.lock().unwrap();
+            set.history
+                .as_ref()?
+                .plan_read_packed(from, until, max, out)
+        };
+        match plan {
+            HistoryRead::Empty => None,
+            HistoryRead::Ready { first, count } => Some((first, count)),
+            HistoryRead::Disk(disk_plan) => disk_plan.execute(out),
+        }
     }
 
     /// Add a consumer with its own queue.

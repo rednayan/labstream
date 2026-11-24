@@ -300,6 +300,21 @@ inlet gets each sample after the laptop comes back.
 4. A configuration key sets the limit of the file size. The outlet removes
    the file when it closes.
 
+**Status:** complete on 2026-11-24. `History` spills oldest samples from RAM
+into immutable segment files on disk when `labstream.ResumeDisk` (in MiB,
+default 0) is above zero, with optional `labstream.ResumeDiskPath` (default
+system temporary directory). `Fanout::read_history_packed` plans the segment
+lookup under the lock and reads segment bytes outside the lock so live
+pushes and other consumers never wait on disk I/O. Each segment file and the
+per-outlet spool directory unlink on `Drop` across Linux, Windows, and macOS.
+`Outlet::new_with_limits`, `Outlet::history_ram_bytes`,
+`Outlet::history_disk_bytes`, `labstream_outlet_history_ram_bytes`, and
+`labstream_outlet_history_disk_bytes` expose the state. Unit tests in
+`history.rs` and `config.rs` plus the 153,600-sample (5-minute equivalent at
+512 Hz x 32 channels) live test in
+`crates/labstream-net/tests/store_and_forward_live.rs` verify all four
+criteria.
+
 ### Step 4: relay
 
 A negotiated feature needs labstream on both ends. Most device programs use

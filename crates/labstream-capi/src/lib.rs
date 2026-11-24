@@ -3402,6 +3402,36 @@ pub unsafe extern "C" fn labstream_outlet_consumers(
     n as i32
 }
 
+/// Bytes currently held by the `resume` history of `outlet` in RAM.
+///
+/// Returns `-1` when `outlet` is null.
+///
+/// # Safety
+/// `outlet` must be null or a valid handle from this library.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_outlet_history_ram_bytes(outlet: lsl_outlet) -> i64 {
+    let Some(b) = (outlet as *mut OutletBox).as_ref() else {
+        return -1;
+    };
+    b.outlet.history_ram_bytes().min(i64::MAX as usize) as i64
+}
+
+/// Bytes currently held by the `resume` history of `outlet` on disk
+/// (`labstream.ResumeDisk`, `docs/roadmap.md`, step 3).
+///
+/// Returns `-1` when `outlet` is null, or `0` when disk spooling is off or
+/// has not spilled yet.
+///
+/// # Safety
+/// `outlet` must be null or a valid handle from this library.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_outlet_history_disk_bytes(outlet: lsl_outlet) -> i64 {
+    let Some(b) = (outlet as *mut OutletBox).as_ref() else {
+        return -1;
+    };
+    b.outlet.history_disk_bytes().min(i64::MAX as u64) as i64
+}
+
 /// Run network and discovery diagnostics and return the report as JSON.
 ///
 /// Pass null or an empty string for `peers` to skip remote peer checks, or a
