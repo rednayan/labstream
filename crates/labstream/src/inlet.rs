@@ -95,7 +95,7 @@ pub struct Inlet {
     info: StreamInfo,
     /// The block that `labstream-net` fills. It is kept so that a read allocates
     /// nothing after the first one.
-    scratch: Vec<labstream_wire::Sample>,
+    scratch: Vec<labstream_wire::PackedSample>,
 }
 
 /// The builder for [`Inlet`].
@@ -131,11 +131,12 @@ impl Inlet {
     /// The call gives `None` when the timeout passes with no sample. A timeout of
     /// zero never blocks.
     pub fn pull<T: Scalar>(&mut self, timeout: Duration) -> Result<Option<(f64, Vec<T>)>, Error> {
-        match self.inner.pull(timeout)? {
-            Some(s) => Ok(Some((
-                s.timestamp,
-                s.values.iter().map(T::from_value).collect(),
-            ))),
+        match self.inner.pull_packed(timeout)? {
+            Some(s) => {
+                let mut values = Vec::with_capacity(s.channel_count());
+                T::unpack_into(&s, &mut values);
+                Ok(Some((s.timestamp, values)))
+            }
             None => Ok(None),
         }
     }
@@ -195,11 +196,91 @@ impl Inlet {
             return Ok(0);
         }
         self.scratch.clear();
-        let got = self.inner.pull_chunk(&mut self.scratch, room, timeout)?;
+        let got = self
+            .inner
+            .pull_chunk_packed(&mut self.scratch, room, timeout)?;
         for s in &self.scratch {
-            chunk.push(s.timestamp, s.values.iter().map(T::from_value));
+            chunk.push_packed(s);
         }
         Ok(got)
+    }
+
+    /// Read up to `max_samples` into flat `f32` and timestamp buffers.
+    pub fn pull_chunk_f32(
+        &mut self,
+        data: &mut Vec<f32>,
+        timestamps: &mut Vec<f64>,
+        max_samples: usize,
+        timeout: Duration,
+    ) -> Result<usize, Error> {
+        Ok(self
+            .inner
+            .pull_chunk_f32(data, timestamps, max_samples, timeout)?)
+    }
+
+    /// Read up to `max_samples` into flat `f64` and timestamp buffers.
+    pub fn pull_chunk_f64(
+        &mut self,
+        data: &mut Vec<f64>,
+        timestamps: &mut Vec<f64>,
+        max_samples: usize,
+        timeout: Duration,
+    ) -> Result<usize, Error> {
+        Ok(self
+            .inner
+            .pull_chunk_f64(data, timestamps, max_samples, timeout)?)
+    }
+
+    /// Read up to `max_samples` into flat `i32` and timestamp buffers.
+    pub fn pull_chunk_i32(
+        &mut self,
+        data: &mut Vec<i32>,
+        timestamps: &mut Vec<f64>,
+        max_samples: usize,
+        timeout: Duration,
+    ) -> Result<usize, Error> {
+        Ok(self
+            .inner
+            .pull_chunk_i32(data, timestamps, max_samples, timeout)?)
+    }
+
+    /// Read up to `max_samples` into flat `i16` and timestamp buffers.
+    pub fn pull_chunk_i16(
+        &mut self,
+        data: &mut Vec<i16>,
+        timestamps: &mut Vec<f64>,
+        max_samples: usize,
+        timeout: Duration,
+    ) -> Result<usize, Error> {
+        Ok(self
+            .inner
+            .pull_chunk_i16(data, timestamps, max_samples, timeout)?)
+    }
+
+    /// Read up to `max_samples` into flat `i8` and timestamp buffers.
+    pub fn pull_chunk_i8(
+        &mut self,
+        data: &mut Vec<i8>,
+        timestamps: &mut Vec<f64>,
+        max_samples: usize,
+        timeout: Duration,
+    ) -> Result<usize, Error> {
+        Ok(self
+            .inner
+            .pull_chunk_i8(data, timestamps, max_samples, timeout)?)
+    }
+
+    /// Read up to `max_samples` into flat `i64` and timestamp buffers.
+    pub fn pull_chunk_i64(
+        &mut self,
+        data: &mut Vec<i64>,
+        timestamps: &mut Vec<f64>,
+        max_samples: usize,
+        timeout: Duration,
+    ) -> Result<usize, Error> {
+        Ok(self
+            .inner
+            .pull_chunk_i64(data, timestamps, max_samples, timeout)?)
     }
 
     /// The measured offset between the clock of the source and the local clock.

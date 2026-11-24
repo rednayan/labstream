@@ -12,7 +12,7 @@
 
 use crate::health::{ConsumerHealth, Gap, GapKind, OutletHealth, MAX_GAPS};
 use crate::history::{History, HistoryLimits};
-use labstream_wire::{Sample, TimestampDeducer, IRREGULAR_RATE};
+use labstream_wire::{PackedSample, Sample, TimestampDeducer, IRREGULAR_RATE};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 /// from the front, and a push only adds at the back. `docs/extensions.md`.
 #[derive(Debug)]
 struct Ring {
-    q: VecDeque<Sample>,
+    q: VecDeque<PackedSample>,
     back: u64,
     /// The full timestamp of each sample that leaves the queue, in order.
     /// Only a queue for a `resume` consumer has one. `docs/extensions.md`,
@@ -47,14 +47,14 @@ struct Ring {
 }
 
 impl std::ops::Deref for Ring {
-    type Target = VecDeque<Sample>;
-    fn deref(&self) -> &VecDeque<Sample> {
+    type Target = VecDeque<PackedSample>;
+    fn deref(&self) -> &VecDeque<PackedSample> {
         &self.q
     }
 }
 
 impl std::ops::DerefMut for Ring {
-    fn deref_mut(&mut self) -> &mut VecDeque<Sample> {
+    fn deref_mut(&mut self) -> &mut VecDeque<PackedSample> {
         &mut self.q
     }
 }
@@ -264,6 +264,11 @@ impl SampleQueue {
     /// A full queue loses its oldest sample. The writer carries on, so a slow
     /// reader never holds back the source. SPEC.md 8.7.
     pub fn push(&self, s: Sample) {
+        self.push_packed(PackedSample::from(s));
+    }
+
+    /// Add one [`PackedSample`]. This never waits.
+    pub fn push_packed(&self, s: PackedSample) {
         let mut q = self.inner.lock().unwrap();
         if q.len() >= self.capacity {
             q.drop_front();
@@ -288,6 +293,15 @@ impl SampleQueue {
         if samples.is_empty() {
             return;
         }
+        let packed: Vec<PackedSample> = samples.iter().map(PackedSample::from_sample).collect();
+        self.push_many_packed(&packed);
+    }
+
+    /// Add several [`PackedSample`]s with one lock, cloning only `Arc` handles.
+    pub fn push_many_packed(&self, samples: &[PackedSample]) {
+        if samples.is_empty() {
+            return;
+        }
         let mut q = self.inner.lock().unwrap();
         let mut lost = 0u64;
         for s in samples {
@@ -302,8 +316,11 @@ impl SampleQueue {
         if lost > 0 {
             self.dropped.fetch_add(lost, Ordering::SeqCst);
         }
-        // A block can satisfy more than one reader, so every reader wakes.
-        self.room.notify_all();
+        if samples.len() == 1 {
+            self.room.notify_one();
+        } else {
+            self.room.notify_all();
+        }
     }
 
     /// Move every sample out of `samples` into the queue, with one lock.
@@ -318,9 +335,25 @@ impl SampleQueue {
         self.push_owned_with_skips(samples, &[]);
     }
 
+    /// Move every [`PackedSample`] out of `samples` into the queue, with one lock.
+    pub fn push_owned_packed(&self, samples: &mut Vec<PackedSample>) {
+        self.push_owned_packed_with_skips(samples, &[]);
+    }
+
     /// Like [`SampleQueue::push_owned`], and attach sparse `(batch_index, count)`
     /// skipped-sample counts for loss-aware dejitter (`docs/roadmap.md`, step 2).
     pub(crate) fn push_owned_with_skips(&self, samples: &mut Vec<Sample>, skips: &[(usize, u64)]) {
+        let mut packed: Vec<PackedSample> = samples.drain(..).map(PackedSample::from).collect();
+        self.push_owned_packed_with_skips(&mut packed, skips);
+    }
+
+    /// Like [`SampleQueue::push_owned_packed`], and attach sparse
+    /// `(batch_index, count)` skipped-sample counts for loss-aware dejitter.
+    pub(crate) fn push_owned_packed_with_skips(
+        &self,
+        samples: &mut Vec<PackedSample>,
+        skips: &[(usize, u64)],
+    ) {
         if samples.is_empty() {
             if !skips.is_empty() {
                 let mut q = self.inner.lock().unwrap();
@@ -331,6 +364,7 @@ impl SampleQueue {
             }
             return;
         }
+        let batch_len = samples.len();
         let mut q = self.inner.lock().unwrap();
         debug_assert!(q.deducer.is_none());
         let base_pos = q.back;
@@ -339,9 +373,9 @@ impl SampleQueue {
         }
         let mut lost = 0u64;
         // Samples that the queue drops at once are never moved in.
-        let skip = samples.len().saturating_sub(self.capacity);
+        let skip = batch_len.saturating_sub(self.capacity);
         // Each sample takes a number, also the ones that are never moved in.
-        q.back = q.back.wrapping_add(samples.len() as u64);
+        q.back = q.back.wrapping_add(batch_len as u64);
         if skip > 0 {
             let old_len = q.len() as u64;
             if let Some(old) = q.q.front() {
@@ -371,7 +405,11 @@ impl SampleQueue {
         if lost > 0 {
             self.dropped.fetch_add(lost, Ordering::SeqCst);
         }
-        self.room.notify_all();
+        if batch_len == 1 {
+            self.room.notify_one();
+        } else {
+            self.room.notify_all();
+        }
     }
 
     /// Record `count` skipped samples before the next sample that enters this queue.
@@ -394,13 +432,27 @@ impl SampleQueue {
     /// Returns `None` when the timeout passes with nothing waiting, or when the
     /// queue is closed and empty.
     pub fn pop(&self, timeout: Duration) -> Option<Sample> {
-        self.pop_with_skip(timeout).map(|(s, _)| s)
+        self.pop_packed_with_skip(timeout)
+            .map(|(s, _)| s.to_sample())
+    }
+
+    /// Take the oldest [`PackedSample`], waiting up to `timeout`.
+    pub fn pop_packed(&self, timeout: Duration) -> Option<PackedSample> {
+        self.pop_packed_with_skip(timeout).map(|(s, _)| s)
     }
 
     /// Take the oldest sample and the count of skipped samples immediately
     /// before it, waiting up to `timeout`.
+    #[cfg(test)]
     pub(crate) fn pop_with_skip(&self, timeout: Duration) -> Option<(Sample, u64)> {
-        let end = Instant::now() + timeout;
+        self.pop_packed_with_skip(timeout)
+            .map(|(s, sk)| (s.to_sample(), sk))
+    }
+
+    /// Take the oldest [`PackedSample`] and the count of skipped samples
+    /// immediately before it, waiting up to `timeout`.
+    pub(crate) fn pop_packed_with_skip(&self, timeout: Duration) -> Option<(PackedSample, u64)> {
+        let mut end: Option<Instant> = None;
         let mut q = self.inner.lock().unwrap();
         loop {
             if !q.is_empty() {
@@ -410,10 +462,11 @@ impl SampleQueue {
                 q.note_pop(s.timestamp, s.timestamp);
                 return Some((s, skipped));
             }
-            if *self.closed.lock().unwrap() {
+            if timeout.is_zero() || *self.closed.lock().unwrap() {
                 return None;
             }
-            let left = end.saturating_duration_since(Instant::now());
+            let deadline = *end.get_or_insert_with(|| Instant::now() + timeout);
+            let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return None;
             }
@@ -422,7 +475,7 @@ impl SampleQueue {
                 .wait_timeout(q, left.min(Duration::from_millis(100)))
                 .unwrap();
             q = guard;
-            if result.timed_out() && Instant::now() >= end {
+            if result.timed_out() && Instant::now() >= deadline {
                 if !q.is_empty() {
                     let pos = q.front_number();
                     let skipped = q.take_skips_at(pos);
@@ -448,11 +501,36 @@ impl SampleQueue {
         self.pop_many_with_skips(out, None, max, timeout)
     }
 
+    /// Take every [`PackedSample`] that waits, up to `max`, with one lock.
+    pub fn pop_many_packed(
+        &self,
+        out: &mut Vec<PackedSample>,
+        max: usize,
+        timeout: Duration,
+    ) -> usize {
+        self.pop_many_packed_with_skips(out, None, max, timeout)
+    }
+
     /// Like [`SampleQueue::pop_many`], and append `(offset_in_popped, skipped)`
     /// pairs to `skips_out` when any samples were skipped within this block.
     pub(crate) fn pop_many_with_skips(
         &self,
         out: &mut Vec<Sample>,
+        skips_out: Option<&mut Vec<(usize, u64)>>,
+        max: usize,
+        timeout: Duration,
+    ) -> usize {
+        let mut packed = Vec::new();
+        let got = self.pop_many_packed_with_skips(&mut packed, skips_out, max, timeout);
+        out.extend(packed.iter().map(PackedSample::to_sample));
+        got
+    }
+
+    /// Like [`SampleQueue::pop_many_packed`], and append `(offset_in_popped, skipped)`
+    /// pairs to `skips_out` when any samples were skipped within this block.
+    pub(crate) fn pop_many_packed_with_skips(
+        &self,
+        out: &mut Vec<PackedSample>,
         mut skips_out: Option<&mut Vec<(usize, u64)>>,
         max: usize,
         timeout: Duration,
@@ -460,10 +538,10 @@ impl SampleQueue {
         if max == 0 {
             return 0;
         }
-        let end = Instant::now() + timeout;
+        let mut end: Option<Instant> = None;
         let mut q = self.inner.lock().unwrap();
         let drain_into = |q: &mut Ring,
-                          out: &mut Vec<Sample>,
+                          out: &mut Vec<PackedSample>,
                           skips_out: &mut Option<&mut Vec<(usize, u64)>>,
                           max: usize|
          -> usize {
@@ -510,10 +588,11 @@ impl SampleQueue {
             if !q.is_empty() {
                 return drain_into(&mut q, out, &mut skips_out, max);
             }
-            if *self.closed.lock().unwrap() {
+            if timeout.is_zero() || *self.closed.lock().unwrap() {
                 return 0;
             }
-            let left = end.saturating_duration_since(Instant::now());
+            let deadline = *end.get_or_insert_with(|| Instant::now() + timeout);
+            let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return 0;
             }
@@ -522,7 +601,7 @@ impl SampleQueue {
                 .wait_timeout(q, left.min(Duration::from_millis(100)))
                 .unwrap();
             q = guard;
-            if result.timed_out() && Instant::now() >= end {
+            if result.timed_out() && Instant::now() >= deadline {
                 return drain_into(&mut q, out, &mut skips_out, max);
             }
         }
@@ -539,7 +618,20 @@ impl SampleQueue {
         max: usize,
         timeout: Duration,
     ) -> (usize, u64) {
-        self.pop_many_inner(out, None, max, timeout)
+        let mut packed = Vec::new();
+        let res = self.pop_many_packed_inner(&mut packed, None, max, timeout);
+        out.extend(packed.iter().map(PackedSample::to_sample));
+        res
+    }
+
+    /// Like [`SampleQueue::pop_many_numbered`], returning [`PackedSample`]s.
+    pub fn pop_many_numbered_packed(
+        &self,
+        out: &mut Vec<PackedSample>,
+        max: usize,
+        timeout: Duration,
+    ) -> (usize, u64) {
+        self.pop_many_packed_inner(out, None, max, timeout)
     }
 
     /// Like [`SampleQueue::pop_many_numbered`], and also add the full
@@ -554,22 +646,36 @@ impl SampleQueue {
         max: usize,
         timeout: Duration,
     ) -> (usize, u64) {
-        self.pop_many_inner(out, Some(full), max, timeout)
+        let mut packed = Vec::new();
+        let res = self.pop_many_packed_inner(&mut packed, Some(full), max, timeout);
+        out.extend(packed.iter().map(PackedSample::to_sample));
+        res
     }
 
-    fn pop_many_inner(
+    /// Like [`SampleQueue::pop_many_full`], returning [`PackedSample`]s.
+    pub fn pop_many_full_packed(
         &self,
-        out: &mut Vec<Sample>,
+        out: &mut Vec<PackedSample>,
+        full: &mut Vec<f64>,
+        max: usize,
+        timeout: Duration,
+    ) -> (usize, u64) {
+        self.pop_many_packed_inner(out, Some(full), max, timeout)
+    }
+
+    fn pop_many_packed_inner(
+        &self,
+        out: &mut Vec<PackedSample>,
         mut full: Option<&mut Vec<f64>>,
         max: usize,
         timeout: Duration,
     ) -> (usize, u64) {
-        let end = Instant::now() + timeout;
+        let mut end: Option<Instant> = None;
         let mut q = self.inner.lock().unwrap();
         loop {
             if max == 0
                 || !q.is_empty()
-                || Instant::now() >= end
+                || timeout.is_zero()
                 || *self.closed.lock().unwrap()
                 || self.woken.swap(false, Ordering::SeqCst)
             {
@@ -590,7 +696,11 @@ impl SampleQueue {
                 }
                 return (take, first);
             }
-            let left = end.saturating_duration_since(Instant::now());
+            let deadline = *end.get_or_insert_with(|| Instant::now() + timeout);
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return (0, q.front_number());
+            }
             let (guard, _) = self
                 .room
                 .wait_timeout(q, left.min(Duration::from_millis(100)))
@@ -728,14 +838,11 @@ impl Default for Consumers {
 impl Consumers {
     /// Give one sample its number, its full timestamp, and its place in the
     /// history.
-    fn record(&mut self, s: &Sample) {
+    fn record_packed(&mut self, s: &PackedSample) {
         let full = self.deducer.apply(s.timestamp);
         if let Some(h) = self.history.as_mut() {
             debug_assert_eq!(h.next(), self.next);
-            h.push(Sample {
-                timestamp: full,
-                values: s.values.clone(),
-            });
+            h.push_packed(s.with_timestamp(full));
         }
         self.next = self.next.wrapping_add(1);
     }
@@ -799,6 +906,19 @@ impl Fanout {
     ) -> Option<(u64, usize)> {
         let set = self.consumers.lock().unwrap();
         set.history.as_ref()?.read(from, until, max, out)
+    }
+
+    /// Share at most `max` packed samples of the history to the end of `out`
+    /// (`Arc` clone only, no payload copy).
+    pub fn read_history_packed(
+        &self,
+        from: u64,
+        until: u64,
+        max: usize,
+        out: &mut Vec<PackedSample>,
+    ) -> Option<(u64, usize)> {
+        let set = self.consumers.lock().unwrap();
+        set.history.as_ref()?.read_packed(from, until, max, out)
     }
 
     /// Add a consumer with its own queue.
@@ -895,15 +1015,21 @@ impl Fanout {
     /// A consumer that has gone away is dropped from the set. The call never
     /// waits, whatever any consumer is doing.
     pub fn push(&self, s: &Sample) {
+        self.push_packed(PackedSample::from_sample(s));
+    }
+
+    /// Give one [`PackedSample`] to every consumer and the `resume` history,
+    /// sharing its `Arc` payload with zero byte copies.
+    pub fn push_packed(&self, s: PackedSample) {
         let mut set = self.consumers.lock().unwrap();
-        // The consumers get the sample first, so that the copy into the
+        // The consumers get the sample first, so that recording into the
         // history does not delay them. The lock holds both steps, so a new
         // queue and the history still agree on each number.
         set.list.retain(|c| !c.queue.is_closed());
         for c in set.list.iter() {
-            c.queue.push(s.clone());
+            c.queue.push_packed(s.clone());
         }
-        set.record(s);
+        set.record_packed(&s);
     }
 
     /// Give several samples to every consumer, with one lock for the set.
@@ -914,14 +1040,24 @@ impl Fanout {
         if samples.is_empty() {
             return;
         }
+        let packed: Vec<PackedSample> = samples.iter().map(PackedSample::from_sample).collect();
+        self.push_many_packed(&packed);
+    }
+
+    /// Give several [`PackedSample`]s to every consumer and the `resume`
+    /// history with one lock, sharing each `Arc` payload with zero byte copies.
+    pub fn push_many_packed(&self, samples: &[PackedSample]) {
+        if samples.is_empty() {
+            return;
+        }
         let mut set = self.consumers.lock().unwrap();
-        // The consumers first, as in [`Fanout::push`].
+        // The consumers first, as in [`Fanout::push_packed`].
         set.list.retain(|c| !c.queue.is_closed());
         for c in set.list.iter() {
-            c.queue.push_many(samples);
+            c.queue.push_many_packed(samples);
         }
         for s in samples {
-            set.record(s);
+            set.record_packed(s);
         }
     }
 

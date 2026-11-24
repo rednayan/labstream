@@ -114,6 +114,17 @@ impl<T: Scalar> Chunk<T> {
         self.data.resize(before + self.channels, T::default());
         self.stamps.push(timestamp);
     }
+
+    /// Add one packed sample directly into the flat channel buffer.
+    pub(crate) fn push_packed(&mut self, sample: &labstream_wire::PackedSample) {
+        let before = self.data.len();
+        T::unpack_into(sample, &mut self.data);
+        self.data.truncate(before + self.channels);
+        if self.data.len() < before + self.channels {
+            self.data.resize(before + self.channels, T::default());
+        }
+        self.stamps.push(sample.timestamp);
+    }
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@ use labstream_proto::header::parse_block;
 use labstream_proto::negotiate::{negotiate, FeedRequest, Outcome, ServerStream, LITTLE};
 use labstream_proto::seq::Numbering;
 use labstream_proto::timesync;
-use labstream_wire::{Codec, Sample, TEST_PATTERN_OFFSETS};
+use labstream_wire::{Codec, PackedSample, Sample, TEST_PATTERN_OFFSETS};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
@@ -273,6 +273,12 @@ impl Outlet {
     /// This never waits. A consumer whose queue is full loses its oldest
     /// sample, and every other consumer is unaffected. SPEC.md 8.7 and 8.8.
     pub fn push(&self, s: &Sample) {
+        self.push_packed(PackedSample::from_sample(s));
+    }
+
+    /// Send one [`PackedSample`] to every connected consumer without copying
+    /// its channel payload across consumer queues or the `resume` history.
+    pub fn push_packed(&self, mut s: PackedSample) {
         // Two rules decide the timestamp, and both belong here.
         //
         // A configuration can order every timestamp to be the current clock
@@ -285,39 +291,25 @@ impl Outlet {
         // that sends one delivers values that no application can use.
         //
         // The deduced tag is -1.0, so it passes through untouched.
-        let timestamp = if config::get().force_default_timestamps || s.timestamp == 0.0 {
-            clock()
-        } else {
-            s.timestamp
-        };
-        let owned;
-        let sample = if timestamp == s.timestamp {
-            s
-        } else {
-            owned = Sample {
-                timestamp,
-                values: s.values.clone(),
-            };
-            &owned
-        };
+        s.timestamp = self.stamp(s.timestamp);
         if self.shared.sync_mode {
-            write_blocking(&self.shared, sample);
+            write_blocking_packed(&self.shared, &s);
             return;
         }
-        self.shared.fanout.push(sample);
+        self.shared.fanout.push_packed(s);
     }
 }
 
-/// Write one sample to every consumer, and wait for each write to finish.
+/// Write one packed sample to every consumer, and wait for each write to finish.
 ///
 /// A consumer whose socket fails is dropped. Nothing is queued, so a consumer
 /// that reads slowly holds up the caller. That is the whole point of the mode.
-fn write_blocking(shared: &Shared, sample: &Sample) {
-    write_blocking_many(shared, std::slice::from_ref(sample));
+fn write_blocking_packed(shared: &Shared, sample: &PackedSample) {
+    write_blocking_many_packed(shared, std::slice::from_ref(sample));
 }
 
-/// Write several samples to every consumer, with one write for each consumer.
-fn write_blocking_many(shared: &Shared, samples: &[Sample]) {
+/// Write several packed samples to every consumer, with one write for each consumer.
+fn write_blocking_many_packed(shared: &Shared, samples: &[PackedSample]) {
     let mut out = Vec::new();
     let mut set = shared.sync.lock().unwrap();
     let first = set.next;
@@ -328,7 +320,7 @@ fn write_blocking_many(shared: &Shared, samples: &[Sample]) {
             if let Some(n) = c.numbering.as_mut() {
                 n.before(first.wrapping_add(i as u64), &mut out);
             }
-            if c.codec.encode(s, &mut out).is_err() {
+            if c.codec.encode_packed(s, &mut out).is_err() {
                 return false;
             }
         }
@@ -954,11 +946,11 @@ fn feed_with<W: Write>(
 ) -> usize {
     let mut numbering = numbered.then(Numbering::new);
     // The first history block decides the number of the first record.
-    let mut history = Vec::new();
+    let mut history: Vec<PackedSample> = Vec::new();
     let mut block = match resend {
         Some((fanout, r)) => r
             .from
-            .and_then(|from| fanout.read_history(from, r.until, RESEND_BLOCK, &mut history)),
+            .and_then(|from| fanout.read_history_packed(from, r.until, RESEND_BLOCK, &mut history)),
         None => None,
     };
     // The first record goes out at once, before any sample. A gap before
@@ -968,7 +960,7 @@ fn feed_with<W: Write>(
             Some((first, _)) => first,
             None => {
                 queue
-                    .pop_many_numbered(&mut Vec::new(), 0, Duration::ZERO)
+                    .pop_many_numbered_packed(&mut Vec::new(), 0, Duration::ZERO)
                     .1
             }
         };
@@ -979,7 +971,7 @@ fn feed_with<W: Write>(
         }
         let _ = out.flush();
     }
-    let mut batch: Vec<Sample> = Vec::new();
+    let mut batch: Vec<PackedSample> = Vec::new();
     let mut pending: Vec<u8> = Vec::new();
     let mut count = 0usize;
     let mut sent = 0usize;
@@ -1011,7 +1003,7 @@ fn feed_with<W: Write>(
             if let Some(n) = numbering.as_mut() {
                 n.before(number, &mut pending);
             }
-            if codec.encode(s, &mut pending).is_err() {
+            if codec.encode_packed(s, &mut pending).is_err() {
                 return sent;
             }
             last = Some(number);
@@ -1028,7 +1020,7 @@ fn feed_with<W: Write>(
         history.clear();
         let (fanout, r) = resend.expect("a block comes only from a resend");
         let next = first.wrapping_add(taken as u64);
-        block = fanout.read_history(next, r.until, RESEND_BLOCK, &mut history);
+        block = fanout.read_history_packed(next, r.until, RESEND_BLOCK, &mut history);
     }
     if !pending.is_empty() && !write(&mut pending, &mut count, &mut sent) {
         return sent;
@@ -1064,32 +1056,37 @@ fn feed_with<W: Write>(
         batch.clear();
         full.clear();
         let (taken, first) = if resend.is_some() {
-            queue.pop_many_full(
+            queue.pop_many_full_packed(
                 &mut batch,
                 &mut full,
                 usize::MAX,
                 Duration::from_millis(200),
             )
         } else {
-            queue.pop_many_numbered(&mut batch, usize::MAX, Duration::from_millis(200))
+            queue.pop_many_numbered_packed(&mut batch, usize::MAX, Duration::from_millis(200))
         };
         if taken == 0 {
             continue;
         }
-        for (i, s) in batch.iter_mut().enumerate() {
+        for (i, s) in batch.iter().enumerate() {
             let number = first.wrapping_add(i as u64);
             if let Some(n) = numbering.as_mut() {
                 n.before(number, &mut pending);
             }
             // After a gap, a deduced timestamp has no correct sample before
             // it. `docs/extensions.md`, rule 5 of the resend timestamps.
-            if resend.is_some() {
-                if last.map(|l| l.wrapping_add(1)) != Some(number) {
-                    s.timestamp = full[i];
-                }
+            let ts = if resend.is_some() {
+                let use_ts = if last.map(|l| l.wrapping_add(1)) != Some(number) {
+                    full[i]
+                } else {
+                    s.timestamp
+                };
                 last = Some(number);
-            }
-            if codec.encode(s, &mut pending).is_err() {
+                use_ts
+            } else {
+                s.timestamp
+            };
+            if codec.encode_packed_at(s, ts, &mut pending).is_err() {
                 return sent;
             }
             count += 1;
@@ -1127,7 +1124,16 @@ impl Outlet {
     ///
     /// A blocking outlet writes the samples to each consumer with one write,
     /// before the call returns.
-    pub fn push_samples(&self, mut samples: Vec<Sample>) {
+    pub fn push_samples(&self, samples: Vec<Sample>) {
+        if samples.is_empty() {
+            return;
+        }
+        let packed: Vec<PackedSample> = samples.into_iter().map(PackedSample::from).collect();
+        self.push_samples_packed(packed);
+    }
+
+    /// Send several [`PackedSample`]s, each with its own timestamp, with one lock.
+    pub fn push_samples_packed(&self, mut samples: Vec<PackedSample>) {
         if samples.is_empty() {
             return;
         }
@@ -1135,34 +1141,23 @@ impl Outlet {
             s.timestamp = self.stamp(s.timestamp);
         }
         if self.shared.sync_mode {
-            write_blocking_many(&self.shared, &samples);
+            write_blocking_many_packed(&self.shared, &samples);
             return;
         }
-        self.shared.fanout.push_many(&samples);
+        self.shared.fanout.push_many_packed(&samples);
     }
 
-    /// The timestamp of each sample of a chunk. SPEC.md 9.2.
-    fn chunk_timestamps<'a>(
-        &self,
-        samples: &'a [Sample],
-        timestamp: f64,
-    ) -> impl Iterator<Item = (f64, &'a Sample)> {
+    /// Compute the timestamp of the first sample in a chunk of `count` samples.
+    fn chunk_first_timestamp(&self, count: usize, timestamp: f64) -> f64 {
         let mut first = if timestamp == 0.0 {
             crate::clock()
         } else {
             timestamp
         };
-        if self.info.nominal_srate != 0.0 {
-            first -= (samples.len() - 1) as f64 / self.info.nominal_srate;
+        if self.info.nominal_srate != 0.0 && count > 1 {
+            first -= (count - 1) as f64 / self.info.nominal_srate;
         }
-        samples.iter().enumerate().map(move |(k, s)| {
-            let t = if k == 0 {
-                first
-            } else {
-                labstream_wire::DEDUCED_TIMESTAMP
-            };
-            (t, s)
-        })
+        first
     }
 
     /// Apply the two timestamp rules of [`Outlet::push`].
@@ -1190,14 +1185,93 @@ impl Outlet {
         if samples.is_empty() {
             return;
         }
-        let block: Vec<Sample> = self
-            .chunk_timestamps(samples, timestamp)
-            .map(|(t, s)| Sample {
-                timestamp: t,
-                values: s.values.clone(),
+        let first = self.chunk_first_timestamp(samples.len(), timestamp);
+        let block: Vec<PackedSample> = samples
+            .iter()
+            .enumerate()
+            .map(|(k, s)| {
+                let t = if k == 0 {
+                    first
+                } else {
+                    labstream_wire::DEDUCED_TIMESTAMP
+                };
+                PackedSample::from_sample(s).with_timestamp(t)
             })
             .collect();
-        self.push_samples(block);
+        self.push_samples_packed(block);
+    }
+
+    /// Send several [`PackedSample`]s that share one end timestamp.
+    pub fn push_chunk_packed(&self, samples: &[PackedSample], timestamp: f64) {
+        if samples.is_empty() {
+            return;
+        }
+        let first = self.chunk_first_timestamp(samples.len(), timestamp);
+        let block: Vec<PackedSample> = samples
+            .iter()
+            .enumerate()
+            .map(|(k, s)| {
+                let t = if k == 0 {
+                    first
+                } else {
+                    labstream_wire::DEDUCED_TIMESTAMP
+                };
+                s.with_timestamp(t)
+            })
+            .collect();
+        self.push_samples_packed(block);
+    }
+
+    /// Send a flat interleaved chunk of `f32` channel values sharing `timestamp`.
+    pub fn push_chunk_f32(&self, data: &[f32], timestamp: f64) {
+        self.push_chunk_flat(data, timestamp, PackedSample::from_f32);
+    }
+
+    /// Send a flat interleaved chunk of `f64` channel values sharing `timestamp`.
+    pub fn push_chunk_f64(&self, data: &[f64], timestamp: f64) {
+        self.push_chunk_flat(data, timestamp, PackedSample::from_f64);
+    }
+
+    /// Send a flat interleaved chunk of `i32` channel values sharing `timestamp`.
+    pub fn push_chunk_i32(&self, data: &[i32], timestamp: f64) {
+        self.push_chunk_flat(data, timestamp, PackedSample::from_i32);
+    }
+
+    /// Send a flat interleaved chunk of `i16` channel values sharing `timestamp`.
+    pub fn push_chunk_i16(&self, data: &[i16], timestamp: f64) {
+        self.push_chunk_flat(data, timestamp, PackedSample::from_i16);
+    }
+
+    /// Send a flat interleaved chunk of `i8` channel values sharing `timestamp`.
+    pub fn push_chunk_i8(&self, data: &[i8], timestamp: f64) {
+        self.push_chunk_flat(data, timestamp, PackedSample::from_i8);
+    }
+
+    /// Send a flat interleaved chunk of `i64` channel values sharing `timestamp`.
+    pub fn push_chunk_i64(&self, data: &[i64], timestamp: f64) {
+        self.push_chunk_flat(data, timestamp, PackedSample::from_i64);
+    }
+
+    fn push_chunk_flat<T>(&self, data: &[T], timestamp: f64, pack: fn(f64, &[T]) -> PackedSample) {
+        let chans = self.info.channel_count as usize;
+        if chans == 0 || data.is_empty() || data.len() % chans != 0 {
+            return;
+        }
+        let count = data.len() / chans;
+        let first = self.chunk_first_timestamp(count, timestamp);
+        let block: Vec<PackedSample> = data
+            .chunks_exact(chans)
+            .enumerate()
+            .map(|(k, row)| {
+                let t = if k == 0 {
+                    first
+                } else {
+                    labstream_wire::DEDUCED_TIMESTAMP
+                };
+                pack(t, row)
+            })
+            .collect();
+        self.push_samples_packed(block);
     }
 }
 

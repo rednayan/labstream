@@ -10,6 +10,7 @@
 #![deny(missing_docs)]
 
 use core::fmt;
+use std::sync::Arc;
 
 /// Tag that starts a sample with no timestamp bytes. SPEC.md 7.1.
 pub const TAG_DEDUCED_TIMESTAMP: u8 = 1;
@@ -109,6 +110,407 @@ pub struct Sample {
     pub timestamp: f64,
     /// One value per channel. Every value carries the same format.
     pub values: Vec<Value>,
+}
+
+/// Compact, reference-counted channel values for one sample.
+///
+/// For all fixed-width numeric formats, `Numeric` holds the native-endian
+/// channel bytes contiguously in an `Arc<[u8]>` (e.g., 256 bytes for 64 `f32`
+/// channels instead of 2048 bytes for `Vec<Value>`). Cloning a
+/// [`PackedSample`] across multiple consumer queues and the `resume` history
+/// copies only the `Arc` pointer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PackedValues {
+    /// Contiguous native-endian channel bytes for a fixed-width format.
+    Numeric {
+        /// Channel format (never `String` or `Undefined`).
+        format: Format,
+        /// Contiguous native-endian bytes (`channels * format.width()`).
+        bytes: Arc<[u8]>,
+    },
+    /// Channel byte strings for `Format::String`.
+    Strings(Arc<[Vec<u8>]>),
+}
+
+/// One sample with reference-counted flat payload (`docs/roadmap.md`, step 8).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackedSample {
+    /// The timestamp. `DEDUCED_TIMESTAMP` means the reader derives it.
+    pub timestamp: f64,
+    /// Shared payload for all channels.
+    pub values: PackedValues,
+}
+
+impl PackedSample {
+    /// Build a packed numeric sample from pre-packed native-endian bytes.
+    pub fn from_raw_bytes(timestamp: f64, format: Format, bytes: Arc<[u8]>) -> Self {
+        PackedSample {
+            timestamp,
+            values: PackedValues::Numeric { format, bytes },
+        }
+    }
+
+    /// Build a packed `Float32` sample directly from a flat slice.
+    pub fn from_f32(timestamp: f64, values: &[f32]) -> Self {
+        let mut bytes = Vec::with_capacity(values.len() * 4);
+        for &v in values {
+            bytes.extend_from_slice(&v.to_ne_bytes());
+        }
+        Self::from_raw_bytes(timestamp, Format::Float32, Arc::from(bytes))
+    }
+
+    /// Build a packed `Double64` sample directly from a flat slice.
+    pub fn from_f64(timestamp: f64, values: &[f64]) -> Self {
+        let mut bytes = Vec::with_capacity(values.len() * 8);
+        for &v in values {
+            bytes.extend_from_slice(&v.to_ne_bytes());
+        }
+        Self::from_raw_bytes(timestamp, Format::Double64, Arc::from(bytes))
+    }
+
+    /// Build a packed `Int32` sample directly from a flat slice.
+    pub fn from_i32(timestamp: f64, values: &[i32]) -> Self {
+        let mut bytes = Vec::with_capacity(values.len() * 4);
+        for &v in values {
+            bytes.extend_from_slice(&v.to_ne_bytes());
+        }
+        Self::from_raw_bytes(timestamp, Format::Int32, Arc::from(bytes))
+    }
+
+    /// Build a packed `Int16` sample directly from a flat slice.
+    pub fn from_i16(timestamp: f64, values: &[i16]) -> Self {
+        let mut bytes = Vec::with_capacity(values.len() * 2);
+        for &v in values {
+            bytes.extend_from_slice(&v.to_ne_bytes());
+        }
+        Self::from_raw_bytes(timestamp, Format::Int16, Arc::from(bytes))
+    }
+
+    /// Build a packed `Int8` sample directly from a flat slice.
+    pub fn from_i8(timestamp: f64, values: &[i8]) -> Self {
+        let bytes: Vec<u8> = values.iter().map(|&v| v as u8).collect();
+        Self::from_raw_bytes(timestamp, Format::Int8, Arc::from(bytes))
+    }
+
+    /// Build a packed `Int64` sample directly from a flat slice.
+    pub fn from_i64(timestamp: f64, values: &[i64]) -> Self {
+        let mut bytes = Vec::with_capacity(values.len() * 8);
+        for &v in values {
+            bytes.extend_from_slice(&v.to_ne_bytes());
+        }
+        Self::from_raw_bytes(timestamp, Format::Int64, Arc::from(bytes))
+    }
+
+    /// Build a packed `String` sample from channel byte vectors.
+    pub fn from_strings(timestamp: f64, values: Vec<Vec<u8>>) -> Self {
+        PackedSample {
+            timestamp,
+            values: PackedValues::Strings(Arc::from(values)),
+        }
+    }
+
+    /// Convert a [`Sample`] into a [`PackedSample`].
+    pub fn from_sample(s: &Sample) -> Self {
+        let Some(first) = s.values.first() else {
+            return PackedSample::from_strings(s.timestamp, Vec::new());
+        };
+        match first {
+            Value::F32(_) => {
+                let mut bytes = Vec::with_capacity(s.values.len() * 4);
+                for v in &s.values {
+                    if let Value::F32(x) = v {
+                        bytes.extend_from_slice(&x.to_ne_bytes());
+                    }
+                }
+                Self::from_raw_bytes(s.timestamp, Format::Float32, Arc::from(bytes))
+            }
+            Value::F64(_) => {
+                let mut bytes = Vec::with_capacity(s.values.len() * 8);
+                for v in &s.values {
+                    if let Value::F64(x) = v {
+                        bytes.extend_from_slice(&x.to_ne_bytes());
+                    }
+                }
+                Self::from_raw_bytes(s.timestamp, Format::Double64, Arc::from(bytes))
+            }
+            Value::I32(_) => {
+                let mut bytes = Vec::with_capacity(s.values.len() * 4);
+                for v in &s.values {
+                    if let Value::I32(x) = v {
+                        bytes.extend_from_slice(&x.to_ne_bytes());
+                    }
+                }
+                Self::from_raw_bytes(s.timestamp, Format::Int32, Arc::from(bytes))
+            }
+            Value::I16(_) => {
+                let mut bytes = Vec::with_capacity(s.values.len() * 2);
+                for v in &s.values {
+                    if let Value::I16(x) = v {
+                        bytes.extend_from_slice(&x.to_ne_bytes());
+                    }
+                }
+                Self::from_raw_bytes(s.timestamp, Format::Int16, Arc::from(bytes))
+            }
+            Value::I8(_) => {
+                let mut bytes = Vec::with_capacity(s.values.len());
+                for v in &s.values {
+                    if let Value::I8(x) = v {
+                        bytes.push(*x as u8);
+                    }
+                }
+                Self::from_raw_bytes(s.timestamp, Format::Int8, Arc::from(bytes))
+            }
+            Value::I64(_) => {
+                let mut bytes = Vec::with_capacity(s.values.len() * 8);
+                for v in &s.values {
+                    if let Value::I64(x) = v {
+                        bytes.extend_from_slice(&x.to_ne_bytes());
+                    }
+                }
+                Self::from_raw_bytes(s.timestamp, Format::Int64, Arc::from(bytes))
+            }
+            Value::Str(_) => {
+                let strings: Vec<Vec<u8>> = s
+                    .values
+                    .iter()
+                    .map(|v| match v {
+                        Value::Str(b) => b.clone(),
+                        other => format!("{other:?}").into_bytes(),
+                    })
+                    .collect();
+                Self::from_strings(s.timestamp, strings)
+            }
+        }
+    }
+
+    /// Return a copy of this sample with a different timestamp, sharing the
+    /// underlying `Arc` payload with zero byte copies.
+    pub fn with_timestamp(&self, timestamp: f64) -> Self {
+        PackedSample {
+            timestamp,
+            values: self.values.clone(),
+        }
+    }
+
+    /// Number of channels held in this sample.
+    pub fn channel_count(&self) -> usize {
+        match &self.values {
+            PackedValues::Numeric { format, bytes } => {
+                format.width().map_or(0, |w| bytes.len() / w)
+            }
+            PackedValues::Strings(list) => list.len(),
+        }
+    }
+
+    /// Payload size in bytes, for bounded history accounting.
+    pub fn payload_bytes(&self) -> usize {
+        match &self.values {
+            PackedValues::Numeric { bytes, .. } => bytes.len(),
+            PackedValues::Strings(list) => list
+                .iter()
+                .map(|b| core::mem::size_of::<Vec<u8>>() + b.len())
+                .sum(),
+        }
+    }
+
+    /// Raw native-endian bytes when this sample holds numeric values in `expected` format.
+    pub fn as_numeric_bytes(&self, expected: Format) -> Option<&[u8]> {
+        match &self.values {
+            PackedValues::Numeric { format, bytes } if *format == expected => Some(bytes),
+            _ => None,
+        }
+    }
+
+    /// Append channel values into `dst` as `f32`, converting if the format differs.
+    pub fn push_into_f32(&self, dst: &mut Vec<f32>) {
+        if let Some(bytes) = self.as_numeric_bytes(Format::Float32) {
+            dst.reserve(bytes.len() / 4);
+            for c in bytes.chunks_exact(4) {
+                dst.push(f32::from_ne_bytes([c[0], c[1], c[2], c[3]]));
+            }
+            return;
+        }
+        for v in self.to_sample().values {
+            dst.push(match v {
+                Value::F32(x) => x,
+                Value::F64(x) => x as f32,
+                Value::I32(x) => x as f32,
+                Value::I16(x) => x as f32,
+                Value::I8(x) => x as f32,
+                Value::I64(x) => x as f32,
+                Value::Str(_) => 0.0,
+            });
+        }
+    }
+
+    /// Append channel values into `dst` as `f64`, converting if the format differs.
+    pub fn push_into_f64(&self, dst: &mut Vec<f64>) {
+        if let Some(bytes) = self.as_numeric_bytes(Format::Double64) {
+            dst.reserve(bytes.len() / 8);
+            for c in bytes.chunks_exact(8) {
+                dst.push(f64::from_ne_bytes([
+                    c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
+                ]));
+            }
+            return;
+        }
+        for v in self.to_sample().values {
+            dst.push(match v {
+                Value::F32(x) => x as f64,
+                Value::F64(x) => x,
+                Value::I32(x) => x as f64,
+                Value::I16(x) => x as f64,
+                Value::I8(x) => x as f64,
+                Value::I64(x) => x as f64,
+                Value::Str(_) => 0.0,
+            });
+        }
+    }
+
+    /// Append channel values into `dst` as `i32`, converting if the format differs.
+    pub fn push_into_i32(&self, dst: &mut Vec<i32>) {
+        if let Some(bytes) = self.as_numeric_bytes(Format::Int32) {
+            dst.reserve(bytes.len() / 4);
+            for c in bytes.chunks_exact(4) {
+                dst.push(i32::from_ne_bytes([c[0], c[1], c[2], c[3]]));
+            }
+            return;
+        }
+        for v in self.to_sample().values {
+            dst.push(match v {
+                Value::F32(x) => x as i32,
+                Value::F64(x) => x as i32,
+                Value::I32(x) => x,
+                Value::I16(x) => x as i32,
+                Value::I8(x) => x as i32,
+                Value::I64(x) => x as i32,
+                Value::Str(_) => 0,
+            });
+        }
+    }
+
+    /// Append channel values into `dst` as `i16`, converting if the format differs.
+    pub fn push_into_i16(&self, dst: &mut Vec<i16>) {
+        if let Some(bytes) = self.as_numeric_bytes(Format::Int16) {
+            dst.reserve(bytes.len() / 2);
+            for c in bytes.chunks_exact(2) {
+                dst.push(i16::from_ne_bytes([c[0], c[1]]));
+            }
+            return;
+        }
+        for v in self.to_sample().values {
+            dst.push(match v {
+                Value::F32(x) => x as i16,
+                Value::F64(x) => x as i16,
+                Value::I32(x) => x as i16,
+                Value::I16(x) => x,
+                Value::I8(x) => x as i16,
+                Value::I64(x) => x as i16,
+                Value::Str(_) => 0,
+            });
+        }
+    }
+
+    /// Append channel values into `dst` as `i8`, converting if the format differs.
+    pub fn push_into_i8(&self, dst: &mut Vec<i8>) {
+        if let Some(bytes) = self.as_numeric_bytes(Format::Int8) {
+            dst.reserve(bytes.len());
+            for &b in bytes {
+                dst.push(b as i8);
+            }
+            return;
+        }
+        for v in self.to_sample().values {
+            dst.push(match v {
+                Value::F32(x) => x as i8,
+                Value::F64(x) => x as i8,
+                Value::I32(x) => x as i8,
+                Value::I16(x) => x as i8,
+                Value::I8(x) => x,
+                Value::I64(x) => x as i8,
+                Value::Str(_) => 0,
+            });
+        }
+    }
+
+    /// Append channel values into `dst` as `i64`, converting if the format differs.
+    pub fn push_into_i64(&self, dst: &mut Vec<i64>) {
+        if let Some(bytes) = self.as_numeric_bytes(Format::Int64) {
+            dst.reserve(bytes.len() / 8);
+            for c in bytes.chunks_exact(8) {
+                dst.push(i64::from_ne_bytes([
+                    c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
+                ]));
+            }
+            return;
+        }
+        for v in self.to_sample().values {
+            dst.push(match v {
+                Value::F32(x) => x as i64,
+                Value::F64(x) => x as i64,
+                Value::I32(x) => x as i64,
+                Value::I16(x) => x as i64,
+                Value::I8(x) => x as i64,
+                Value::I64(x) => x,
+                Value::Str(_) => 0,
+            });
+        }
+    }
+
+    /// Expand this packed sample back into a [`Sample`] holding `Vec<Value>`.
+    pub fn to_sample(&self) -> Sample {
+        let values = match &self.values {
+            PackedValues::Numeric { format, bytes } => match format {
+                Format::Float32 => bytes
+                    .chunks_exact(4)
+                    .map(|c| Value::F32(f32::from_ne_bytes([c[0], c[1], c[2], c[3]])))
+                    .collect(),
+                Format::Double64 => bytes
+                    .chunks_exact(8)
+                    .map(|c| {
+                        Value::F64(f64::from_ne_bytes([
+                            c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
+                        ]))
+                    })
+                    .collect(),
+                Format::Int32 => bytes
+                    .chunks_exact(4)
+                    .map(|c| Value::I32(i32::from_ne_bytes([c[0], c[1], c[2], c[3]])))
+                    .collect(),
+                Format::Int16 => bytes
+                    .chunks_exact(2)
+                    .map(|c| Value::I16(i16::from_ne_bytes([c[0], c[1]])))
+                    .collect(),
+                Format::Int8 => bytes.iter().map(|&b| Value::I8(b as i8)).collect(),
+                Format::Int64 => bytes
+                    .chunks_exact(8)
+                    .map(|c| {
+                        Value::I64(i64::from_ne_bytes([
+                            c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
+                        ]))
+                    })
+                    .collect(),
+                Format::String | Format::Undefined => Vec::new(),
+            },
+            PackedValues::Strings(list) => list.iter().map(|b| Value::Str(b.clone())).collect(),
+        };
+        Sample {
+            timestamp: self.timestamp,
+            values,
+        }
+    }
+}
+
+impl From<&Sample> for PackedSample {
+    fn from(s: &Sample) -> Self {
+        PackedSample::from_sample(s)
+    }
+}
+
+impl From<Sample> for PackedSample {
+    fn from(s: Sample) -> Self {
+        PackedSample::from_sample(&s)
+    }
 }
 
 /// The byte order that a connection selected.
@@ -305,6 +707,71 @@ impl Codec {
         self.encode(s, &mut v)?;
         Ok(v)
     }
+
+    /// Write one [`PackedSample`] to the end of `out` using a single slice copy
+    /// on native byte order.
+    pub fn encode_packed(&self, s: &PackedSample, out: &mut Vec<u8>) -> Result<(), Error> {
+        self.encode_packed_at(s, s.timestamp, out)
+    }
+
+    /// Write one [`PackedSample`] with an explicit timestamp override, without
+    /// cloning the sample.
+    pub fn encode_packed_at(
+        &self,
+        s: &PackedSample,
+        timestamp: f64,
+        out: &mut Vec<u8>,
+    ) -> Result<(), Error> {
+        if self.format == Format::Undefined {
+            return Err(Error::UndefinedFormat);
+        }
+        let actual = s.channel_count();
+        if actual != self.channels {
+            return Err(Error::ChannelCountMismatch {
+                expected: self.channels,
+                actual,
+            });
+        }
+
+        if timestamp == DEDUCED_TIMESTAMP {
+            out.push(TAG_DEDUCED_TIMESTAMP);
+        } else {
+            out.push(TAG_TRANSMITTED_TIMESTAMP);
+            let swap = self.order != ByteOrder::native();
+            put!(out, timestamp.to_bits(), swap);
+        }
+
+        let swap = self.swaps();
+        match (self.format, &s.values) {
+            (
+                fmt,
+                PackedValues::Numeric {
+                    format: sfmt,
+                    bytes,
+                },
+            ) if fmt == *sfmt => {
+                if !swap {
+                    out.extend_from_slice(bytes);
+                } else {
+                    let w = fmt.width().unwrap_or(1);
+                    for chunk in bytes.chunks_exact(w) {
+                        for &b in chunk.iter().rev() {
+                            out.push(b);
+                        }
+                    }
+                }
+                Ok(())
+            }
+            (Format::String, PackedValues::Strings(list)) => {
+                for b in list.iter() {
+                    encode_string_len(b.len(), swap, out);
+                    out.extend_from_slice(b);
+                }
+                Ok(())
+            }
+            _ => Err(Error::FormatMismatch),
+        }
+    }
 }
 
 /// Write a string length as a width byte and then the length.
@@ -424,6 +891,95 @@ impl Codec {
         }
 
         Ok((Sample { timestamp, values }, r.pos))
+    }
+
+    /// Read one [`PackedSample`] directly from the start of `buf` without
+    /// allocating a `Vec<Value>`.
+    pub fn decode_packed(&self, buf: &[u8]) -> Result<(PackedSample, usize), Error> {
+        if self.format == Format::Undefined {
+            return Err(Error::UndefinedFormat);
+        }
+        let mut r = Reader::new(buf);
+
+        let tag = r.byte()?;
+        let timestamp = match tag {
+            TAG_DEDUCED_TIMESTAMP => DEDUCED_TIMESTAMP,
+            TAG_TRANSMITTED_TIMESTAMP => {
+                let swap = self.order != ByteOrder::native();
+                f64::from_bits(get!(r, u64, swap))
+            }
+            other => return Err(Error::BadTag(other)),
+        };
+
+        let swap = self.swaps();
+        if let Some(width) = self.format.width() {
+            let total = self.channels.checked_mul(width).ok_or(Error::Truncated)?;
+            let raw = r.take(total)?;
+            let bytes: Arc<[u8]> = if !swap
+                && (!self.suppress_subnormals || !self.format.is_float())
+            {
+                Arc::from(raw)
+            } else {
+                let mut out = Vec::with_capacity(total);
+                match self.format {
+                    Format::Float32 => {
+                        for c in raw.chunks_exact(4) {
+                            let mut bits = if swap {
+                                u32::from_be_bytes([c[0], c[1], c[2], c[3]])
+                            } else {
+                                u32::from_le_bytes([c[0], c[1], c[2], c[3]])
+                            };
+                            if self.suppress_subnormals
+                                && bits != 0
+                                && (bits & 0x7fff_ffff) <= 0x007f_ffff
+                            {
+                                bits &= 0x8000_0000;
+                            }
+                            out.extend_from_slice(&bits.to_ne_bytes());
+                        }
+                    }
+                    Format::Double64 => {
+                        for c in raw.chunks_exact(8) {
+                            let mut bits = if swap {
+                                u64::from_be_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
+                            } else {
+                                u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
+                            };
+                            if self.suppress_subnormals
+                                && bits != 0
+                                && (bits & 0x7fff_ffff_ffff_ffff) <= 0x000f_ffff_ffff_ffff
+                            {
+                                bits &= 0x8000_0000_0000_0000;
+                            }
+                            out.extend_from_slice(&bits.to_ne_bytes());
+                        }
+                    }
+                    _ => {
+                        for chunk in raw.chunks_exact(width) {
+                            if swap {
+                                for &b in chunk.iter().rev() {
+                                    out.push(b);
+                                }
+                            } else {
+                                out.extend_from_slice(chunk);
+                            }
+                        }
+                    }
+                }
+                Arc::from(out)
+            };
+            return Ok((
+                PackedSample::from_raw_bytes(timestamp, self.format, bytes),
+                r.pos,
+            ));
+        }
+
+        let mut strings = Vec::with_capacity(self.channels);
+        for _ in 0..self.channels {
+            let len = decode_string_len(&mut r, swap)?;
+            strings.push(r.take(len)?.to_vec());
+        }
+        Ok((PackedSample::from_strings(timestamp, strings), r.pos))
     }
 
     /// Read as many whole samples as `buf` holds.
@@ -779,5 +1335,37 @@ mod tests {
             })
             .collect();
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn packed_codec_matches_sample_codec_across_formats_and_endianness() {
+        let cases = [
+            (Format::Float32, test_pattern(Format::Float32, 8, 4)),
+            (Format::Double64, test_pattern(Format::Double64, 4, 2)),
+            (Format::Int32, test_pattern(Format::Int32, 6, 4)),
+            (Format::Int16, test_pattern(Format::Int16, 6, 2)),
+            (Format::Int8, test_pattern(Format::Int8, 6, 4)),
+            (Format::Int64, test_pattern(Format::Int64, 4, 2)),
+            (Format::String, test_pattern(Format::String, 3, 4)),
+        ];
+        for order in [ByteOrder::Little, ByteOrder::Big] {
+            for suppress in [false, true] {
+                for (fmt, sample) in &cases {
+                    let codec = Codec::new(*fmt, sample.values.len(), order)
+                        .with_suppress_subnormals(suppress);
+                    let packed = PackedSample::from_sample(sample);
+                    let mut wire_old = Vec::new();
+                    let mut wire_new = Vec::new();
+                    codec.encode(sample, &mut wire_old).unwrap();
+                    codec.encode_packed(&packed, &mut wire_new).unwrap();
+                    assert_eq!(wire_new, wire_old, "encode {fmt:?} {order:?}");
+
+                    let (dec_old, used_old) = codec.decode(&wire_old).unwrap();
+                    let (dec_new, used_new) = codec.decode_packed(&wire_old).unwrap();
+                    assert_eq!(used_new, used_old);
+                    assert_eq!(dec_new.to_sample(), dec_old, "decode {fmt:?} {order:?}");
+                }
+            }
+        }
     }
 }

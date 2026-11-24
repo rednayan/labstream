@@ -316,6 +316,45 @@ not share a monotonic clock, so the table gives the tail jitter above p50
   Linux only. Unicast with `lab.KnownPeers` needed an inbound allow rule in
   Windows Firewall for the UDP return port of the resolver.
 
+## Step 8: flat typed API and shared samples
+
+`oracle/latency.py` ran on 2026-11-24 with `oracle` (liblsl) and `flat`
+(`feat/flat-shared`, `PackedSample` with `Arc<[u8]>` payloads across queues,
+`resume` history, codecs, and C ABI), 3 runs of 5 s for each cell:
+
+| outlet -> inlet | load | p50 us | p99 us | p99.9 us | max us | lost | CPU outlet % | CPU inlet % |
+|---|---|---|---|---|---|---|---|---|
+| oracle -> oracle | 512 Hz x 8, chunk 1 | 96 (91-97) | 191 (187-236) | 494 (488-512) | 992 | 0 | 5.2 | 3.1 |
+| flat -> flat | 512 Hz x 8, chunk 1 | 90 (79-119) | 352 (309-428) | 435 (415-525) | 542 | 0 | 3.6 | 2.5 |
+| oracle -> oracle | 512 Hz x 8, chunk 16 | 293 (283-316) | 581 (514-658) | 660 (626-688) | 688 | 0 | 0.8 | 0.4 |
+| flat -> flat | 512 Hz x 8, chunk 16 | 230 (196-231) | 620 (601-620) | 637 (625-660) | 660 | 0 | 1.7 | 0.8 |
+| oracle -> oracle | 4000 Hz x 64, chunk 1 | 70 (69-72) | 98 (94-100) | 125 (116-127) | 512 | 0 | 30.3 | 18.3 |
+| flat -> flat | 4000 Hz x 64, chunk 1 | 50 (48-50) | 75 (75-76) | 100 (96-103) | 538 | 0 | 16.8 | 11.2 |
+| oracle -> flat | 4000 Hz x 64, chunk 1 | 65 (65-66) | 90 (89-94) | 112 (106-117) | 286 | 0 | 29.1 | 15.9 |
+| flat -> oracle | 4000 Hz x 64, chunk 1 | 67 (64-68) | 94 (93-100) | 132 (128-136) | 354 | 0 | 18.4 | 17.4 |
+| oracle -> oracle | 4000 Hz x 64, chunk 32 | 294 (246-322) | 630 (597-674) | 682 (663-802) | 804 | 0 | 2.8 | 1.6 |
+| flat -> flat | 4000 Hz x 64, chunk 32 | 141 (139-180) | 462 (276-489) | 1004 (641-1788) | 1799 | 0 | 3.4 | 2.2 |
+| oracle -> flat | 4000 Hz x 64, chunk 32 | 148 (139-170) | 255 (242-272) | 337 (265-5633) | 5635 | 0 | 1.8 | 1.3 |
+| flat -> oracle | 4000 Hz x 64, chunk 32 | 170 (164-173) | 496 (416-564) | 1393 (589-5092) | 5096 | 0 | 1.9 | 1.3 |
+
+- **Latency.** At 4000 Hz x 64 channels, p50 drops to 50 us (chunk 1) and
+  141 us (chunk 32), below both the earlier `dgram` build (54 us and 255 us)
+  and liblsl (70 us and 294 us).
+- **Inlet CPU.** At 4000 Hz x 64 channels, chunk 32, inlet CPU drops to
+  2.2 % on UDP (from 3.7 %) and 1.3 % on TCP against liblsl (below liblsl at
+  1.6 %). At chunk 1, inlet user CPU is 1.8 % (0.09 s in 5 s) while kernel
+  `recvfrom` and condvar wakeups take 9.2 % (0.46 s sys), for 11.2 % total
+  against 18.3 % for liblsl.
+- **Fanout with 3 consumers.** `Fanout::push_many_packed` shares one
+  `Arc<[u8]>` across all queues and the `resume` history with zero payload
+  copies (about 3 ms for 20000 samples of 64 channels, under 0.1 % of one
+  core). End-to-end outlet process CPU with 3 loopback UDP consumers is
+  8.43 % against 3.63 % with 1 consumer at chunk 32 (2.32x) and 42.20 %
+  against 17.48 % at chunk 1 (2.41x), because each consumer thread runs its
+  own socket writes.
+- **History memory.** A 64-channel `f32` sample takes 272 bytes in the
+  `resume` history instead of 2064 bytes with `Vec<Value>` (7.6x reduction).
+
 ## What this benchmark does not measure
 
 - **One-way latency between two machines.** Two machines do not share a

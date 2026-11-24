@@ -8,14 +8,15 @@
 //! liblsl has no history. Its outlet makes an empty queue for each new
 //! connection (`src/tcp_server.cpp:746`, `src/consumer_queue.cpp:10-20`).
 
-use labstream_wire::{Sample, Value, IRREGULAR_RATE};
+use labstream_wire::{PackedSample, Sample, Value, IRREGULAR_RATE};
 use std::collections::VecDeque;
 
 /// The bytes that the history counts for each sample: the timestamp and the
 /// number.
 const SAMPLE_BYTES: usize = 16;
 
-/// The bytes that the history counts for each value: the size of a `Value`.
+/// The bytes that the history counts for one value in the legacy [`Sample`]
+/// representation, retained for [`sample_bytes`].
 const VALUE_BYTES: usize = std::mem::size_of::<Value>();
 
 /// The two limits of a history. The history removes its oldest sample when
@@ -90,6 +91,14 @@ pub fn sample_bytes(s: &Sample) -> usize {
     SAMPLE_BYTES + VALUE_BYTES * s.values.len() + strings
 }
 
+/// The memory that the history counts for one [`PackedSample`].
+///
+/// For numeric streams, this is `16 + channels * format_width` (e.g. 272 bytes
+/// for 64 `f32` channels instead of 2064 bytes with `Vec<Value>`).
+pub fn packed_sample_bytes(s: &PackedSample) -> usize {
+    SAMPLE_BYTES + s.payload_bytes()
+}
+
 /// The last samples of an outlet, with their numbers.
 ///
 /// The samples have the numbers `back - len .. back`, with no gap. The
@@ -97,7 +106,7 @@ pub fn sample_bytes(s: &Sample) -> usize {
 /// removes samples only from the front.
 #[derive(Debug)]
 pub struct History {
-    samples: VecDeque<Sample>,
+    samples: VecDeque<PackedSample>,
     back: u64,
     bytes: usize,
     max_samples: usize,
@@ -149,9 +158,14 @@ impl History {
     /// limits. A sample that is larger than the memory limit is not kept,
     /// but it takes its number.
     pub fn push(&mut self, s: Sample) {
+        self.push_packed(PackedSample::from(s));
+    }
+
+    /// Add one [`PackedSample`] without copying its `Arc` payload.
+    pub fn push_packed(&mut self, s: PackedSample) {
         debug_assert!(s.timestamp != labstream_wire::DEDUCED_TIMESTAMP);
         self.back = self.back.wrapping_add(1);
-        let size = sample_bytes(&s);
+        let size = packed_sample_bytes(&s);
         if size > self.max_bytes || self.max_samples == 0 {
             self.samples.clear();
             self.bytes = 0;
@@ -161,7 +175,7 @@ impl History {
         self.samples.push_back(s);
         while self.samples.len() > self.max_samples || self.bytes > self.max_bytes {
             match self.samples.pop_front() {
-                Some(old) => self.bytes -= sample_bytes(&old),
+                Some(old) => self.bytes -= packed_sample_bytes(&old),
                 None => break,
             }
         }
@@ -183,6 +197,21 @@ impl History {
         until: u64,
         max: usize,
         out: &mut Vec<Sample>,
+    ) -> Option<(u64, usize)> {
+        let mut packed = Vec::new();
+        let res = self.read_packed(from, until, max, &mut packed)?;
+        out.extend(packed.iter().map(PackedSample::to_sample));
+        Some(res)
+    }
+
+    /// Share at most `max` packed samples to the end of `out` (`Arc` clone
+    /// only, no payload copy), from `from` and below `until`.
+    pub fn read_packed(
+        &self,
+        from: u64,
+        until: u64,
+        max: usize,
+        out: &mut Vec<PackedSample>,
     ) -> Option<(u64, usize)> {
         let oldest = self.oldest();
         // The numbers wrap. A distance from the oldest number gives a
@@ -244,8 +273,8 @@ mod tests {
 
     #[test]
     fn the_memory_limit_keeps_the_newest_samples() {
-        let one = sample_bytes(&sample(0));
-        assert_eq!(one, 16 + VALUE_BYTES);
+        let one = packed_sample_bytes(&PackedSample::from(sample(0)));
+        assert_eq!(one, 16 + 4);
         let limits = HistoryLimits {
             seconds: 1000.0,
             bytes: 10 * one,
@@ -261,7 +290,7 @@ mod tests {
 
     #[test]
     fn an_irregular_stream_uses_the_memory_limit_only() {
-        let one = sample_bytes(&sample(0));
+        let one = packed_sample_bytes(&PackedSample::from(sample(0)));
         let limits = HistoryLimits {
             seconds: 0.001,
             bytes: 50 * one,
@@ -281,18 +310,26 @@ mod tests {
         };
         assert_eq!(sample_bytes(&marker("")), 16 + VALUE_BYTES);
         assert_eq!(sample_bytes(&marker("stimulus")), 16 + VALUE_BYTES + 8);
+        let packed_long = |text: &str| packed_sample_bytes(&PackedSample::from(marker(text)));
 
         // Long markers reach the memory limit first.
         let long = "x".repeat(1000);
         let limits = HistoryLimits {
             seconds: 10.0,
-            bytes: 3 * sample_bytes(&marker(&long)),
+            bytes: 3 * packed_long(&long),
         };
         let mut h = History::new(limits, IRREGULAR_RATE, 0);
         for _ in 0..5 {
             h.push(marker(&long));
         }
         assert_eq!(h.len(), 3);
+    }
+
+    #[test]
+    fn packed_history_uses_a_fraction_of_value_memory_for_64_channels() {
+        let wide = PackedSample::from_f32(1.0, &[0.0f32; 64]);
+        // 16 bytes metadata + 64 * 4 bytes payload = 272 bytes (vs 2064 with Vec<Value>).
+        assert_eq!(packed_sample_bytes(&wide), 272);
     }
 
     #[test]

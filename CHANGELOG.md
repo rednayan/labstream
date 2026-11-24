@@ -7,6 +7,18 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Flat typed chunk methods `push_chunk_{f32,f64,i32,i16,i8,i64}` on
+  `Outlet` and `pull_chunk_{f32,f64,i32,i16,i8,i64}` on `Inlet` in both
+  `labstream` and `labstream-net` (`docs/roadmap.md`, step 8).
+- `PackedSample` and `PackedValues` in `labstream-wire`, with
+  `Codec::encode_packed`, `Codec::encode_packed_at`, and
+  `Codec::decode_packed`. Numeric samples share one `Arc<[u8]>` payload
+  across consumer queues and the `resume` history with zero payload copies,
+  and cut `resume` history memory by 7.6x for 64-channel `f32` streams.
+- Fast `PackedSample` paths across `SampleQueue`, `Fanout`, `History`,
+  `dgram_out`, `dgram_in`, and the numeric C ABI push and pull calls in
+  `labstream-capi`, with live tests in
+  `crates/labstream-net/tests/flat_shared_live.rs`.
 - The `seq/1` feature between two labstream peers (`docs/extensions.md`). A
   labstream inlet offers it in the request header `Labstream-Features`, and
   a labstream outlet answers it. liblsl ignores the header on both sides.

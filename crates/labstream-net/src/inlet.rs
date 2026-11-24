@@ -9,7 +9,7 @@ use labstream_proto::discovery;
 use labstream_proto::features;
 use labstream_proto::feed::{FeedClient, FeedParams, State, TestPatternError};
 use labstream_time::{flags, PostProcessor};
-use labstream_wire::Sample;
+use labstream_wire::{PackedSample, Sample};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -629,6 +629,8 @@ pub struct Inlet {
     post_options: u32,
     /// Reusable scratch buffer for sparse skip offsets during `pull_chunk`.
     skip_scratch: Vec<(usize, u64)>,
+    /// Reusable scratch buffer for packed samples during typed chunk pulls.
+    packed_scratch: Vec<PackedSample>,
     /// Set once the reader thread stops.
     reader_done: Arc<AtomicBool>,
     conn: Arc<ConnState>,
@@ -782,6 +784,7 @@ impl Inlet {
             post: PostProcessor::new(),
             post_options: 0,
             skip_scratch: Vec::new(),
+            packed_scratch: Vec::new(),
         })
     }
 
@@ -849,7 +852,12 @@ impl Inlet {
     /// measurement, for up to 5 s. The timeout of the call does not limit that
     /// wait. liblsl waits the same time (`src/stream_inlet_impl.h:44`).
     pub fn pull(&mut self, timeout: Duration) -> std::io::Result<Option<Sample>> {
-        match self.queue.pop_with_skip(timeout) {
+        Ok(self.pull_packed(timeout)?.map(|s| s.to_sample()))
+    }
+
+    /// Read one [`PackedSample`] without allocating a `Vec<Value>`.
+    pub fn pull_packed(&mut self, timeout: Duration) -> std::io::Result<Option<PackedSample>> {
+        match self.queue.pop_packed_with_skip(timeout) {
             Some((mut s, skipped)) => {
                 // Step 2: advance the dejitterer across lost/dropped samples
                 // only when `seq/1` is active on this connection.
@@ -889,10 +897,26 @@ impl Inlet {
         max: usize,
         timeout: Duration,
     ) -> std::io::Result<usize> {
+        let mut scratch = std::mem::take(&mut self.packed_scratch);
+        scratch.clear();
+        let got = self.pull_chunk_packed(&mut scratch, max, timeout)?;
+        out.extend(scratch.iter().map(PackedSample::to_sample));
+        self.packed_scratch = scratch;
+        Ok(got)
+    }
+
+    /// Read every waiting [`PackedSample`], up to `max`, with one lock and
+    /// without allocating a `Vec<Value>`.
+    pub fn pull_chunk_packed(
+        &mut self,
+        out: &mut Vec<PackedSample>,
+        max: usize,
+        timeout: Duration,
+    ) -> std::io::Result<usize> {
         let first = out.len();
         self.skip_scratch.clear();
         let numbered = self.conn.numbered.load(Ordering::Relaxed);
-        let got = self.queue.pop_many_with_skips(
+        let got = self.queue.pop_many_packed_with_skips(
             out,
             numbered.then_some(&mut self.skip_scratch),
             max,
@@ -916,6 +940,130 @@ impl Inlet {
                 s.timestamp = self.post.process(s.timestamp, &mut self.source);
             }
         }
+        Ok(got)
+    }
+
+    /// Read up to `max_samples` into flat `f32` and timestamp buffers with one lock.
+    pub fn pull_chunk_f32(
+        &mut self,
+        data: &mut Vec<f32>,
+        timestamps: &mut Vec<f64>,
+        max_samples: usize,
+        timeout: Duration,
+    ) -> std::io::Result<usize> {
+        self.pull_chunk_flat(
+            data,
+            timestamps,
+            max_samples,
+            timeout,
+            PackedSample::push_into_f32,
+        )
+    }
+
+    /// Read up to `max_samples` into flat `f64` and timestamp buffers with one lock.
+    pub fn pull_chunk_f64(
+        &mut self,
+        data: &mut Vec<f64>,
+        timestamps: &mut Vec<f64>,
+        max_samples: usize,
+        timeout: Duration,
+    ) -> std::io::Result<usize> {
+        self.pull_chunk_flat(
+            data,
+            timestamps,
+            max_samples,
+            timeout,
+            PackedSample::push_into_f64,
+        )
+    }
+
+    /// Read up to `max_samples` into flat `i32` and timestamp buffers with one lock.
+    pub fn pull_chunk_i32(
+        &mut self,
+        data: &mut Vec<i32>,
+        timestamps: &mut Vec<f64>,
+        max_samples: usize,
+        timeout: Duration,
+    ) -> std::io::Result<usize> {
+        self.pull_chunk_flat(
+            data,
+            timestamps,
+            max_samples,
+            timeout,
+            PackedSample::push_into_i32,
+        )
+    }
+
+    /// Read up to `max_samples` into flat `i16` and timestamp buffers with one lock.
+    pub fn pull_chunk_i16(
+        &mut self,
+        data: &mut Vec<i16>,
+        timestamps: &mut Vec<f64>,
+        max_samples: usize,
+        timeout: Duration,
+    ) -> std::io::Result<usize> {
+        self.pull_chunk_flat(
+            data,
+            timestamps,
+            max_samples,
+            timeout,
+            PackedSample::push_into_i16,
+        )
+    }
+
+    /// Read up to `max_samples` into flat `i8` and timestamp buffers with one lock.
+    pub fn pull_chunk_i8(
+        &mut self,
+        data: &mut Vec<i8>,
+        timestamps: &mut Vec<f64>,
+        max_samples: usize,
+        timeout: Duration,
+    ) -> std::io::Result<usize> {
+        self.pull_chunk_flat(
+            data,
+            timestamps,
+            max_samples,
+            timeout,
+            PackedSample::push_into_i8,
+        )
+    }
+
+    /// Read up to `max_samples` into flat `i64` and timestamp buffers with one lock.
+    pub fn pull_chunk_i64(
+        &mut self,
+        data: &mut Vec<i64>,
+        timestamps: &mut Vec<f64>,
+        max_samples: usize,
+        timeout: Duration,
+    ) -> std::io::Result<usize> {
+        self.pull_chunk_flat(
+            data,
+            timestamps,
+            max_samples,
+            timeout,
+            PackedSample::push_into_i64,
+        )
+    }
+
+    fn pull_chunk_flat<T>(
+        &mut self,
+        data: &mut Vec<T>,
+        timestamps: &mut Vec<f64>,
+        max_samples: usize,
+        timeout: Duration,
+        unpack: fn(&PackedSample, &mut Vec<T>),
+    ) -> std::io::Result<usize> {
+        let mut scratch = std::mem::take(&mut self.packed_scratch);
+        scratch.clear();
+        let got = self.pull_chunk_packed(&mut scratch, max_samples, timeout)?;
+        let chans = self.info.channel_count as usize;
+        data.reserve(got * chans);
+        timestamps.reserve(got);
+        for s in &scratch {
+            unpack(s, data);
+            timestamps.push(s.timestamp);
+        }
+        self.packed_scratch = scratch;
         Ok(got)
     }
 
@@ -1060,7 +1208,7 @@ fn read_and_recover(
     dgram: Option<features::DgramParam>,
 ) {
     let mut tmp = vec![0u8; 65536];
-    let mut batch: Vec<Sample> = Vec::new();
+    let mut batch: Vec<PackedSample> = Vec::new();
     let mut batch_skips: Vec<(usize, u64)> = Vec::new();
     let _ = sock.set_read_timeout(Some(Duration::from_millis(200)));
     let mut last_data = Instant::now();
@@ -1137,7 +1285,7 @@ fn read_and_recover(
             if let Some(last) = batch.last() {
                 conn.latency.record(last.timestamp);
             }
-            queue.push_owned_with_skips(&mut batch, &batch_skips);
+            queue.push_owned_packed_with_skips(&mut batch, &batch_skips);
         } else if dg.is_none() && !batch_skips.is_empty() {
             for &(_, count) in &batch_skips {
                 queue.record_skipped(count);
@@ -1377,11 +1525,14 @@ fn decode_buffered(
     dg: Option<&crate::dgram_in::DgramIn>,
     tcp_gaps: Option<&Arc<Mutex<GapTracker>>>,
     batch_skips: &mut Vec<(usize, u64)>,
-    out: &mut Vec<Sample>,
+    out: &mut Vec<PackedSample>,
 ) -> Result<(), labstream_wire::Error> {
     use labstream_proto::dgram::{self, Record};
     use labstream_proto::seq::{peek, Next, RECORD_LEN};
     let mut pos = 0;
+    let mut last_tcp_ts: Option<f64> = None;
+    let mut first_tcp_ts: Option<f64> = None;
+    let mut had_gap_event = false;
     let result = loop {
         // With `seq/1`, a numbering record can stand before a sample. A cut
         // record waits for more bytes, as a cut sample does.
@@ -1395,7 +1546,14 @@ fn decode_buffered(
                         d.seq_record(n, c.lost(), delta);
                     } else if delta > 0 {
                         if let Some(g) = tcp_gaps {
-                            g.lock().unwrap().record_lost(delta);
+                            let mut tracker = g.lock().unwrap();
+                            if let (Some(first), Some(last)) =
+                                (first_tcp_ts.take(), last_tcp_ts.take())
+                            {
+                                tracker.on_batch(first, last);
+                            }
+                            tracker.record_lost(delta);
+                            had_gap_event = true;
                         }
                         batch_skips.push((out.len(), delta));
                     }
@@ -1418,7 +1576,7 @@ fn decode_buffered(
                 _ => {}
             }
         }
-        match codec.decode(&carry[pos..]) {
+        match codec.decode_packed(&carry[pos..]) {
             Ok((mut sample, used)) => {
                 pos += used;
                 sample.timestamp = deducer.apply(sample.timestamp);
@@ -1435,8 +1593,16 @@ fn decode_buffered(
                 match (dg, number) {
                     (Some(d), Some(n)) => d.tcp_sample(n, sample),
                     _ => {
-                        if let Some(g) = tcp_gaps {
-                            g.lock().unwrap().on_sample(sample.timestamp);
+                        if first_tcp_ts.is_none() {
+                            first_tcp_ts = Some(sample.timestamp);
+                        }
+                        last_tcp_ts = Some(sample.timestamp);
+                        if had_gap_event {
+                            if let Some(g) = tcp_gaps {
+                                g.lock().unwrap().on_sample(sample.timestamp);
+                            }
+                            had_gap_event = false;
+                            first_tcp_ts = None;
                         }
                         out.push(sample);
                     }
@@ -1446,6 +1612,9 @@ fn decode_buffered(
             Err(e) => break Err(e),
         }
     };
+    if let (Some(g), Some(first), Some(last)) = (tcp_gaps, first_tcp_ts, last_tcp_ts) {
+        g.lock().unwrap().on_batch(first, last);
+    }
     carry.drain(..pos);
     result
 }
@@ -1667,7 +1836,7 @@ mod tests {
     fn decode_in_reads(codec: &Codec, bytes: &[u8], cuts: &[usize]) -> Vec<Sample> {
         let mut carry = Vec::new();
         let mut deducer = TimestampDeducer::new(100.0);
-        let mut out = Vec::new();
+        let mut out: Vec<PackedSample> = Vec::new();
         let mut from = 0;
         for &to in cuts.iter().chain(std::iter::once(&bytes.len())) {
             carry.extend_from_slice(&bytes[from..to]);
@@ -1686,7 +1855,7 @@ mod tests {
             from = to;
         }
         assert!(carry.is_empty(), "no byte stays behind at the end");
-        out
+        out.iter().map(PackedSample::to_sample).collect()
     }
 
     /// Decode in reads, with a `seq/1` counter. Give the samples and the
@@ -1699,7 +1868,7 @@ mod tests {
         let mut carry = Vec::new();
         let mut deducer = TimestampDeducer::new(100.0);
         let mut counter = labstream_proto::seq::Counter::new();
-        let mut out = Vec::new();
+        let mut out: Vec<PackedSample> = Vec::new();
         let mut from = 0;
         for &to in cuts.iter().chain(std::iter::once(&bytes.len())) {
             carry.extend_from_slice(&bytes[from..to]);
@@ -1718,7 +1887,7 @@ mod tests {
             from = to;
         }
         assert!(carry.is_empty(), "no byte stays behind at the end");
-        (out, counter)
+        (out.iter().map(PackedSample::to_sample).collect(), counter)
     }
 
     #[test]

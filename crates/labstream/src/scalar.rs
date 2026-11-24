@@ -1,6 +1,6 @@
 //! The sample types that a stream can carry.
 
-use labstream_wire::{Format, Value};
+use labstream_wire::{Format, PackedSample, Value};
 
 mod sealed {
     pub trait Sealed {}
@@ -21,10 +21,14 @@ pub trait Scalar: Copy + Default + sealed::Sealed {
     fn from_value(v: &Value) -> Self;
     /// Convert one value for the wire.
     fn into_value(self) -> Value;
+    /// Build a packed sample from a slice of values.
+    fn pack_sample(timestamp: f64, values: &[Self]) -> PackedSample;
+    /// Append channel values from a packed sample into `dst`, converting if needed.
+    fn unpack_into(sample: &PackedSample, dst: &mut Vec<Self>);
 }
 
 macro_rules! scalar {
-    ($t:ty, $fmt:ident, $var:ident) => {
+    ($t:ty, $fmt:ident, $var:ident, $pack:ident, $unpack:ident) => {
         impl sealed::Sealed for $t {}
         impl Scalar for $t {
             const FORMAT: Format = Format::$fmt;
@@ -42,16 +46,22 @@ macro_rules! scalar {
             fn into_value(self) -> Value {
                 Value::$var(self)
             }
+            fn pack_sample(timestamp: f64, values: &[Self]) -> PackedSample {
+                PackedSample::$pack(timestamp, values)
+            }
+            fn unpack_into(sample: &PackedSample, dst: &mut Vec<Self>) {
+                sample.$unpack(dst);
+            }
         }
     };
 }
 
-scalar!(f32, Float32, F32);
-scalar!(f64, Double64, F64);
-scalar!(i8, Int8, I8);
-scalar!(i16, Int16, I16);
-scalar!(i32, Int32, I32);
-scalar!(i64, Int64, I64);
+scalar!(f32, Float32, F32, from_f32, push_into_f32);
+scalar!(f64, Double64, F64, from_f64, push_into_f64);
+scalar!(i8, Int8, I8, from_i8, push_into_i8);
+scalar!(i16, Int16, I16, from_i16, push_into_i16);
+scalar!(i32, Int32, I32, from_i32, push_into_i32);
+scalar!(i64, Int64, I64, from_i64, push_into_i64);
 
 /// Read one value as a number, whatever format it arrived in.
 ///

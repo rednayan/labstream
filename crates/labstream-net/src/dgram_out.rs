@@ -11,7 +11,7 @@
 use crate::queue::{Fanout, SampleQueue};
 use labstream_proto::dgram::{self, CopyControl, Packer, Path, Record};
 use labstream_proto::seq::Numbering;
-use labstream_wire::{Codec, Format, Sample};
+use labstream_wire::{Codec, Format, PackedSample};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, UdpSocket};
@@ -232,7 +232,7 @@ impl<W: Write> Live<'_, W> {
         let mut last_data = Instant::now();
         let mut repeated = true;
         let mut last_idle = Instant::now();
-        let mut batch: Vec<Sample> = Vec::new();
+        let mut batch: Vec<PackedSample> = Vec::new();
         let mut full: Vec<f64> = Vec::new();
         let mut pending: Vec<u8> = Vec::new();
         let mut slab: Vec<u8> = Vec::new();
@@ -242,7 +242,7 @@ impl<W: Write> Live<'_, W> {
         // The number after the last sample that left the queue.
         let mut next = self
             .queue
-            .pop_many_numbered(&mut Vec::new(), 0, Duration::ZERO)
+            .pop_many_numbered_packed(&mut Vec::new(), 0, Duration::ZERO)
             .1;
 
         loop {
@@ -335,9 +335,9 @@ impl<W: Write> Live<'_, W> {
             .max(Duration::from_millis(1));
             batch.clear();
             full.clear();
-            let (taken, first) = self
-                .queue
-                .pop_many_full(&mut batch, &mut full, usize::MAX, wait);
+            let (taken, first) =
+                self.queue
+                    .pop_many_full_packed(&mut batch, &mut full, usize::MAX, wait);
 
             if taken == 0 {
                 if path == Path::Udp {
@@ -370,14 +370,16 @@ impl<W: Write> Live<'_, W> {
 
             match path {
                 Path::Tcp => {
-                    for (i, s) in batch.iter_mut().enumerate() {
+                    for (i, s) in batch.iter().enumerate() {
                         let number = first.wrapping_add(i as u64);
                         self.numbering.before(number, &mut pending);
-                        if self.last.map(|l| l.wrapping_add(1)) != Some(number) {
-                            s.timestamp = full[i];
-                        }
+                        let ts = if self.last.map(|l| l.wrapping_add(1)) != Some(number) {
+                            full[i]
+                        } else {
+                            s.timestamp
+                        };
                         self.last = Some(number);
-                        if self.codec.encode(s, &mut pending).is_err() {
+                        if self.codec.encode_packed_at(s, ts, &mut pending).is_err() {
                             return sent;
                         }
                         sent += 1;
@@ -390,37 +392,55 @@ impl<W: Write> Live<'_, W> {
                     let to = target.expect("UDP needs a target");
                     slab.clear();
                     ranges.clear();
-                    for (i, s) in batch.iter_mut().enumerate() {
+                    for (i, s) in batch.iter().enumerate() {
                         // A datagram can arrive out of order, so each sample
                         // carries its full timestamp.
-                        s.timestamp = full[i];
                         let start = slab.len();
-                        if self.codec.encode(s, &mut slab).is_err() {
+                        if self.codec.encode_packed_at(s, full[i], &mut slab).is_err() {
                             return sent;
                         }
                         ranges.push(start..slab.len());
                     }
-                    let slices: Vec<&[u8]> = ranges.iter().map(|r| &slab[r.clone()]).collect();
                     let mut failed = false;
                     let socket = &self.setup.socket;
                     let numbering = &mut self.numbering;
                     let last = &mut self.last;
-                    packer.push_slices(
-                        first,
-                        &slices,
-                        &mut gram,
-                        |d| {
-                            if !failed && socket.send_to(d, to).is_err() {
-                                failed = true;
-                            }
-                        },
-                        |n| {
-                            let i = (n - first) as usize;
-                            numbering.before(n, &mut pending);
-                            pending.extend_from_slice(&slab[ranges[i].clone()]);
-                            *last = Some(n);
-                        },
-                    );
+                    if ranges.len() == 1 {
+                        let single = [&slab[ranges[0].clone()]];
+                        packer.push_slices(
+                            first,
+                            &single,
+                            &mut gram,
+                            |d| {
+                                if !failed && socket.send_to(d, to).is_err() {
+                                    failed = true;
+                                }
+                            },
+                            |n| {
+                                numbering.before(n, &mut pending);
+                                pending.extend_from_slice(&slab[ranges[0].clone()]);
+                                *last = Some(n);
+                            },
+                        );
+                    } else {
+                        let slices: Vec<&[u8]> = ranges.iter().map(|r| &slab[r.clone()]).collect();
+                        packer.push_slices(
+                            first,
+                            &slices,
+                            &mut gram,
+                            |d| {
+                                if !failed && socket.send_to(d, to).is_err() {
+                                    failed = true;
+                                }
+                            },
+                            |n| {
+                                let i = (n - first) as usize;
+                                numbering.before(n, &mut pending);
+                                pending.extend_from_slice(&slab[ranges[i].clone()]);
+                                *last = Some(n);
+                            },
+                        );
+                    }
                     sent += taken;
                     if failed {
                         // An error of the socket: back to TCP, with the
@@ -456,12 +476,12 @@ impl<W: Write> Live<'_, W> {
         let mut at = from;
         while let Some((first, taken)) =
             self.fanout
-                .read_history(at, until, crate::outlet::RESEND_BLOCK, &mut history)
+                .read_history_packed(at, until, crate::outlet::RESEND_BLOCK, &mut history)
         {
             for (i, s) in history.iter().enumerate() {
                 let number = first.wrapping_add(i as u64);
                 self.numbering.before(number, pending);
-                if self.codec.encode(s, pending).is_err() {
+                if self.codec.encode_packed(s, pending).is_err() {
                     return false;
                 }
                 self.last = Some(number);
@@ -519,14 +539,14 @@ impl<W: Write> Live<'_, W> {
                 history.clear();
                 let Some((first, taken)) =
                     self.fanout
-                        .read_history(at, end, (end - at) as usize, &mut history)
+                        .read_history_packed(at, end, (end - at) as usize, &mut history)
                 else {
                     break;
                 };
                 let mut encoded = Vec::with_capacity(taken);
                 for s in &history {
                     let mut e = Vec::new();
-                    if self.codec.encode(s, &mut e).is_err() {
+                    if self.codec.encode_packed(s, &mut e).is_err() {
                         return;
                     }
                     encoded.push(e);

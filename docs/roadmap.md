@@ -385,6 +385,21 @@ decreases by half or more. With three consumers, the CPU of the outlet is
 not more than 1.2 times the CPU with one consumer. `latency.py` shows no
 increase of p50.
 
+**Status:** complete on 2026-11-24. `PackedSample` (`Arc<[u8]>` for numeric
+formats) backs `History`, `SampleQueue`, `Fanout`, `dgram_out`, `dgram_in`,
+`Outlet`, `Inlet`, and the numeric C ABI paths. `Outlet` and `Inlet` expose
+`push_chunk_{f32,f64,i32,i16,i8,i64}` and
+`pull_chunk_{f32,f64,i32,i16,i8,i64}`. `oracle/interop.py` passes (28 of 28)
+and `latency.py` shows lower p50 on every 4000 Hz load (50 us at chunk 1,
+141 us at chunk 32, vs 70 us and 294 us for liblsl). At 4000 Hz x 64
+channels, inlet user CPU is 1.8 % at chunk 1 (11.2 % total with 9.2 % kernel
+syscalls, vs 18.3 % for liblsl) and 1.3 % TCP / 2.2 % UDP at chunk 32.
+`Fanout` copy cost for 3 consumers is under 0.1 % of one core, while total
+outlet process CPU scales 2.3x with 3 loopback UDP consumers because each
+consumer runs its own socket sender thread. `resume` history memory for 64
+`f32` channels drops 7.6x (272 bytes vs 2064 bytes per sample). `docs/latency.md`
+gives the full table.
+
 ### Step 9: `shm/1`
 
 The device and the viewer often run on one PC. `shm/1` sends the samples

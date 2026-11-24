@@ -52,10 +52,7 @@ impl Outlet {
                 got: sample.len(),
             });
         }
-        self.inner.push(&labstream_wire::Sample {
-            timestamp,
-            values: sample.iter().map(|v| v.into_value()).collect(),
-        });
+        self.inner.push_packed(T::pack_sample(timestamp, sample));
         Ok(())
     }
 
@@ -80,15 +77,45 @@ impl Outlet {
                 got: data.len(),
             });
         }
-        let block: Vec<labstream_wire::Sample> = data
+        if data.is_empty() {
+            return Ok(());
+        }
+        let block: Vec<labstream_wire::PackedSample> = data
             .chunks_exact(self.channels)
-            .map(|row| labstream_wire::Sample {
-                timestamp: 0.0, // the block call dates every sample
-                values: row.iter().map(|v| v.into_value()).collect(),
-            })
+            .map(|row| T::pack_sample(0.0, row))
             .collect();
-        self.inner.push_chunk_fast(&block, end_timestamp);
+        self.inner.push_chunk_packed(&block, end_timestamp);
         Ok(())
+    }
+
+    /// Write a flat block of `f32` samples with one call.
+    pub fn push_chunk_f32(&self, data: &[f32], end_timestamp: f64) -> Result<(), Error> {
+        self.push_chunk(data, end_timestamp)
+    }
+
+    /// Write a flat block of `f64` samples with one call.
+    pub fn push_chunk_f64(&self, data: &[f64], end_timestamp: f64) -> Result<(), Error> {
+        self.push_chunk(data, end_timestamp)
+    }
+
+    /// Write a flat block of `i32` samples with one call.
+    pub fn push_chunk_i32(&self, data: &[i32], end_timestamp: f64) -> Result<(), Error> {
+        self.push_chunk(data, end_timestamp)
+    }
+
+    /// Write a flat block of `i16` samples with one call.
+    pub fn push_chunk_i16(&self, data: &[i16], end_timestamp: f64) -> Result<(), Error> {
+        self.push_chunk(data, end_timestamp)
+    }
+
+    /// Write a flat block of `i8` samples with one call.
+    pub fn push_chunk_i8(&self, data: &[i8], end_timestamp: f64) -> Result<(), Error> {
+        self.push_chunk(data, end_timestamp)
+    }
+
+    /// Write a flat block of `i64` samples with one call.
+    pub fn push_chunk_i64(&self, data: &[i64], end_timestamp: f64) -> Result<(), Error> {
+        self.push_chunk(data, end_timestamp)
     }
 
     /// Write one text marker, with the current clock as its timestamp.
@@ -106,10 +133,11 @@ impl Outlet {
                 got: self.channels,
             });
         }
-        self.inner.push(&labstream_wire::Sample {
-            timestamp,
-            values: vec![labstream_wire::Value::Str(marker.as_bytes().to_vec())],
-        });
+        self.inner
+            .push_packed(labstream_wire::PackedSample::from_strings(
+                timestamp,
+                vec![marker.as_bytes().to_vec()],
+            ));
         Ok(())
     }
 

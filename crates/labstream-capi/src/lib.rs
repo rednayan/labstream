@@ -22,8 +22,9 @@
 #![deny(missing_docs)]
 
 use labstream_net::{desc, ContinuousResolver, Inlet, Outlet, StreamInfo};
-use labstream_wire::{Format, Sample, Value};
+use labstream_wire::{Format, PackedSample, Sample, Value};
 use std::ffi::{c_char, c_double, c_int, c_void, CStr, CString};
+use std::sync::Arc;
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------
@@ -273,6 +274,8 @@ struct InletBox {
     /// The half-time of the smoothing filter, in seconds.
     /// `src/api_config.cpp` names 90 as the default.
     halftime: f32,
+    /// Reusable packed sample buffer for chunk pulls.
+    scratch: Vec<PackedSample>,
 }
 
 impl InletBox {
@@ -1156,6 +1159,33 @@ pub unsafe extern "C" fn lsl_wait_for_consumers(out: lsl_outlet, timeout: c_doub
     }
 }
 
+unsafe fn push_packed_numeric<T>(
+    out: lsl_outlet,
+    data: *const T,
+    format: Format,
+    timestamp: c_double,
+    _pushthrough: c_int,
+) -> i32 {
+    if data.is_null() {
+        return LSL_ARGUMENT_ERROR;
+    }
+    let b = match (out as *mut OutletBox).as_ref() {
+        Some(b) => b,
+        None => return LSL_ARGUMENT_ERROR,
+    };
+    let n = b.info.channel_count as usize;
+    let t = if timestamp == 0.0 {
+        labstream_net::clock()
+    } else {
+        timestamp
+    };
+    let byte_len = n * std::mem::size_of::<T>();
+    let raw = std::slice::from_raw_parts(data as *const u8, byte_len);
+    b.outlet
+        .push_packed(PackedSample::from_raw_bytes(t, format, Arc::from(raw)));
+    LSL_NO_ERROR
+}
+
 unsafe fn push_typed(
     out: lsl_outlet,
     build: impl Fn(usize) -> Value,
@@ -1182,7 +1212,7 @@ unsafe fn push_typed(
 }
 
 macro_rules! push_sample {
-    ($name:ident, $ty:ty, $variant:path) => {
+    ($name:ident, $ty:ty, $fmt:expr) => {
         /// Send one sample.
         ///
         /// # Safety
@@ -1195,18 +1225,15 @@ macro_rules! push_sample {
             timestamp: c_double,
             pushthrough: c_int,
         ) -> i32 {
-            if data.is_null() {
-                return LSL_ARGUMENT_ERROR;
-            }
-            push_typed(out, |i| $variant(*data.add(i)), timestamp, pushthrough)
+            push_packed_numeric(out, data, $fmt, timestamp, pushthrough)
         }
     };
 }
 
-push_sample!(lsl_push_sample_ftp, f32, Value::F32);
-push_sample!(lsl_push_sample_dtp, f64, Value::F64);
-push_sample!(lsl_push_sample_itp, i32, Value::I32);
-push_sample!(lsl_push_sample_stp, i16, Value::I16);
+push_sample!(lsl_push_sample_ftp, f32, Format::Float32);
+push_sample!(lsl_push_sample_dtp, f64, Format::Double64);
+push_sample!(lsl_push_sample_itp, i32, Format::Int32);
+push_sample!(lsl_push_sample_stp, i16, Format::Int16);
 
 /// Send one sample of bytes.
 ///
@@ -1220,17 +1247,9 @@ pub unsafe extern "C" fn lsl_push_sample_ctp(
     timestamp: c_double,
     pushthrough: c_int,
 ) -> i32 {
-    if data.is_null() {
-        return LSL_ARGUMENT_ERROR;
-    }
-    push_typed(
-        out,
-        |i| Value::I8(*data.add(i) as _),
-        timestamp,
-        pushthrough,
-    )
+    push_packed_numeric(out, data, Format::Int8, timestamp, pushthrough)
 }
-push_sample!(lsl_push_sample_ltp, i64, Value::I64);
+push_sample!(lsl_push_sample_ltp, i64, Format::Int64);
 
 /// Send one sample of strings.
 ///
@@ -1253,6 +1272,95 @@ pub unsafe extern "C" fn lsl_push_sample_strtp(
         timestamp,
         pushthrough,
     )
+}
+
+unsafe fn push_chunk_packed_numeric<T>(
+    out: lsl_outlet,
+    data: *const T,
+    count_values: u64,
+    format: Format,
+    timestamp: c_double,
+    _pushthrough: c_int,
+) -> i32 {
+    if data.is_null() {
+        return LSL_ARGUMENT_ERROR;
+    }
+    let b = match (out as *mut OutletBox).as_ref() {
+        Some(b) => b,
+        None => return LSL_ARGUMENT_ERROR,
+    };
+    let chans = b.info.channel_count as usize;
+    if chans == 0 {
+        return LSL_ARGUMENT_ERROR;
+    }
+    let total = count_values as usize;
+    if total % chans != 0 {
+        return LSL_ARGUMENT_ERROR;
+    }
+    let samples = total / chans;
+    if samples == 0 {
+        return LSL_NO_ERROR;
+    }
+    let mut first = if timestamp == 0.0 {
+        labstream_net::clock()
+    } else {
+        timestamp
+    };
+    if b.info.nominal_srate != LSL_IRREGULAR_RATE {
+        first -= (samples - 1) as f64 / b.info.nominal_srate;
+    }
+    let row_bytes = chans * std::mem::size_of::<T>();
+    let raw = std::slice::from_raw_parts(data as *const u8, samples * row_bytes);
+    let block: Vec<PackedSample> = (0..samples)
+        .map(|k| {
+            let t = if k == 0 { first } else { LSL_DEDUCED_TIMESTAMP };
+            PackedSample::from_raw_bytes(
+                t,
+                format,
+                Arc::from(&raw[k * row_bytes..(k + 1) * row_bytes]),
+            )
+        })
+        .collect();
+    b.outlet.push_samples_packed(block);
+    LSL_NO_ERROR
+}
+
+unsafe fn push_chunk_stamped_packed_numeric<T>(
+    out: lsl_outlet,
+    data: *const T,
+    count_values: u64,
+    format: Format,
+    stamps: *const c_double,
+    _pushthrough: c_int,
+) -> i32 {
+    if data.is_null() || stamps.is_null() {
+        return LSL_ARGUMENT_ERROR;
+    }
+    let b = match (out as *mut OutletBox).as_ref() {
+        Some(b) => b,
+        None => return LSL_ARGUMENT_ERROR,
+    };
+    let chans = b.info.channel_count as usize;
+    if chans == 0 || count_values as usize % chans != 0 {
+        return LSL_ARGUMENT_ERROR;
+    }
+    let samples = count_values as usize / chans;
+    if samples == 0 {
+        return LSL_NO_ERROR;
+    }
+    let row_bytes = chans * std::mem::size_of::<T>();
+    let raw = std::slice::from_raw_parts(data as *const u8, samples * row_bytes);
+    let block: Vec<PackedSample> = (0..samples)
+        .map(|k| {
+            PackedSample::from_raw_bytes(
+                *stamps.add(k),
+                format,
+                Arc::from(&raw[k * row_bytes..(k + 1) * row_bytes]),
+            )
+        })
+        .collect();
+    b.outlet.push_samples_packed(block);
+    LSL_NO_ERROR
 }
 
 /// Send several samples that share one timestamp. SPEC.md 9.2.
@@ -1338,6 +1446,43 @@ unsafe fn push_chunk_stamped(
     LSL_NO_ERROR
 }
 
+macro_rules! push_chunk_numeric {
+    ($tp:ident, $tnp:ident, $ty:ty, $fmt:expr) => {
+        /// Send several samples that share one timestamp. SPEC.md 9.2.
+        ///
+        /// # Safety
+        /// The handle must have come from this library, and the buffer must
+        /// hold `data_elements` values.
+        #[no_mangle]
+        pub unsafe extern "C" fn $tp(
+            out: lsl_outlet,
+            data: *const $ty,
+            data_elements: u64,
+            timestamp: c_double,
+            pushthrough: c_int,
+        ) -> i32 {
+            push_chunk_packed_numeric(out, data, data_elements, $fmt, timestamp, pushthrough)
+        }
+
+        /// Send several samples, each with its own timestamp.
+        ///
+        /// # Safety
+        /// The handle must have come from this library, the data buffer must
+        /// hold `data_elements` values, and the timestamp buffer must hold one
+        /// value for each sample.
+        #[no_mangle]
+        pub unsafe extern "C" fn $tnp(
+            out: lsl_outlet,
+            data: *const $ty,
+            data_elements: u64,
+            stamps: *const c_double,
+            pushthrough: c_int,
+        ) -> i32 {
+            push_chunk_stamped_packed_numeric(out, data, data_elements, $fmt, stamps, pushthrough)
+        }
+    };
+}
+
 macro_rules! push_chunk {
     ($tp:ident, $tnp:ident, $ty:ty, $make:expr) => {
         /// Send several samples that share one timestamp. SPEC.md 9.2.
@@ -1383,42 +1528,27 @@ macro_rules! push_chunk {
     };
 }
 
-push_chunk!(
+push_chunk_numeric!(
     lsl_push_chunk_ftp,
     lsl_push_chunk_ftnp,
     f32,
-    |d: *const f32, i: usize| Value::F32(*d.add(i))
+    Format::Float32
 );
-push_chunk!(
+push_chunk_numeric!(
     lsl_push_chunk_dtp,
     lsl_push_chunk_dtnp,
     f64,
-    |d: *const f64, i: usize| Value::F64(*d.add(i))
+    Format::Double64
 );
-push_chunk!(
-    lsl_push_chunk_itp,
-    lsl_push_chunk_itnp,
-    i32,
-    |d: *const i32, i: usize| Value::I32(*d.add(i))
-);
-push_chunk!(
-    lsl_push_chunk_stp,
-    lsl_push_chunk_stnp,
-    i16,
-    |d: *const i16, i: usize| Value::I16(*d.add(i))
-);
-push_chunk!(
+push_chunk_numeric!(lsl_push_chunk_itp, lsl_push_chunk_itnp, i32, Format::Int32);
+push_chunk_numeric!(lsl_push_chunk_stp, lsl_push_chunk_stnp, i16, Format::Int16);
+push_chunk_numeric!(
     lsl_push_chunk_ctp,
     lsl_push_chunk_ctnp,
     c_char,
-    |d: *const c_char, i: usize| Value::I8(*d.add(i) as _)
+    Format::Int8
 );
-push_chunk!(
-    lsl_push_chunk_ltp,
-    lsl_push_chunk_ltnp,
-    i64,
-    |d: *const i64, i: usize| Value::I64(*d.add(i))
-);
+push_chunk_numeric!(lsl_push_chunk_ltp, lsl_push_chunk_ltnp, i64, Format::Int64);
 push_chunk!(
     lsl_push_chunk_strtp,
     lsl_push_chunk_strtnp,
@@ -1649,6 +1779,7 @@ pub unsafe extern "C" fn lsl_create_inlet_ex(
         recover: recover != 0,
         postproc: 0,
         halftime: 90.0,
+        scratch: Vec::new(),
     })) as lsl_inlet
 }
 
@@ -1881,13 +2012,78 @@ pub unsafe extern "C" fn lsl_inlet_flush(inlet: lsl_inlet) -> u32 {
         Some(b) => b,
         None => return 0,
     };
-    let mut n = 0;
+    let mut n = 0usize;
     if let Some(i) = b.inlet.as_mut() {
-        while i.pull(Duration::from_millis(0)).ok().flatten().is_some() {
-            n += 1;
+        loop {
+            b.scratch.clear();
+            match i.pull_chunk_packed(&mut b.scratch, 4096, Duration::ZERO) {
+                Ok(0) | Err(_) => break,
+                Ok(got) => n += got,
+            }
         }
     }
-    n
+    n as u32
+}
+
+unsafe fn pull_packed_numeric<T>(
+    inlet: lsl_inlet,
+    buffer: *mut T,
+    buffer_elements: c_int,
+    format: Format,
+    timeout: c_double,
+    ec: *mut i32,
+) -> c_double {
+    if buffer.is_null() {
+        if !ec.is_null() {
+            *ec = LSL_ARGUMENT_ERROR;
+        }
+        return 0.0;
+    }
+    let b = match (inlet as *mut InletBox).as_mut() {
+        Some(b) => b,
+        None => {
+            if !ec.is_null() {
+                *ec = LSL_ARGUMENT_ERROR;
+            }
+            return 0.0;
+        }
+    };
+    b.ensure_open(timeout);
+    let i = match b.inlet.as_mut() {
+        Some(i) => i,
+        None => {
+            if !ec.is_null() {
+                *ec = LSL_LOST_ERROR;
+            }
+            return 0.0;
+        }
+    };
+    let cap = buffer_elements.max(0) as usize;
+    match i.pull_packed(Duration::from_secs_f64(timeout.max(0.0))) {
+        Ok(Some(s)) => {
+            if let Some(bytes) = s.as_numeric_bytes(format) {
+                let width = std::mem::size_of::<T>();
+                let copy_bytes = bytes.len().min(cap * width);
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer as *mut u8, copy_bytes);
+            }
+            if !ec.is_null() {
+                *ec = LSL_NO_ERROR;
+            }
+            s.timestamp
+        }
+        Ok(None) => {
+            if !ec.is_null() {
+                *ec = LSL_NO_ERROR;
+            }
+            0.0
+        }
+        Err(_) => {
+            if !ec.is_null() {
+                *ec = LSL_LOST_ERROR;
+            }
+            0.0
+        }
+    }
 }
 
 unsafe fn pull_typed(
@@ -1944,7 +2140,7 @@ unsafe fn pull_typed(
 }
 
 macro_rules! pull_sample {
-    ($name:ident, $ty:ty, $pat:pat => $expr:expr) => {
+    ($name:ident, $ty:ty, $fmt:expr) => {
         /// Read one sample.
         ///
         /// # Safety
@@ -1958,34 +2154,17 @@ macro_rules! pull_sample {
             timeout: c_double,
             ec: *mut i32,
         ) -> c_double {
-            if buffer.is_null() {
-                if !ec.is_null() {
-                    *ec = LSL_ARGUMENT_ERROR;
-                }
-                return 0.0;
-            }
-            let cap = buffer_elements.max(0) as usize;
-            pull_typed(
-                inlet,
-                timeout,
-                ec,
-                |k, v| {
-                    if let $pat = v {
-                        *buffer.add(k) = $expr;
-                    }
-                },
-                cap,
-            )
+            pull_packed_numeric(inlet, buffer, buffer_elements, $fmt, timeout, ec)
         }
     };
 }
 
-pull_sample!(lsl_pull_sample_f, f32, Value::F32(x) => *x);
-pull_sample!(lsl_pull_sample_d, f64, Value::F64(x) => *x);
-pull_sample!(lsl_pull_sample_i, i32, Value::I32(x) => *x);
-pull_sample!(lsl_pull_sample_s, i16, Value::I16(x) => *x);
-pull_sample!(lsl_pull_sample_c, c_char, Value::I8(x) => *x as c_char);
-pull_sample!(lsl_pull_sample_l, i64, Value::I64(x) => *x);
+pull_sample!(lsl_pull_sample_f, f32, Format::Float32);
+pull_sample!(lsl_pull_sample_d, f64, Format::Double64);
+pull_sample!(lsl_pull_sample_i, i32, Format::Int32);
+pull_sample!(lsl_pull_sample_s, i16, Format::Int16);
+pull_sample!(lsl_pull_sample_c, c_char, Format::Int8);
+pull_sample!(lsl_pull_sample_l, i64, Format::Int64);
 
 /// Read one sample of strings. The caller frees each string.
 ///
@@ -2018,6 +2197,88 @@ pub unsafe extern "C" fn lsl_pull_sample_str(
         },
         cap,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn pull_chunk_packed_numeric<T>(
+    inlet: lsl_inlet,
+    data: *mut T,
+    stamps: *mut c_double,
+    data_elements: u64,
+    stamp_elements: u64,
+    format: Format,
+    timeout: c_double,
+    ec: *mut i32,
+) -> u64 {
+    if data.is_null() {
+        if !ec.is_null() {
+            *ec = LSL_ARGUMENT_ERROR;
+        }
+        return 0;
+    }
+    let b = match (inlet as *mut InletBox).as_mut() {
+        Some(b) => b,
+        None => {
+            if !ec.is_null() {
+                *ec = LSL_ARGUMENT_ERROR;
+            }
+            return 0;
+        }
+    };
+    let chans = b.info.channel_count as usize;
+    b.ensure_open(timeout);
+    let i = match b.inlet.as_mut() {
+        Some(i) => i,
+        None => {
+            if !ec.is_null() {
+                *ec = LSL_LOST_ERROR;
+            }
+            return 0;
+        }
+    };
+    if chans == 0 {
+        if !ec.is_null() {
+            *ec = LSL_ARGUMENT_ERROR;
+        }
+        return 0;
+    }
+    let room_samples = (data_elements as usize / chans).min(stamp_elements as usize);
+    if room_samples == 0 {
+        if !ec.is_null() {
+            *ec = LSL_NO_ERROR;
+        }
+        return 0;
+    }
+    b.scratch.clear();
+    let got = match i.pull_chunk_packed(
+        &mut b.scratch,
+        room_samples,
+        Duration::from_secs_f64(timeout.max(0.0)),
+    ) {
+        Ok(n) => n,
+        Err(_) => {
+            if !ec.is_null() {
+                *ec = LSL_LOST_ERROR;
+            }
+            return 0;
+        }
+    };
+    let width = std::mem::size_of::<T>();
+    let row_bytes = chans * width;
+    let dst = data as *mut u8;
+    for (idx, s) in b.scratch.iter().enumerate() {
+        if let Some(bytes) = s.as_numeric_bytes(format) {
+            let copy_bytes = bytes.len().min(row_bytes);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.add(idx * row_bytes), copy_bytes);
+        }
+        if !stamps.is_null() {
+            *stamps.add(idx) = s.timestamp;
+        }
+    }
+    if !ec.is_null() {
+        *ec = LSL_NO_ERROR;
+    }
+    (got * chans) as u64
 }
 
 /// Read as many whole samples as the buffers hold.
@@ -2092,6 +2353,37 @@ unsafe fn pull_chunk_typed(
     (written * chans) as u64
 }
 
+macro_rules! pull_chunk_numeric {
+    ($name:ident, $ty:ty, $fmt:expr) => {
+        /// Read several samples.
+        ///
+        /// # Safety
+        /// The handle must have come from this library, and both buffers must
+        /// hold the number of elements that the arguments name.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(
+            inlet: lsl_inlet,
+            data: *mut $ty,
+            stamps: *mut c_double,
+            data_elements: u64,
+            stamp_elements: u64,
+            timeout: c_double,
+            ec: *mut i32,
+        ) -> u64 {
+            pull_chunk_packed_numeric(
+                inlet,
+                data,
+                stamps,
+                data_elements,
+                stamp_elements,
+                $fmt,
+                timeout,
+                ec,
+            )
+        }
+    };
+}
+
 macro_rules! pull_chunk {
     ($name:ident, $ty:ty, $pat:pat => $expr:expr) => {
         /// Read several samples.
@@ -2132,12 +2424,12 @@ macro_rules! pull_chunk {
     };
 }
 
-pull_chunk!(lsl_pull_chunk_f, f32, Value::F32(x) => *x);
-pull_chunk!(lsl_pull_chunk_d, f64, Value::F64(x) => *x);
-pull_chunk!(lsl_pull_chunk_i, i32, Value::I32(x) => *x);
-pull_chunk!(lsl_pull_chunk_s, i16, Value::I16(x) => *x);
-pull_chunk!(lsl_pull_chunk_c, c_char, Value::I8(x) => *x as c_char);
-pull_chunk!(lsl_pull_chunk_l, i64, Value::I64(x) => *x);
+pull_chunk_numeric!(lsl_pull_chunk_f, f32, Format::Float32);
+pull_chunk_numeric!(lsl_pull_chunk_d, f64, Format::Double64);
+pull_chunk_numeric!(lsl_pull_chunk_i, i32, Format::Int32);
+pull_chunk_numeric!(lsl_pull_chunk_s, i16, Format::Int16);
+pull_chunk_numeric!(lsl_pull_chunk_c, c_char, Format::Int8);
+pull_chunk_numeric!(lsl_pull_chunk_l, i64, Format::Int64);
 pull_chunk!(lsl_pull_chunk_str, *mut c_char, Value::Str(b) => out_bytes(b));
 
 /// Read several samples of strings, each with its own length.
@@ -2409,57 +2701,6 @@ forward_chunk!(
 
 // --- the untyped form --------------------------------------------------
 
-/// Read one channel value out of a raw buffer.
-///
-/// `push_numeric_raw` copies `datasize()` bytes straight into the sample
-/// (`src/stream_outlet_impl.cpp:171`). The buffer therefore holds the values
-/// of one sample, in the byte order of this machine, with no padding.
-///
-/// # Safety
-/// The buffer must hold one value of `format` at `index`.
-unsafe fn raw_value(format: Format, data: *const u8, index: usize) -> Option<Value> {
-    let width = format.width()?;
-    let p = data.add(index * width);
-    let mut buf = [0u8; 8];
-    std::ptr::copy_nonoverlapping(p, buf.as_mut_ptr(), width);
-    Some(match format {
-        Format::Float32 => Value::F32(f32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]])),
-        Format::Double64 => Value::F64(f64::from_ne_bytes(buf)),
-        Format::Int32 => Value::I32(i32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]])),
-        Format::Int16 => Value::I16(i16::from_ne_bytes([buf[0], buf[1]])),
-        Format::Int8 => Value::I8(buf[0] as i8),
-        Format::Int64 => Value::I64(i64::from_ne_bytes(buf)),
-        Format::String | Format::Undefined => return None,
-    })
-}
-
-/// Write one channel value into a raw buffer.
-///
-/// # Safety
-/// The buffer must hold room for one value of the format at `index`.
-unsafe fn write_raw_value(v: &Value, data: *mut u8, index: usize) -> usize {
-    let (bytes, width): ([u8; 8], usize) = match v {
-        Value::F32(x) => {
-            let b = x.to_ne_bytes();
-            ([b[0], b[1], b[2], b[3], 0, 0, 0, 0], 4)
-        }
-        Value::F64(x) => (x.to_ne_bytes(), 8),
-        Value::I32(x) => {
-            let b = x.to_ne_bytes();
-            ([b[0], b[1], b[2], b[3], 0, 0, 0, 0], 4)
-        }
-        Value::I16(x) => {
-            let b = x.to_ne_bytes();
-            ([b[0], b[1], 0, 0, 0, 0, 0, 0], 2)
-        }
-        Value::I8(x) => ([*x as u8, 0, 0, 0, 0, 0, 0, 0], 1),
-        Value::I64(x) => (x.to_ne_bytes(), 8),
-        Value::Str(_) => return 0,
-    };
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), data.add(index * width), width);
-    width
-}
-
 /// Send one sample from a raw buffer.
 ///
 /// # Safety
@@ -2470,23 +2711,32 @@ pub unsafe extern "C" fn lsl_push_sample_vtp(
     out: lsl_outlet,
     data: *const c_void,
     timestamp: c_double,
-    pushthrough: c_int,
+    _pushthrough: c_int,
 ) -> i32 {
     let b = match (out as *mut OutletBox).as_ref() {
         Some(b) => b,
         None => return LSL_ARGUMENT_ERROR,
     };
-    if data.is_null() || b.info.format.width().is_none() {
+    let width = match b.info.format.width() {
+        Some(w) => w,
+        None => return LSL_ARGUMENT_ERROR,
+    };
+    if data.is_null() {
         return LSL_ARGUMENT_ERROR;
     }
-    let format = b.info.format;
-    let raw = data as *const u8;
-    push_typed(
-        out,
-        |i| raw_value(format, raw, i).unwrap_or(Value::I8(0)),
-        timestamp,
-        pushthrough,
-    )
+    let t = if timestamp == 0.0 {
+        labstream_net::clock()
+    } else {
+        timestamp
+    };
+    let byte_len = width * b.info.channel_count as usize;
+    let raw = std::slice::from_raw_parts(data as *const u8, byte_len);
+    b.outlet.push_packed(PackedSample::from_raw_bytes(
+        t,
+        b.info.format,
+        Arc::from(raw),
+    ));
+    LSL_NO_ERROR
 }
 
 /// Send one sample from a raw buffer, timestamped now.
@@ -2535,7 +2785,8 @@ pub unsafe extern "C" fn lsl_pull_sample_v(
             return 0.0;
         }
     };
-    let width = match b.info.format.width() {
+    let format = b.info.format;
+    let width = match format.width() {
         Some(w) => w,
         None => {
             if !ec.is_null() {
@@ -2545,22 +2796,46 @@ pub unsafe extern "C" fn lsl_pull_sample_v(
         }
     };
     let need = width * b.info.channel_count as usize;
-    if buffer.is_null() || (buffer_bytes as usize) < need {
+    if buffer.is_null() || buffer_bytes < 0 || (buffer_bytes as usize) < need {
         if !ec.is_null() {
             *ec = LSL_ARGUMENT_ERROR;
         }
         return 0.0;
     }
-    let raw = buffer as *mut u8;
-    pull_typed(
-        inlet,
-        timeout,
-        ec,
-        |k, v| {
-            write_raw_value(v, raw, k);
-        },
-        b.info.channel_count as usize,
-    )
+    b.ensure_open(timeout);
+    let i = match b.inlet.as_mut() {
+        Some(i) => i,
+        None => {
+            if !ec.is_null() {
+                *ec = LSL_LOST_ERROR;
+            }
+            return 0.0;
+        }
+    };
+    match i.pull_packed(Duration::from_secs_f64(timeout.max(0.0))) {
+        Ok(Some(s)) => {
+            if let Some(bytes) = s.as_numeric_bytes(format) {
+                let copy_bytes = bytes.len().min(need);
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer as *mut u8, copy_bytes);
+            }
+            if !ec.is_null() {
+                *ec = LSL_NO_ERROR;
+            }
+            s.timestamp
+        }
+        Ok(None) => {
+            if !ec.is_null() {
+                *ec = LSL_NO_ERROR;
+            }
+            0.0
+        }
+        Err(_) => {
+            if !ec.is_null() {
+                *ec = LSL_LOST_ERROR;
+            }
+            0.0
+        }
+    }
 }
 
 // --- the length-prefixed string form ------------------------------------
