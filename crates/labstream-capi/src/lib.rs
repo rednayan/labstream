@@ -3516,6 +3516,35 @@ pub unsafe extern "C" fn labstream_inlet_on_shm(inlet: lsl_inlet) -> i32 {
     b.inlet.as_ref().map_or(0, |i| i32::from(i.on_shm()))
 }
 
+/// True (`1`) when `inlet` negotiated lossless wire compression (`comp/1`,
+/// `docs/roadmap.md`, step 7), or `0` otherwise.
+///
+/// # Safety
+/// `inlet` must be null or a valid handle from this library.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_inlet_compressed(inlet: lsl_inlet) -> i32 {
+    let Some(b) = (inlet as *mut InletBox).as_ref() else {
+        return 0;
+    };
+    b.inlet.as_ref().map_or(0, |i| i32::from(i.is_compressed()))
+}
+
+/// Observed wire-to-raw byte ratio (`wire_bytes / raw_bytes`) for a `comp/1`
+/// inlet, or `NaN` when compression is inactive or no samples have arrived.
+///
+/// # Safety
+/// `inlet` must be null or a valid handle from this library.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_inlet_compression_ratio(inlet: lsl_inlet) -> c_double {
+    let Some(b) = (inlet as *mut InletBox).as_ref() else {
+        return f64::NAN;
+    };
+    b.inlet
+        .as_ref()
+        .and_then(|i| i.compression_ratio())
+        .unwrap_or(f64::NAN)
+}
+
 /// True (`1`) when `info` describes a stream published by a `labstream` relay,
 /// or `0` otherwise (`docs/roadmap.md`, step 4).
 ///
@@ -3622,6 +3651,9 @@ mod tests {
             lsl_open_stream(inlet, 5.0, &mut ec);
             assert_eq!(ec, LSL_NO_ERROR);
             assert_eq!(labstream_inlet_on_shm(inlet), 1);
+            // SHM transfers raw bytes directly, so wire compression stays off.
+            assert_eq!(labstream_inlet_compressed(inlet), 0);
+            assert!(labstream_inlet_compression_ratio(inlet).is_nan());
             assert_eq!(labstream_samples_lost(inlet), 0);
             assert_eq!(labstream_samples_resent(inlet), 0);
 
@@ -3639,6 +3671,7 @@ mod tests {
             assert_eq!(health.gap_count, 0);
 
             // Outlet consumer health reports the connected inlet.
+            assert_eq!(lsl_wait_for_consumers(outlet, 5.0), 1);
             let n_consumers = labstream_outlet_consumers(outlet, std::ptr::null_mut(), 0);
             assert_eq!(n_consumers, 1);
             let mut consumers = [std::mem::zeroed::<labstream_consumer_health>(); 4];

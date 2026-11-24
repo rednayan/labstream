@@ -120,6 +120,8 @@ impl DgramIn {
         lost: Arc<std::sync::atomic::AtomicU64>,
         gaps: Arc<Mutex<GapTracker>>,
         latency: Arc<LatencyProbe>,
+        wire_bytes: Arc<std::sync::atomic::AtomicU64>,
+        raw_bytes: Arc<std::sync::atomic::AtomicU64>,
         resend_until: Option<u64>,
     ) -> Option<DgramIn> {
         let peer = tcp.peer_addr().ok()?;
@@ -177,6 +179,8 @@ impl DgramIn {
                     &stop,
                     &queue,
                     &lost,
+                    &wire_bytes,
+                    &raw_bytes,
                 )
             });
         }
@@ -371,6 +375,8 @@ fn udp_loop(
     stop: &AtomicBool,
     queue: &SampleQueue,
     lost: &std::sync::atomic::AtomicU64,
+    wire_bytes: &std::sync::atomic::AtomicU64,
+    raw_bytes: &std::sync::atomic::AtomicU64,
 ) {
     let begin = state.lock().unwrap().begin;
     let mut hello_at: Option<Instant> = None;
@@ -380,6 +386,8 @@ fn udp_loop(
     let mut cur_timeout = HELLO_TIMEOUT;
     let mut buf = vec![0u8; 2048];
     let mut out: Vec<PackedSample> = Vec::new();
+    let mut comp_decoded: Vec<PackedSample> = Vec::new();
+    let plain_sample_bytes = codec.format.width().map_or(0, |w| 9 + w * codec.channels) as u64;
     while !stop.load(Ordering::Relaxed) && !queue.is_closed() {
         // The hellos, until the first datagram arrives, or for 1 s.
         if !heard
@@ -419,6 +427,40 @@ fn udp_loop(
                             }
                             Err(_) => break,
                         }
+                    }
+                    wire_bytes.fetch_add(payload.len() as u64, Ordering::Relaxed);
+                    raw_bytes.fetch_add(payload.len() as u64, Ordering::Relaxed);
+                    heard_datagram(&mut s, now);
+                    heard = true;
+                    s.heard = true;
+                }
+                Ok(Datagram::DataComp {
+                    cookie: c,
+                    first,
+                    count,
+                    serial,
+                    payload,
+                }) if c == cookie => {
+                    s.meter.record(serial, t);
+                    s.reorder.udp_heard(t);
+                    comp_decoded.clear();
+                    if labstream_proto::comp::decode_dgram_payload(
+                        &codec,
+                        count as usize,
+                        payload,
+                        &mut comp_decoded,
+                    )
+                    .is_ok()
+                    {
+                        for (k, sample) in comp_decoded.drain(..).enumerate() {
+                            s.reorder
+                                .insert_or_emit(first.wrapping_add(k as u64), sample, &mut out);
+                        }
+                        wire_bytes.fetch_add(payload.len() as u64, Ordering::Relaxed);
+                        raw_bytes.fetch_add(
+                            (count as u64).saturating_mul(plain_sample_bytes),
+                            Ordering::Relaxed,
+                        );
                     }
                     heard_datagram(&mut s, now);
                     heard = true;
@@ -578,6 +620,8 @@ mod tests {
             lost,
             Arc::new(Mutex::new(GapTracker::new())),
             Arc::new(LatencyProbe::default()),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
             None,
         )
         .expect("a UDP socket");

@@ -668,6 +668,12 @@ struct ConnState {
     shm_gen: AtomicU64,
     /// True while samples arrive through shared memory (`shm/1`).
     on_shm: AtomicBool,
+    /// True while wire compression (`comp/1`) is active on this connection.
+    compressed: AtomicBool,
+    /// Compressed (or fallback) wire payload bytes received on this connection.
+    wire_bytes: Arc<AtomicU64>,
+    /// Equivalent uncompressed wire payload bytes received on this connection.
+    raw_bytes: Arc<AtomicU64>,
     /// Next expected `seq/1` number observed on SHM (`u64::MAX` = none yet).
     shm_next_expected: AtomicU64,
     /// Cumulative SHM drops from earlier recovered SHM segments.
@@ -781,6 +787,7 @@ impl Inlet {
         debug_assert_eq!(client.state(), State::Streaming);
         let numbered = uses_seq(&client);
         let resume = features::resume_answer(client.features());
+        let compressed = shm.is_none() && features::comp_answer(client.features());
         let dgram = if shm.is_some() {
             None
         } else {
@@ -819,6 +826,9 @@ impl Inlet {
             shm: Mutex::new(shm.clone()),
             shm_gen: AtomicU64::new(0),
             on_shm: AtomicBool::new(on_shm_init),
+            compressed: AtomicBool::new(compressed),
+            wire_bytes: Arc::new(AtomicU64::new(0)),
+            raw_bytes: Arc::new(AtomicU64::new(0)),
             shm_next_expected: AtomicU64::new(u64::MAX),
             shm_dropped_prev: AtomicU64::new(0),
             shm_drop_gaps: Mutex::new(VecDeque::new()),
@@ -854,6 +864,7 @@ impl Inlet {
                     resume,
                     dgram,
                     shm_bg,
+                    compressed,
                     requested_selection,
                 );
             });
@@ -1465,6 +1476,25 @@ impl Inlet {
         self.conn.on_shm.load(Ordering::SeqCst)
     }
 
+    /// True while wire compression (`comp/1`) is active on this connection.
+    pub fn is_compressed(&self) -> bool {
+        self.conn.compressed.load(Ordering::SeqCst)
+    }
+
+    /// Ratio `wire_bytes / raw_bytes` observed on this connection when
+    /// `comp/1` is active, or `None` when uncompressed or before data arrives.
+    pub fn compression_ratio(&self) -> Option<f64> {
+        if !self.is_compressed() {
+            return None;
+        }
+        let raw = self.conn.raw_bytes.load(Ordering::Relaxed);
+        if raw == 0 {
+            return None;
+        }
+        let wire = self.conn.wire_bytes.load(Ordering::Relaxed);
+        Some(wire as f64 / raw as f64)
+    }
+
     /// The size of the queue, in samples.
     pub fn buffer_capacity(&self) -> usize {
         self.queue.capacity()
@@ -1504,6 +1534,8 @@ impl Inlet {
             connected: self.is_connected(),
             on_udp: self.on_udp(),
             on_shm: self.on_shm(),
+            compressed: self.is_compressed(),
+            compression_ratio: self.compression_ratio(),
             buffered: self.samples_available(),
             buffer_capacity: self.buffer_capacity(),
             gap_count,
@@ -1604,6 +1636,7 @@ fn read_and_recover(
     resume: Option<features::ResumeParam>,
     dgram: Option<features::DgramParam>,
     mut shm: Option<Arc<crate::shm::ShmReader>>,
+    initial_compressed: bool,
     requested_selection: Option<features::SelectParam>,
 ) {
     let mut tmp = vec![0u8; 65536];
@@ -1611,6 +1644,8 @@ fn read_and_recover(
     let mut batch_skips: Vec<(usize, u64)> = Vec::new();
     let _ = sock.set_read_timeout(Some(Duration::from_millis(200)));
     let mut last_data = Instant::now();
+    let mut tcp_comp = initial_compressed
+        .then(|| labstream_proto::comp::CompState::new(codec.format, codec.channels));
 
     // Most samples of a chunk carry no timestamp. The reader rebuilds each one
     // from the position in the stream, and the accumulator runs for the life of
@@ -1650,6 +1685,8 @@ fn read_and_recover(
             Arc::clone(&conn.lost),
             Arc::clone(&conn.gaps),
             Arc::clone(&conn.latency),
+            Arc::clone(&conn.wire_bytes),
+            Arc::clone(&conn.raw_bytes),
             until,
         )
     };
@@ -1688,6 +1725,8 @@ fn read_and_recover(
                 until.map(|n| (n, &mut resent)),
                 dg.as_ref(),
                 Some(&conn.gaps),
+                tcp_comp.as_mut(),
+                Some((&conn.wire_bytes, &conn.raw_bytes)),
                 &mut batch_skips,
                 &mut batch,
             );
@@ -1872,6 +1911,11 @@ fn read_and_recover(
                     *conn.shm.lock().unwrap() = new_shm.clone();
                     conn.on_shm.store(new_shm.is_some(), Ordering::SeqCst);
                     conn.shm_gen.fetch_add(1, Ordering::Release);
+                    let new_comp = new_shm.is_none() && features::comp_answer(c.features());
+                    conn.compressed.store(new_comp, Ordering::SeqCst);
+                    tcp_comp = new_comp.then(|| {
+                        labstream_proto::comp::CompState::new(codec.format, codec.channels)
+                    });
                     shm = new_shm;
                     dg = if shm.is_some() {
                         None
@@ -1946,6 +1990,14 @@ fn read_and_recover(
                             *conn.shm.lock().unwrap() = new_shm.clone();
                             conn.on_shm.store(new_shm.is_some(), Ordering::SeqCst);
                             conn.shm_gen.fetch_add(1, Ordering::Release);
+                            let new_comp =
+                                new_shm.is_none() && features::comp_answer(c.features());
+                            conn.compressed.store(new_comp, Ordering::SeqCst);
+                            conn.wire_bytes.store(0, Ordering::Relaxed);
+                            conn.raw_bytes.store(0, Ordering::Relaxed);
+                            tcp_comp = new_comp.then(|| {
+                                labstream_proto::comp::CompState::new(codec.format, codec.channels)
+                            });
                             shm = new_shm;
                             dg = if shm.is_some() {
                                 None
@@ -2016,12 +2068,16 @@ fn decode_buffered(
     mut resent: Option<(u64, &mut u64)>,
     dg: Option<&crate::dgram_in::DgramIn>,
     tcp_gaps: Option<&Arc<Mutex<GapTracker>>>,
+    mut comp: Option<&mut labstream_proto::comp::CompState>,
+    byte_stats: Option<(&AtomicU64, &AtomicU64)>,
     batch_skips: &mut Vec<(usize, u64)>,
     out: &mut Vec<PackedSample>,
 ) -> Result<(), labstream_wire::Error> {
     use labstream_proto::dgram::{self, Record};
     use labstream_proto::seq::{peek, Next, RECORD_LEN};
     let mut pos = 0;
+    let mut wire_acc = 0u64;
+    let mut raw_acc = 0u64;
     let mut last_tcp_ts: Option<f64> = None;
     let mut first_tcp_ts: Option<f64> = None;
     let mut had_gap_event = false;
@@ -2068,9 +2124,17 @@ fn decode_buffered(
                 _ => {}
             }
         }
-        match codec.decode_packed(&carry[pos..]) {
-            Ok((mut sample, used)) => {
+        let step = match comp.as_deref_mut() {
+            Some(c) => c.decode_tcp_sample(codec, &carry[pos..]),
+            None => codec
+                .decode_packed(&carry[pos..])
+                .map(|(s, used)| (s, used, used)),
+        };
+        match step {
+            Ok((mut sample, used, plain_wire)) => {
                 pos += used;
+                wire_acc += used as u64;
+                raw_acc += plain_wire as u64;
                 sample.timestamp = deducer.apply(sample.timestamp);
                 let number = counter.as_deref().and_then(|c| c.expected());
                 if let Some(c) = counter.as_deref_mut() {
@@ -2104,6 +2168,10 @@ fn decode_buffered(
             Err(e) => break Err(e),
         }
     };
+    if let (Some((wb, rb)), true) = (byte_stats, raw_acc > 0) {
+        wb.fetch_add(wire_acc, Ordering::Relaxed);
+        rb.fetch_add(raw_acc, Ordering::Relaxed);
+    }
     if let (Some(g), Some(first), Some(last)) = (tcp_gaps, first_tcp_ts, last_tcp_ts) {
         g.lock().unwrap().on_batch(first, last);
     }
@@ -2236,6 +2304,10 @@ fn handshake(
     offer.extend(features::offer_resume(allowed, resume_from));
     offer.extend(features::offer_dgram(allowed));
     offer.extend(features::offer_select(allowed, selection));
+    offer.extend(features::offer_comp(
+        allowed,
+        info.format == labstream_wire::Format::String,
+    ));
     if crate::shm::supported()
         && info.format != labstream_wire::Format::String
         && selection.map_or(true, |s| s.decimate <= 1)
@@ -2397,6 +2469,8 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
                 &mut Vec::new(),
                 &mut out,
             )
@@ -2426,6 +2500,8 @@ mod tests {
                 &mut carry,
                 &mut deducer,
                 Some(&mut counter),
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -2466,6 +2542,8 @@ mod tests {
             &mut deducer,
             Some(&mut counter),
             Some((27, &mut resent)),
+            None,
+            None,
             None,
             None,
             &mut Vec::new(),
@@ -2564,6 +2642,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
             &mut Vec::new(),
             &mut out
         )
@@ -2612,6 +2692,8 @@ mod tests {
             None,
             None,
             Some(&gaps),
+            None,
+            None,
             &mut skips,
             &mut out,
         )

@@ -7,6 +7,18 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Lossless wire compression via `comp/1` (`docs/roadmap.md`, step 7,
+  `docs/extensions.md`, section `comp`): `labstream_proto::comp` (`CompState`,
+  `DgramCompEncoder`, `decode_dgram_payload`) applies bit-exact channel deltas
+  (with an order-preserving IEEE-754 bijection for floats), ZigZag folding, and
+  adaptive LSB-first Golomb-Rice codes over TCP (`0xF9`/`0xFA` with
+  zero-overhead plain fallback) and self-contained UDP `DATA_COMP` (type `5`)
+  datagrams. Adds `Inlet::is_compressed` and `Inlet::compression_ratio`
+  (`labstream-net` and `labstream`), `InletHealth::{compressed,
+  compression_ratio}`, `labstream_inlet_compressed` and
+  `labstream_inlet_compression_ratio` (`labstream-capi`), live tests
+  (`crates/labstream-net/tests/comp_live.rs`), `comp-report` EEG benchmark, and
+  the 1 Mbit/s netns and 4000 Hz CPU test (`conformance/oracle/comp_test.py`).
 - Same-machine shared-memory transport via `shm/1` (`docs/roadmap.md`, step 9,
   `docs/extensions.md`, section `shm`): `ShmParam` negotiation in
   `labstream-proto`, owner-only lock-free seqlock SPSC ring in

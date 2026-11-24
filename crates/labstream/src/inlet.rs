@@ -371,6 +371,17 @@ impl Inlet {
         self.inner.on_shm()
     }
 
+    /// True while wire compression (`comp/1`) is active on this connection.
+    pub fn is_compressed(&self) -> bool {
+        self.inner.is_compressed()
+    }
+
+    /// Ratio `wire_bytes / raw_bytes` observed on this connection when
+    /// `comp/1` is active, or `None` when uncompressed or before data arrives.
+    pub fn compression_ratio(&self) -> Option<f64> {
+        self.inner.compression_ratio()
+    }
+
     /// Snapshot the health of this inlet in one call.
     pub fn health(&self) -> crate::InletHealth {
         self.inner.health()

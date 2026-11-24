@@ -185,6 +185,9 @@ impl Conn {
                     assert_eq!(at, payload.len());
                     data.push(numbers);
                 }
+                Datagram::DataComp { .. } => {
+                    panic!("the test did not offer comp/1")
+                }
                 Datagram::Idle { cookie, next } => {
                     assert_eq!(cookie, self.param.cookie);
                     idle.push(next);

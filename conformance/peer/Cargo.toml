@@ -17,6 +17,11 @@ path = "src/main.rs"
 name = "wifitest"
 path = "src/bin/wifitest.rs"
 
+[[bin]]
+name = "comp-report"
+path = "src/bin/comp_report.rs"
+
 [dependencies]
 labstream-wire.workspace = true
+labstream-proto.workspace = true
 labstream-net.workspace = true

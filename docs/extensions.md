@@ -1118,6 +1118,52 @@ other consumers on the same outlet still receive the full stream.
    selected channel count, the selected nominal rate, and the selected
    `<channel>` entries under `<desc><channels>`.
 
+### `comp`: lossless wire compression
+
+A wireless or slow link has less bandwidth than a cable. With `comp/1`, two
+labstream peers compress numeric sample values bit for bit on TCP and on UDP
+(`dgram/1`).
+
+1. **Negotiation.** For a numeric stream (not `Format::String`), the inlet
+   offers `comp/1` with no parameter. A non-blocking labstream outlet answers
+   `comp/1`. A `liblsl` peer ignores the header and uses plain LSL. When
+   `shm/1` activates after `shm-ok`, shared memory transfers raw bytes directly
+   and `comp/1` stays off.
+2. **Test pattern.** The two test pattern samples always use plain LSL framing.
+   Compression starts at the first byte after the second test pattern sample.
+3. **Bit-exact channel transform.** Each numeric channel value maps bijectively
+   to an unsigned integer of the channel width (identity for `Int8`, `Int16`,
+   `Int32`, and `Int64`, and an order-preserving IEEE-754 bijection for
+   `Float32` and `Double64` that keeps `-0.0`, `+0.0`, subnormals, and NaN
+   payloads exact). The encoder takes a wrapping first-order delta against the
+   previous sample on the same channel, applies ZigZag sign folding, and writes
+   an adaptive LSB-first Golomb-Rice code with a 15-zero escape to the raw
+   width. Sample 0 never updates the delta EMA so DC offsets do not inflate
+   sample 1.
+4. **TCP framing.** On TCP, the outlet and inlet keep one per-channel state in
+   lockstep. When compressed bytes plus 2 bytes are fewer than the raw channel
+   bytes, the outlet writes one compressed sample record:
+   - `0xF9`, `u16` payload length (little-endian), compressed payload (deduced
+     timestamp).
+   - `0xFA`, 8-byte `f64` timestamp (connection byte order), `u16` payload
+     length (little-endian), compressed payload (transmitted timestamp).
+   When compression does not save bytes, the outlet writes a plain LSL sample
+   (`0x01` or `0x02`) and both peers update the predictor state from that
+   sample. Worst-case expansion on incompressible data is zero bytes.
+5. **UDP framing (`dgram/1`).** When both `dgram/1` and `comp/1` are active,
+   the outlet packs consecutive samples into self-contained `DATA_COMP`
+   datagrams (type byte `5`, same 23-byte header as `DATA` type `2`). The
+   payload holds a flags byte, the raw little-endian `f64` timestamp of sample
+   0, sample 0 (raw or Rice-coded), and then for each later sample a 2nd-order
+   `f64` timestamp delta and all channel deltas. Each datagram decodes
+   independently with no cross-datagram state. If plain `DATA` is smaller or
+   equal, the outlet sends `DATA` (type `2`).
+6. **Observability.** `Inlet::is_compressed` and `Inlet::compression_ratio`
+   (`labstream-net` and `labstream`), `InletHealth::{compressed,
+   compression_ratio}`, and `labstream_inlet_compressed` plus
+   `labstream_inlet_compression_ratio` (`labstream-capi`) report active
+   compression and the observed wire-to-raw byte ratio.
+
 ### `shm`: shared memory on one machine
 
 The hostname does not prove that the two processes share a machine. Two

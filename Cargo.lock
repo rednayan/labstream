@@ -88,6 +88,7 @@ name = "lsl-peer"
 version = "0.0.0"
 dependencies = [
  "labstream-net",
+ "labstream-proto",
  "labstream-wire",
 ]
 

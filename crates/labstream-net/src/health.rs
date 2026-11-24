@@ -109,6 +109,11 @@ pub struct InletHealth {
     pub on_udp: bool,
     /// True while samples arrive through shared memory (`shm/1`).
     pub on_shm: bool,
+    /// True while wire compression (`comp/1`) is active on this connection.
+    pub compressed: bool,
+    /// Ratio `wire_bytes / raw_bytes` observed on this connection when
+    /// `comp/1` is active, or `None` when uncompressed or before data arrives.
+    pub compression_ratio: Option<f64>,
     /// Number of samples currently waiting in the inlet buffer.
     pub buffered: usize,
     /// Capacity of the inlet buffer, in samples.

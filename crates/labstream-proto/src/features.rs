@@ -46,6 +46,13 @@ pub const SELECT: &str = "select";
 /// [`offer_shm`], [`shm_request`], and [`shm_answer`] handle it.
 pub const SHM: &str = "shm";
 
+/// The name of the lossless wire compression feature (`docs/extensions.md`,
+/// section `comp`, `docs/roadmap.md`, step 7).
+///
+/// `comp` applies to numeric streams only (not `Format::String`) and carries no
+/// parameter. [`offer_comp`], [`comp_request`], and [`comp_answer`] handle it.
+pub const COMP: &str = "comp";
+
 /// The features with no parameter that this library implements, each with
 /// its versions.
 pub const SUPPORTED: &[(&str, &[u32])] = &[(SEQ, &[1])];
@@ -625,6 +632,33 @@ pub fn shm_answer(agreed: &[Token]) -> Option<ShmParam> {
     ShmParam::parse(token.param.as_deref()?)
 }
 
+/// True when the configuration allows `comp`.
+fn comp_allowed(allowed: &[String]) -> bool {
+    allowed.iter().any(|a| a == COMP)
+}
+
+/// The `comp/1` token that an inlet offers for a numeric stream, or `None`
+/// when `comp` is disabled or the stream carries strings.
+pub fn offer_comp(allowed: &[String], is_string: bool) -> Option<Token> {
+    (!is_string && comp_allowed(allowed)).then(|| Token::new(COMP, 1))
+}
+
+/// True when the outlet can answer `comp/1` for this request.
+pub fn comp_request(offered: &[Token], allowed: &[String], is_string: bool) -> bool {
+    !is_string
+        && comp_allowed(allowed)
+        && offered
+            .iter()
+            .any(|t| t.name == COMP && t.version == 1 && t.param.is_none())
+}
+
+/// True when `comp/1` is active in the agreed feature list.
+pub fn comp_answer(agreed: &[Token]) -> bool {
+    agreed
+        .iter()
+        .any(|t| t.name == COMP && t.version == 1 && t.param.is_none())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -874,6 +908,24 @@ mod tests {
         ));
         // The plain answer leaves dgram out.
         assert_eq!(answer(&offered, &with_dgram()), vec![Token::new(SEQ, 1)]);
+    }
+
+    #[test]
+    fn comp_negotiates_on_numeric_streams_and_skips_strings() {
+        let allowed = vec![SEQ.to_string(), COMP.to_string()];
+        assert_eq!(offer_comp(&allowed, false), Some(Token::new(COMP, 1)));
+        assert_eq!(offer_comp(&allowed, true), None);
+        assert_eq!(offer_comp(&all(), false), None);
+
+        let offered = parse("seq/1 comp/1");
+        assert!(comp_request(&offered, &allowed, false));
+        assert!(!comp_request(&offered, &allowed, true));
+        assert!(!comp_request(&parse("seq/1 comp/1=01"), &allowed, false));
+        assert!(!comp_request(&offered, &all(), false));
+
+        let on = agreed(&offered, &[Token::new(SEQ, 1), Token::new(COMP, 1)]);
+        assert!(comp_answer(&on));
+        assert!(!comp_answer(&agreed(&offered, &[Token::new(SEQ, 1)])));
     }
 
     #[test]

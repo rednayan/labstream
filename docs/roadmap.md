@@ -1,8 +1,7 @@
 # Roadmap: features that liblsl does not have
 
-**Status:** approved by the user on 2026-11-16. The gate, step 0, step 1,
-step 2, step 5, step 10, step 11 (library and C API), and step 12 are
-complete. The other steps are not implemented.
+**Status:** approved by the user on 2026-11-16. The gate and steps 0 to 12
+(step 11 library and C API) are complete. Steps 13 to 17 are not implemented.
 
 This page gives the order of the labstream-only features, the success
 criterion of each feature, and the dependencies. Each feature follows the
@@ -419,6 +418,25 @@ entropy coder) decreases the bytes on the link.
    without compression arrives with no loss.
 4. The CPU of the outlet stays below 5 % of one core at 4000 Hz x 64
    channels.
+
+**Status:** complete on 2026-11-24. `comp/1` is on by default in
+`labstream.Features` (`docs/extensions.md`, section `comp`).
+`labstream_proto::comp` implements bit-exact channel deltas (with an
+order-preserving IEEE-754 bijection for floats), ZigZag sign folding, adaptive
+LSB-first Golomb-Rice coding, TCP records (`0xF9` and `0xFA`) with zero-overhead
+plain fallback, and self-contained UDP `DATA_COMP` (type `5`) datagrams.
+`Inlet::is_compressed`, `Inlet::compression_ratio`, `InletHealth`, and C
+functions `labstream_inlet_compressed` and `labstream_inlet_compression_ratio`
+expose active compression and byte ratios. `conformance/peer/src/bin/comp_report.rs`
+reports exact byte reductions across recorded XDF captures (`verify.xdf`,
+`ipv6.xdf`, `soak.xdf`: 6.7 % TCP, 20.4 % UDP) and 24-bit integer ADC EEG
+streams (63.5 % TCP and 47.1 % UDP at 512 Hz x 64 ch, 76.3 % TCP and 74.4 % UDP
+at 4000 Hz x 64 ch, at 268 MB/s encode speed). `conformance/oracle/comp_test.py`
+streams 512 Hz x 64 ch `Int32` EEG (~1.15 Mbit/s raw) over a 1 Mbit/s `tc netem`
+veth link with 0 lost samples and 0 bit mismatches (wire ratio 0.354 on UDP and
+0.264 on TCP, against real-time lag without compression). At 4000 Hz x 64 ch
+(chunk 32), pure-C `oracle/latency.py` measures 2.8 % outlet CPU on TCP and
+4.1 % on UDP (`docs/latency.md`). `oracle/interop.py` passes (28 of 28).
 
 ### Step 8: flat typed API and shared samples
 

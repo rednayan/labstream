@@ -841,6 +841,26 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         }
     }
 
+    // Negotiate `comp/1` on numeric non-blocking sessions (`docs/extensions.md`,
+    // section `comp`). If `shm/1` activates after the headers, shared memory
+    // transfers raw bytes directly and `comp/1` is unused.
+    let compressed = if let (false, Some(o), Some(a)) =
+        (shared.sync_mode, offered.as_deref(), answered.as_mut())
+    {
+        let is_str = info.format == labstream_wire::Format::String;
+        if features::comp_request(o, allowed, is_str) {
+            a.push(features::Token::new(features::COMP, 1));
+            if trace {
+                eprintln!("TRACE comp: enabled");
+            }
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     // Negotiate `shm/1` on fresh numeric non-decimated sessions
     // (`docs/extensions.md`, section `shm`).
     let mut shm_writer: Option<Arc<crate::shm::ShmWriter>> = None;
@@ -1079,6 +1099,7 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         &mut stream,
         max_chunk,
         numbered,
+        compressed,
         resend.as_ref().map(|r| (&shared.fanout, r)),
         dgram,
         selector,
@@ -1165,13 +1186,13 @@ fn feed<W: Write>(
     trace: bool,
 ) -> usize {
     feed_with(
-        queue, codec, out, max_chunk, numbered, None, None, None, stop, trace,
+        queue, codec, out, max_chunk, numbered, false, None, None, None, stop, trace,
     )
 }
 
 /// Copy the samples of one consumer queue to its socket, with an optional
 /// resend for the `resume` feature and optional channel/rate selection
-/// (`select/1`).
+/// (`select/1`) and lossless compression (`comp/1`).
 ///
 /// With a resend, the connection first sends the history samples from `R`
 /// up to `N - 1`, in blocks, each sample with its full timestamp. Then it
@@ -1185,6 +1206,7 @@ fn feed_with<W: Write>(
     out: &mut W,
     max_chunk: usize,
     numbered: bool,
+    compressed: bool,
     resend: Option<(&Fanout, &Resend)>,
     dgram: Option<crate::dgram_out::Setup>,
     mut selector: Option<labstream_proto::select::StreamSelector>,
@@ -1193,6 +1215,8 @@ fn feed_with<W: Write>(
 ) -> usize {
     let decimating = selector.as_ref().is_some_and(|s| s.param().decimate > 1);
     let mut numbering = numbered.then(Numbering::new);
+    let mut tcp_comp = (compressed && labstream_proto::comp::CompState::supports(codec.format))
+        .then(|| labstream_proto::comp::CompState::new(codec.format, codec.channels));
     // The first history block decides the number of the first record.
     let mut history: Vec<PackedSample> = Vec::new();
     let mut block = match resend {
@@ -1259,12 +1283,17 @@ fn feed_with<W: Write>(
             if let Some(n) = numbering.as_mut() {
                 n.before(number, &mut pending);
             }
-            let enc = match proj_channels.as_deref() {
-                Some(chs) => {
+            let enc = match (proj_channels.as_deref(), tcp_comp.as_mut()) {
+                (Some(chs), Some(c)) => {
+                    let p = labstream_proto::select::project_packed(s, chs);
+                    c.encode_tcp_sample(codec, &p, p.timestamp, &mut pending)
+                }
+                (None, Some(c)) => c.encode_tcp_sample(codec, s, s.timestamp, &mut pending),
+                (Some(chs), None) => {
                     let p = labstream_proto::select::project_packed(s, chs);
                     codec.encode_packed(&p, &mut pending)
                 }
-                None => codec.encode_packed(s, &mut pending),
+                (None, None) => codec.encode_packed(s, &mut pending),
             };
             if enc.is_err() {
                 return sent;
@@ -1303,9 +1332,11 @@ fn feed_with<W: Write>(
                 fanout,
                 codec,
                 channels: proj_channels,
+                compressed: tcp_comp.is_some(),
                 out,
                 numbering,
                 last,
+                tcp_comp,
                 setup,
                 trace,
             }
@@ -1352,7 +1383,13 @@ fn feed_with<W: Write>(
                         n.before(decimated_seq, &mut pending);
                     }
                     decimated_seq = decimated_seq.wrapping_add(1);
-                    if codec.encode_packed(&emitted, &mut pending).is_err() {
+                    let enc = match tcp_comp.as_mut() {
+                        Some(c) => {
+                            c.encode_tcp_sample(codec, &emitted, emitted.timestamp, &mut pending)
+                        }
+                        None => codec.encode_packed(&emitted, &mut pending),
+                    };
+                    if enc.is_err() {
                         return sent;
                     }
                     count += 1;
@@ -1380,12 +1417,17 @@ fn feed_with<W: Write>(
                 } else {
                     s.timestamp
                 };
-                let enc = match proj_channels.as_deref() {
-                    Some(chs) => {
+                let enc = match (proj_channels.as_deref(), tcp_comp.as_mut()) {
+                    (Some(chs), Some(c)) => {
+                        let p = labstream_proto::select::project_packed(s, chs);
+                        c.encode_tcp_sample(codec, &p, ts, &mut pending)
+                    }
+                    (None, Some(c)) => c.encode_tcp_sample(codec, s, ts, &mut pending),
+                    (Some(chs), None) => {
                         let p = labstream_proto::select::project_packed(s, chs);
                         codec.encode_packed_at(&p, ts, &mut pending)
                     }
-                    None => codec.encode_packed_at(s, ts, &mut pending),
+                    (None, None) => codec.encode_packed_at(s, ts, &mut pending),
                 };
                 if enc.is_err() {
                     return sent;
@@ -1796,6 +1838,7 @@ mod tests {
             &mut out,
             usize::MAX,
             true,
+            false,
             Some((f, &resend)),
             None,
             None,

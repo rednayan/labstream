@@ -386,6 +386,37 @@ for each cell:
   loopback: the inlet replies `shm-no`, `labstream_inlet_on_shm` returns 0,
   and all 200 samples arrive over TCP with 0 errors and 0 lost.
 
+## Step 7: `comp/1` lossless wire compression
+
+`comp-report` (`conformance/peer/src/bin/comp_report.rs`),
+`conformance/oracle/comp_test.py`, and `oracle/latency.py` ran on 2026-11-24 on
+`feat/comp`. Every dataset round-trips bit for bit on TCP and on UDP
+(`DATA_COMP`, chunk 16):
+
+| dataset | format | ch | samples | TCP wire B (decrease) | UDP wire B (decrease) | encode speed |
+|---|---|---:|---:|---|---|---:|
+| `verify.xdf` (`Verify-oracle`) | Float32 | 8 | 6092 | 249772 -> 233103 (-6.7 %) | 198863 (-20.4 %) | 124.5 MB/s |
+| `ipv6.xdf` (`IPv6Test-oracle`) | Float32 | 8 | 7084 | 290444 -> 271207 (-6.6 %) | 231443 (-20.3 %) | 68.0 MB/s |
+| `soak.xdf` (`Verify-oracle`) | Float32 | 8 | 10000 | 410000 -> 382817 (-6.6 %) | 326701 (-20.3 %) | 120.2 MB/s |
+| 24-bit ADC EEG 512 Hz | Int32 | 64 | 2560 | 678400 -> 247307 (-63.5 %) | 358909 (-47.1 %) | 265.6 MB/s |
+| 24-bit ADC EEG 4000 Hz | Int32 | 64 | 20000 | 5300000 -> 1257833 (-76.3 %) | 1359279 (-74.4 %) | 268.5 MB/s |
+| 16-bit ADC EEG 512 Hz | Int16 | 32 | 2560 | 186880 -> 116012 (-37.9 %) | 120065 (-35.8 %) | 123.8 MB/s |
+| 24-bit ADC scaled f32 512 Hz | Float32 | 64 | 2560 | 678400 -> 386494 (-43.0 %) | 547288 (-19.3 %) | 182.6 MB/s |
+
+- **1 Mbit/s `tc netem` link (`conformance/oracle/comp_test.py`).** A 5 s
+  stream of 512 Hz x 64 ch `Int32` EEG (~1.15 Mbit/s raw, chunk 16) falls 1.1 s
+  behind without compression (`6.113 s` elapsed). With `comp/1`, the stream
+  arrives in real time with 0 lost samples and 0 bit mismatches: wire ratio
+  `0.3538` (-64.6 %) on UDP (`5.172 s`) and `0.2643` (-73.6 %) on TCP
+  (`5.195 s`).
+- **4000 Hz x 64 ch outlet CPU (`oracle/latency.py`, chunk 32, 5 s).** Outlet
+  CPU stays below the 5 % target on both network paths: 2.8 % on TCP (inlet
+  2.3 %, 0 lost) and 4.1 % on UDP (inlet 3.2 %, 0 lost). With `comp_test.py`
+  on 4000 Hz x 64 ch `Int32` EEG, outlet CPU is 3.59 % on TCP (ratio `0.2633`)
+  and 4.67 % on UDP (ratio `0.3286`). Default same-machine `shm/1` stays
+  unchanged at 36 us p50 and 1.5 % outlet CPU (7 us p50 at 512 Hz x 8 ch,
+  chunk 1).
+
 ## What this benchmark does not measure
 
 - **One-way latency between two machines.** Two machines do not share a

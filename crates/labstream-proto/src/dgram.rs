@@ -27,6 +27,8 @@ pub const DATA: u8 = 2;
 pub const IDLE: u8 = 3;
 /// The type byte of a feedback datagram.
 pub const FEEDBACK: u8 = 4;
+/// The type byte of a compressed data datagram (`comp/1` + `dgram/1`).
+pub const DATA_COMP: u8 = 5;
 /// The length of the header of a feedback datagram.
 pub const FEEDBACK_HEADER: usize = 1 + 8 + 4 + 1;
 /// The most gaps in one feedback datagram.
@@ -94,6 +96,19 @@ pub enum Datagram<'a> {
         /// The samples, in the encoding of SPEC.md 7.
         payload: &'a [u8],
     },
+    /// Compressed samples with consecutive numbers (`comp/1`).
+    DataComp {
+        /// The cookie of the answer.
+        cookie: u64,
+        /// The number of the first sample.
+        first: u64,
+        /// The count of samples.
+        count: u16,
+        /// The number of the datagram.
+        serial: u32,
+        /// Self-contained compressed block decoded by [`crate::comp::decode_dgram_payload`].
+        payload: &'a [u8],
+    },
     /// No sample follows.
     Idle {
         /// The cookie of the answer.
@@ -157,6 +172,15 @@ pub fn data_header(out: &mut Vec<u8>, cookie: u64, first: u64, count: u16, seria
     out.extend_from_slice(&serial.to_le_bytes());
 }
 
+/// Write the header of a compressed data datagram (`DATA_COMP`).
+pub fn data_comp_header(out: &mut Vec<u8>, cookie: u64, first: u64, count: u16, serial: u32) {
+    out.push(DATA_COMP);
+    out.extend_from_slice(&cookie.to_le_bytes());
+    out.extend_from_slice(&first.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&serial.to_le_bytes());
+}
+
 /// Write a feedback datagram. Only the first [`MAX_GAPS`] gaps go in.
 pub fn feedback(cookie: u64, loss: u32, gaps: &[(u64, u32)]) -> Vec<u8> {
     let gaps = &gaps[..gaps.len().min(MAX_GAPS)];
@@ -195,6 +219,13 @@ pub fn parse(buf: &[u8]) -> Result<Datagram<'_>, Error> {
             serial: u32::from_le_bytes([buf[19], buf[20], buf[21], buf[22]]),
             payload: &buf[DATA_HEADER..],
         }),
+        DATA_COMP if buf.len() >= DATA_HEADER => Ok(Datagram::DataComp {
+            cookie: u64_at(buf, 1),
+            first: u64_at(buf, 9),
+            count: u16::from_le_bytes([buf[17], buf[18]]),
+            serial: u32::from_le_bytes([buf[19], buf[20], buf[21], buf[22]]),
+            payload: &buf[DATA_HEADER..],
+        }),
         IDLE if buf.len() >= 17 => Ok(Datagram::Idle {
             cookie: u64_at(buf, 1),
             next: u64_at(buf, 9),
@@ -211,7 +242,7 @@ pub fn parse(buf: &[u8]) -> Result<Datagram<'_>, Error> {
                 gaps: Gaps(&buf[FEEDBACK_HEADER..end]),
             })
         }
-        HELLO | DATA | IDLE | FEEDBACK => Err(Error::Truncated),
+        HELLO | DATA | DATA_COMP | IDLE | FEEDBACK => Err(Error::Truncated),
         other => Err(Error::BadType(other)),
     }
 }

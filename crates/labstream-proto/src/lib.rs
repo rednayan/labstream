@@ -23,6 +23,7 @@
 #![deny(missing_docs)]
 
 pub mod canon;
+pub mod comp;
 pub mod dgram;
 pub mod discovery;
 pub mod features;

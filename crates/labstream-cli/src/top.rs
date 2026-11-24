@@ -361,14 +361,18 @@ pub fn to_json(snap: &TopSnapshot) -> String {
         s.push_str(&format!(",\"dropped\":{}", r.health.dropped));
         push_opt_u64(&mut s, "resent", r.health.resent);
         s.push_str(&format!(
-            ",\"recoveries\":{},\"connected\":{},\"on_udp\":{},\"buffered\":{},\"buffer_capacity\":{},\"gap_count\":{}}}",
+            ",\"recoveries\":{},\"connected\":{},\"on_udp\":{},\"on_shm\":{},\"compressed\":{},\"buffered\":{},\"buffer_capacity\":{},\"gap_count\":{}",
             r.health.recoveries,
             r.health.connected,
             r.health.on_udp,
+            r.health.on_shm,
+            r.health.compressed,
             r.health.buffered,
             r.health.buffer_capacity,
             r.health.gap_count
         ));
+        push_opt_f64(&mut s, "compression_ratio", r.health.compression_ratio);
+        s.push('}');
     }
     s.push_str("]}");
     s
