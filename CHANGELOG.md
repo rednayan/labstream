@@ -7,6 +7,15 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Local-to-network LSL stream relay (`docs/roadmap.md`, step 4):
+  `labstream_net::relay::{StreamRelay, RelayOptions, is_relayed,
+  build_relayed_info}` (re-exported in `labstream::relay`), the
+  `labstream relay` command in `labstream-cli` (with `--disk-mb` for
+  store-and-forward), and `labstream_streaminfo_is_relayed` in
+  `labstream-capi`. Verified with live tests in
+  `crates/labstream-net/tests/relay_live.rs`, CLI tests in
+  `crates/labstream-cli/src/relay.rs`, and the real liblsl oracle netns
+  cut test `conformance/oracle/relay_test.py` (0 lost across an 8 s cut).
 - Disk-backed store-and-forward for `resume/1` (`docs/roadmap.md`, step 3).
   When `labstream.ResumeDisk` (in MiB, default 0) is above zero, `History`
   spills oldest samples from RAM into bounded immutable segment files on

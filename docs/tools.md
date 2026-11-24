@@ -106,6 +106,21 @@ Both `labstream top` and `labstream play` use standard Rust threads, I/O, and
     (`Verify-rust`) on `UDP` with `2-3 ms` latency and zero loss, drops,
     resends, recoveries, or gaps.
 
+## `labstream relay`
+
+```sh
+labstream relay [--name NAME] [--type TYPE] [--query PRED] [--name-suffix TEXT] [--session ID] [--out-session ID] [--disk-mb MIB] [--disk-dir DIR] [--ram-mb MIB] [--local-only] [--duration SECONDS]
+```
+
+`labstream relay` (roadmap step 4) attaches to existing LSL outlets (such as
+`liblsl` device drivers on the same machine) and republishes them through
+`labstream` outlets carrying `seq/1`, `resume/1`, `dgram/1`, and optional
+disk store-and-forward (`--disk-mb`). Each relayed stream keeps the full
+`<desc>` tree, sample bits, and raw timestamps of the source stream, adds a
+`<labstream_relay>` tag to `<desc>`, and marks `source_id` with `-relay` so
+inlets and `labstream_streaminfo_is_relayed` can tell relayed streams from
+source streams.
+
 ## Conformance plan
 
 1. **XDF parser unit tests.** Round-trip all seven LSL sample formats (exact

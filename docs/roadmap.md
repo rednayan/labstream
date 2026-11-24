@@ -331,6 +331,22 @@ peers.
    timestamps as the source stream.
 3. An inlet can tell the stream of the relay from the source stream.
 
+**Status:** complete on 2026-11-24. `labstream_net::relay::StreamRelay`
+(re-exported as `labstream::relay`) and `labstream relay` in
+`crates/labstream-cli` attach to matching local or session LSL streams,
+preserve the full `<desc>` tree, exact sample bits, and raw timestamps, and
+republish them through a labstream outlet carrying `seq/1`, `resume/1`,
+`dgram/1`, and optional disk store-and-forward (`--disk-mb`). Relayed
+streams append a `<labstream_relay>` tag to `<desc>`, a `-relay` suffix on
+`source_id` and name (configurable via `--name-suffix`), and expose
+`relay::is_relayed` and `labstream_streaminfo_is_relayed`. Live tests in
+`crates/labstream-net/tests/relay_live.rs`, CLI tests in
+`crates/labstream-cli/src/relay.rs`, and the real pinned liblsl oracle test
+`conformance/oracle/relay_test.py` (liblsl oracle outlet, `labstream relay`,
+8 s `tc netem` 100 % cut across two network namespaces, labstream inlet:
+4000/4000 unique samples, 2368 resent, 0 lost, 0 value or timestamp errors)
+verify all three criteria.
+
 ### Step 5: datagram transport
 
 On Wi-Fi, one lost TCP segment stops each later sample until the

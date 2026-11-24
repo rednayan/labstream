@@ -7,10 +7,14 @@
 //!   (`docs/tools.md`).
 //! - `labstream play`: replay an XDF 1.0 recording as live LSL outlets
 //!   (`docs/tools.md`).
+//! - `labstream relay`: forward local LSL streams through labstream outlets
+//!   with `seq/1`, `resume/1`, `dgram/1`, and store-and-forward
+//!   (`docs/roadmap.md`, step 4).
 
 #![deny(unsafe_code)]
 
 mod play;
+mod relay;
 mod top;
 mod xdf;
 
@@ -27,7 +31,8 @@ fn usage() -> &'static str {
 Commands:
   doctor    Run network and discovery diagnostics.
   top       Monitor active LSL streams using the health API.
-  play      Replay an XDF 1.0 recording as live LSL outlets."
+  play      Replay an XDF 1.0 recording as live LSL outlets.
+  relay     Relay local LSL streams with labstream extensions."
 }
 
 fn doctor_usage() -> &'static str {
@@ -142,6 +147,7 @@ fn main() -> ExitCode {
         },
         "top" => top::run_top(&args[1..]),
         "play" => play::run_play(&args[1..]),
+        "relay" => relay::run_relay(&args[1..]),
         other => {
             eprintln!("error: unknown command '{other}'\n\n{}", usage());
             ExitCode::from(2)

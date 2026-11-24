@@ -28,6 +28,7 @@ mod keepalive;
 pub mod netif;
 pub mod outlet;
 pub mod queue;
+pub mod relay;
 pub mod resolver;
 pub mod xpath;
 
@@ -39,6 +40,7 @@ pub use info::StreamInfo;
 pub use inlet::{build_property_query, read_fullinfo, resolve, Inlet};
 pub use outlet::Outlet;
 pub use queue::{Fanout, SampleQueue};
+pub use relay::{RelayOptions, StreamRelay};
 pub use resolver::ContinuousResolver;
 
 /// The session that a stream belongs to, when no file names another.

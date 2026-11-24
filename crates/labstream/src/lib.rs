@@ -73,6 +73,9 @@ pub use labstream_wire::Format;
 /// Network diagnostics for LSL discovery (`labstream doctor`).
 pub use labstream_net::doctor;
 
+/// Local-to-network LSL stream relay (`labstream relay`).
+pub use labstream_net::relay;
+
 /// Stream health snapshots and gap descriptors (`docs/health.md`).
 pub use labstream_net::{ConsumerHealth, Gap, GapKind, InletHealth, OutletHealth};
 

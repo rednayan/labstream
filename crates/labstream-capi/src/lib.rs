@@ -3432,6 +3432,20 @@ pub unsafe extern "C" fn labstream_outlet_history_disk_bytes(outlet: lsl_outlet)
     b.outlet.history_disk_bytes().min(i64::MAX as u64) as i64
 }
 
+/// True (`1`) when `info` describes a stream published by a `labstream` relay,
+/// or `0` otherwise (`docs/roadmap.md`, step 4).
+///
+/// # Safety
+/// `info` must be null or a valid handle from this library.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_streaminfo_is_relayed(info: lsl_streaminfo) -> i32 {
+    let Some(b) = (info as *mut InfoBox).as_mut() else {
+        return 0;
+    };
+    b.sync();
+    i32::from(labstream_net::relay::is_relayed(&b.info))
+}
+
 /// Run network and discovery diagnostics and return the report as JSON.
 ///
 /// Pass null or an empty string for `peers` to skip remote peer checks, or a
