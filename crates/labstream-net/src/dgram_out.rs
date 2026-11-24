@@ -198,12 +198,34 @@ pub(crate) struct Live<'a, W: Write> {
     pub queue: &'a SampleQueue,
     pub fanout: &'a Fanout,
     pub codec: &'a Codec,
+    pub channels: Option<Vec<u16>>,
     pub out: &'a mut W,
     pub numbering: Numbering,
     /// The number of the last sample on TCP, for the timestamp rule.
     pub last: Option<u64>,
     pub setup: Setup,
     pub trace: bool,
+}
+
+fn encode_selected(
+    codec: &Codec,
+    channels: Option<&[u16]>,
+    s: &PackedSample,
+    ts: Option<f64>,
+    out: &mut Vec<u8>,
+) -> Result<(), labstream_wire::Error> {
+    match (channels, ts) {
+        (Some(chs), Some(t)) => {
+            let p = labstream_proto::select::project_packed(s, chs);
+            codec.encode_packed_at(&p, t, out)
+        }
+        (Some(chs), None) => {
+            let p = labstream_proto::select::project_packed(s, chs);
+            codec.encode_packed(&p, out)
+        }
+        (None, Some(t)) => codec.encode_packed_at(s, t, out),
+        (None, None) => codec.encode_packed(s, out),
+    }
 }
 
 impl<W: Write> Live<'_, W> {
@@ -379,7 +401,15 @@ impl<W: Write> Live<'_, W> {
                             s.timestamp
                         };
                         self.last = Some(number);
-                        if self.codec.encode_packed_at(s, ts, &mut pending).is_err() {
+                        if encode_selected(
+                            self.codec,
+                            self.channels.as_deref(),
+                            s,
+                            Some(ts),
+                            &mut pending,
+                        )
+                        .is_err()
+                        {
                             return sent;
                         }
                         sent += 1;
@@ -396,7 +426,15 @@ impl<W: Write> Live<'_, W> {
                         // A datagram can arrive out of order, so each sample
                         // carries its full timestamp.
                         let start = slab.len();
-                        if self.codec.encode_packed_at(s, full[i], &mut slab).is_err() {
+                        if encode_selected(
+                            self.codec,
+                            self.channels.as_deref(),
+                            s,
+                            Some(full[i]),
+                            &mut slab,
+                        )
+                        .is_err()
+                        {
                             return sent;
                         }
                         ranges.push(start..slab.len());
@@ -481,7 +519,8 @@ impl<W: Write> Live<'_, W> {
             for (i, s) in history.iter().enumerate() {
                 let number = first.wrapping_add(i as u64);
                 self.numbering.before(number, pending);
-                if self.codec.encode_packed(s, pending).is_err() {
+                if encode_selected(self.codec, self.channels.as_deref(), s, None, pending).is_err()
+                {
                     return false;
                 }
                 self.last = Some(number);
@@ -546,7 +585,9 @@ impl<W: Write> Live<'_, W> {
                 let mut encoded = Vec::with_capacity(taken);
                 for s in &history {
                     let mut e = Vec::new();
-                    if self.codec.encode_packed(s, &mut e).is_err() {
+                    if encode_selected(self.codec, self.channels.as_deref(), s, None, &mut e)
+                        .is_err()
+                    {
                         return;
                     }
                     encoded.push(e);

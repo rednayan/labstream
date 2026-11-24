@@ -647,6 +647,8 @@ struct ConnState {
     /// The description of the stream that the reader is attached to. A
     /// recovery replaces it, and the instance identifier changes.
     info: Mutex<StreamInfo>,
+    /// Active `select/1` parameters agreed with the outlet, if any.
+    selection: Mutex<Option<features::SelectParam>>,
     /// True when the current connection uses `seq/1`. `docs/extensions.md`.
     numbered: AtomicBool,
     /// The samples that never arrived, from the `seq/1` numbers. The thread
@@ -691,7 +693,7 @@ impl Inlet {
         timeout: Duration,
         buffer_samples: i32,
     ) -> std::io::Result<Self> {
-        Inlet::open_full(info, timeout, buffer_samples, false)
+        Inlet::open_full(info, timeout, buffer_samples, false, None)
     }
 
     /// Open a feed and choose whether the inlet finds the stream again after a
@@ -703,7 +705,26 @@ impl Inlet {
         timeout: Duration,
         buffer_samples: i32,
     ) -> std::io::Result<Self> {
-        Inlet::open_full(info, timeout, buffer_samples, true)
+        Inlet::open_full(info, timeout, buffer_samples, true, None)
+    }
+
+    /// Open a feed requesting channel and/or rate selection (`select/1`,
+    /// `docs/roadmap.md`, step 6).
+    ///
+    /// If the outlet supports `select/1`, the returned inlet delivers only the
+    /// selected channels at the selected rate, and [`Inlet::info`] and
+    /// [`Inlet::fullinfo`] reflect the narrowed stream. If the outlet does not
+    /// support `select/1` (for example a `liblsl` outlet), the inlet falls back
+    /// cleanly to the full stream and [`Inlet::selection`] returns `None`.
+    pub fn open_selected(
+        info: &StreamInfo,
+        timeout: Duration,
+        buffer_samples: i32,
+        recover: bool,
+        selection: features::SelectParam,
+    ) -> std::io::Result<Self> {
+        let sel = selection.is_active().then_some(selection);
+        Inlet::open_full(info, timeout, buffer_samples, recover, sel)
     }
 
     fn open_full(
@@ -711,12 +732,26 @@ impl Inlet {
         timeout: Duration,
         buffer_samples: i32,
         recover: bool,
+        requested_selection: Option<features::SelectParam>,
     ) -> std::io::Result<Self> {
-        let (stream, client, buf) = handshake(info, timeout, buffer_samples, None)?;
+        let hs = handshake(
+            info,
+            timeout,
+            buffer_samples,
+            None,
+            requested_selection.as_ref(),
+        )?;
+        let (stream, client, data_codec, active_selection, buf) =
+            (hs.stream, hs.client, hs.codec, hs.selection, hs.carry);
         debug_assert_eq!(client.state(), State::Streaming);
         let numbered = uses_seq(&client);
         let resume = features::resume_answer(client.features());
         let dgram = features::dgram_answer(client.features());
+
+        let effective_info = match &active_selection {
+            Some(sel) => info.apply_selection(sel),
+            None => info.clone(),
+        };
 
         // The queue holds what the application has not pulled yet. Its size is
         // the value that went out in `Max-Buffer-Length`, which is a count of
@@ -739,6 +774,7 @@ impl Inlet {
             recoveries: AtomicU64::new(0),
             connected: AtomicBool::new(true),
             info: Mutex::new(info.clone()),
+            selection: Mutex::new(active_selection),
             numbered: AtomicBool::new(numbered),
             lost: Arc::new(AtomicU64::new(0)),
             on_udp: AtomicBool::new(false),
@@ -755,12 +791,11 @@ impl Inlet {
             let done = Arc::clone(&reader_done);
             let clk = Arc::clone(&clock);
             let state = Arc::clone(&conn);
-            let codec = *client.codec().expect("the handshake set the codec");
             std::thread::spawn(move || {
                 read_and_recover(
                     stream,
                     buf,
-                    codec,
+                    data_codec,
                     q,
                     done,
                     clk,
@@ -768,6 +803,7 @@ impl Inlet {
                     buffer_samples,
                     resume,
                     dgram,
+                    requested_selection,
                 );
             });
         }
@@ -776,8 +812,8 @@ impl Inlet {
             queue,
             reader_done,
             conn,
-            info: info.clone(),
-            source: LiveSource::new(Arc::clone(&clock), info.nominal_srate),
+            source: LiveSource::new(Arc::clone(&clock), effective_info.nominal_srate),
+            info: effective_info,
             clock,
             // No stage runs until a caller asks for one. liblsl uses the same
             // default (`include/lsl/common.h:103`).
@@ -836,8 +872,23 @@ impl Inlet {
     /// (`src/stream_info_impl.cpp:160`). The tree travels on the data port.
     /// This opens its own connection, the way `info_receiver` does
     /// (`src/info_receiver.cpp:60`), and leaves the feed connection alone.
+    ///
+    /// When `select/1` is active on this connection, the returned description
+    /// carries the selected channel count, selected rate, and selected channel
+    /// metadata under `<desc><channels>`.
     pub fn fullinfo(&self, timeout: Duration) -> std::io::Result<StreamInfo> {
-        read_fullinfo(&self.info, timeout)
+        let known = self.conn.info.lock().unwrap().clone();
+        let full = read_fullinfo(&known, timeout)?;
+        Ok(match self.conn.selection.lock().unwrap().as_ref() {
+            Some(sel) => full.apply_selection(sel),
+            None => full,
+        })
+    }
+
+    /// The active `select/1` selection negotiated with the outlet, or `None`
+    /// when the full stream is delivered.
+    pub fn selection(&self) -> Option<features::SelectParam> {
+        self.conn.selection.lock().unwrap().clone()
     }
 
     /// Read one sample.
@@ -1206,6 +1257,7 @@ fn read_and_recover(
     buffer_samples: i32,
     resume: Option<features::ResumeParam>,
     dgram: Option<features::DgramParam>,
+    requested_selection: Option<features::SelectParam>,
 ) {
     let mut tmp = vec![0u8; 65536];
     let mut batch: Vec<PackedSample> = Vec::new();
@@ -1216,7 +1268,13 @@ fn read_and_recover(
     // Most samples of a chunk carry no timestamp. The reader rebuilds each one
     // from the position in the stream, and the accumulator runs for the life of
     // the connection. SPEC.md 8.1.
-    let srate = conn.info.lock().unwrap().nominal_srate;
+    let srate = {
+        let base = conn.info.lock().unwrap().nominal_srate;
+        match conn.selection.lock().unwrap().as_ref() {
+            Some(sel) => sel.output_srate(base),
+            None => base,
+        }
+    };
     let mut deducer = labstream_wire::TimestampDeducer::new(srate);
 
     // The `seq/1` count. It lives as long as the inlet, so the first record
@@ -1386,16 +1444,26 @@ fn read_and_recover(
                 let from = epoch
                     .zip(counter.expected())
                     .map(|(epoch, number)| features::ResumeParam { epoch, number });
-                if let Ok((s, c, rest)) =
-                    handshake(&known, Duration::from_secs(1), buffer_samples, from)
-                {
+                if let Ok(hs) = handshake(
+                    &known,
+                    Duration::from_secs(1),
+                    buffer_samples,
+                    from,
+                    requested_selection.as_ref(),
+                ) {
+                    let (s, c, new_codec, new_sel, rest) =
+                        (hs.stream, hs.client, hs.codec, hs.selection, hs.carry);
                     if trace {
                         eprintln!("TRACE recover: connected again to {}", known.uid);
                     }
                     let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
                     sock = s;
                     carry = rest;
-                    codec = *c.codec().expect("the handshake set the codec");
+                    codec = new_codec;
+                    let eff_srate = new_sel.as_ref().map_or(known.nominal_srate, |sel| {
+                        sel.output_srate(known.nominal_srate)
+                    });
+                    *conn.selection.lock().unwrap() = new_sel;
                     let answer = features::resume_answer(c.features());
                     // A new epoch is a new run of the outlet with the old
                     // instance identifier. Its counter, its timestamps, and
@@ -1407,7 +1475,7 @@ fn read_and_recover(
                                 eprintln!("TRACE recover: a new run of the outlet");
                             }
                             counter.restart();
-                            deducer = labstream_wire::TimestampDeducer::new(known.nominal_srate);
+                            deducer = labstream_wire::TimestampDeducer::new(eff_srate);
                             clock.reset_offset();
                             conn.gaps.lock().unwrap().reset_cursor();
                             queue.clear_skips();
@@ -1433,8 +1501,16 @@ fn read_and_recover(
             }
             match found {
                 Found::Moved(fresh) => {
-                    match handshake(&fresh, Duration::from_secs(5), buffer_samples, None) {
-                        Ok((s, c, rest)) => {
+                    match handshake(
+                        &fresh,
+                        Duration::from_secs(5),
+                        buffer_samples,
+                        None,
+                        requested_selection.as_ref(),
+                    ) {
+                        Ok(hs) => {
+                            let (s, c, new_codec, new_sel, rest) =
+                                (hs.stream, hs.client, hs.codec, hs.selection, hs.carry);
                             // The old connection ends here. No sample of it
                             // goes to the queue after this point.
                             if let Some(old) = dg.take() {
@@ -1444,7 +1520,11 @@ fn read_and_recover(
                             let _ = s.set_read_timeout(Some(Duration::from_millis(200)));
                             sock = s;
                             carry = rest;
-                            codec = *c.codec().expect("the handshake set the codec");
+                            codec = new_codec;
+                            let eff_srate = new_sel.as_ref().map_or(fresh.nominal_srate, |sel| {
+                                sel.output_srate(fresh.nominal_srate)
+                            });
+                            *conn.selection.lock().unwrap() = new_sel;
                             // The old offset, the old fit, and the timestamp
                             // accumulator all describe a process that has
                             // gone. The probes go to the new service port
@@ -1455,7 +1535,7 @@ fn read_and_recover(
                                 clock.retarget(target);
                             }
                             clock.reset_offset();
-                            deducer = labstream_wire::TimestampDeducer::new(fresh.nominal_srate);
+                            deducer = labstream_wire::TimestampDeducer::new(eff_srate);
                             // A new outlet has a new counter and a new epoch.
                             counter.restart();
                             conn.gaps.lock().unwrap().reset_cursor();
@@ -1709,12 +1789,21 @@ fn uses_seq(client: &FeedClient) -> bool {
 ///
 /// `resume_from` is the epoch and the number for a `resume/1` request, or
 /// `None` for a request with no parameter.
+struct HandshakeResult {
+    stream: TcpStream,
+    client: FeedClient,
+    codec: labstream_wire::Codec,
+    selection: Option<features::SelectParam>,
+    carry: Vec<u8>,
+}
+
 fn handshake(
     info: &StreamInfo,
     timeout: Duration,
     buffer_samples: i32,
     resume_from: Option<features::ResumeParam>,
-) -> std::io::Result<(TcpStream, FeedClient, Vec<u8>)> {
+    selection: Option<&features::SelectParam>,
+) -> std::io::Result<HandshakeResult> {
     let addr = data_endpoint(info)?;
     let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
     stream.set_nodelay(true)?;
@@ -1733,6 +1822,7 @@ fn handshake(
     let mut offer = features::offer(allowed);
     offer.extend(features::offer_resume(allowed, resume_from));
     offer.extend(features::offer_dgram(allowed));
+    offer.extend(features::offer_select(allowed, selection));
     let (mut client, request) =
         FeedClient::start_with(params, info.format, info.channel_count as usize, offer);
     stream.write_all(&request)?;
@@ -1784,7 +1874,23 @@ fn handshake(
     }
 
     debug_assert_eq!(client.state(), State::Streaming);
-    Ok((stream, client, buf))
+    let active_selection = features::select_answer(client.features());
+    let data_codec = match (&active_selection, client.agreement()) {
+        (Some(sel), Some(ag)) => labstream_wire::Codec::new(
+            info.format,
+            sel.output_channels(info.channel_count as usize),
+            ag.order,
+        )
+        .with_suppress_subnormals(ag.suppress_subnormals),
+        _ => *client.codec().expect("the handshake set the codec"),
+    };
+    Ok(HandshakeResult {
+        stream,
+        client,
+        codec: data_codec,
+        selection: active_selection,
+        carry: buf,
+    })
 }
 
 impl Inlet {
@@ -1805,7 +1911,11 @@ impl Inlet {
     /// A recovery replaces this, and the instance identifier changes while the
     /// name and the source identifier stay.
     pub fn current_info(&self) -> StreamInfo {
-        self.conn.info.lock().unwrap().clone()
+        let base = self.conn.info.lock().unwrap().clone();
+        match self.conn.selection.lock().unwrap().as_ref() {
+            Some(sel) => base.apply_selection(sel),
+            None => base,
+        }
     }
 }
 

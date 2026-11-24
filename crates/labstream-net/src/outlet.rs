@@ -695,6 +695,37 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         .as_deref()
         .is_some_and(|a| features::has(a, features::SEQ, 1));
 
+    // Negotiate `select/1` before `resume/1` and `dgram/1` because decimation
+    // changes the sample timeline and channel projection shrinks datagrams.
+    let selected: Option<features::SelectParam> = if let (false, Some(o), Some(a)) =
+        (shared.sync_mode, offered.as_deref(), answered.as_mut())
+    {
+        if let Some(sel) = features::select_request(
+            o,
+            allowed,
+            info.channel_count as usize,
+            info.nominal_srate,
+            info.format == labstream_wire::Format::String,
+        ) {
+            a.push(sel.token());
+            if trace {
+                eprintln!(
+                    "TRACE select: decimate={} channels={:?}",
+                    sel.decimate, sel.channels
+                );
+            }
+            Some(sel)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let decimating = selected.as_ref().is_some_and(|s| s.decimate > 1);
+    let out_channels = selected.as_ref().map_or(info.channel_count as usize, |s| {
+        s.output_channels(info.channel_count as usize)
+    });
+
     let peer_label = stream
         .peer_addr()
         .map(|a| a.to_string())
@@ -707,7 +738,8 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
     let mut resumed: Option<(Registered, Resend)> = None;
     let queue_follows =
         !shared.sync_mode && accepted.max_buffer_length > 0 && accepted.codec_order().is_some();
-    if let (true, Some(o), Some(a)) = (queue_follows, offered.as_deref(), answered.as_mut()) {
+    let allow_resume = queue_follows && !decimating;
+    if let (true, Some(o), Some(a)) = (allow_resume, offered.as_deref(), answered.as_mut()) {
         if let Some(request) = features::resume_request(o, a, allowed) {
             if shared.fanout.start_history() {
                 let (queue, n) = shared.fanout.add_resumable_with_peer(
@@ -745,7 +777,7 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
     // its port and a cookie. `docs/extensions.md`, section `dgram`.
     let mut dgram_socket: Option<(std::net::UdpSocket, u64, std::net::IpAddr)> = None;
     if let (true, Some(o), Some(a)) = (resumed.is_some(), offered.as_deref(), answered.as_mut()) {
-        let fits = crate::dgram_out::sample_fits(info.format, info.channel_count as usize);
+        let fits = crate::dgram_out::sample_fits(info.format, out_channels);
         if fits && features::dgram_request(o, a, allowed) {
             let peer = stream.peer_addr()?;
             if let Some(sock) = crate::dgram_out::bind(peer) {
@@ -771,6 +803,8 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         None => return Ok(()),
     };
     let codec = Codec::new(info.format, info.channel_count as usize, order)
+        .with_suppress_subnormals(accepted.suppress_subnormals);
+    let data_codec = Codec::new(info.format, out_channels, order)
         .with_suppress_subnormals(accepted.suppress_subnormals);
 
     // Two test pattern samples open every feed. SPEC.md 6.
@@ -835,6 +869,16 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
     // unit the peer's API used. SPEC.md 8.6.
     let (consumer, resend) = match resumed {
         Some((c, r)) => (c, Some(r)),
+        None if decimating => (
+            Registered {
+                fanout: &shared.fanout,
+                queue: shared
+                    .fanout
+                    .add_resumable_with_peer(accepted.max_buffer_length.max(1) as usize, peer_label)
+                    .0,
+            },
+            None,
+        ),
         None => (
             Registered {
                 fanout: &shared.fanout,
@@ -871,15 +915,20 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         None => None,
     };
 
+    let selector = selected.map(|sel| {
+        labstream_proto::select::StreamSelector::new(sel, info.format, info.channel_count as usize)
+    });
+
     let stop = || *shared.stop.lock().unwrap();
     let sent = feed_with(
         &consumer.queue,
-        &codec,
+        &data_codec,
         &mut stream,
         max_chunk,
         numbered,
         resend.as_ref().map(|r| (&shared.fanout, r)),
         dgram,
+        selector,
         &stop,
         trace,
     );
@@ -949,11 +998,13 @@ fn feed<W: Write>(
     trace: bool,
 ) -> usize {
     feed_with(
-        queue, codec, out, max_chunk, numbered, None, None, stop, trace,
+        queue, codec, out, max_chunk, numbered, None, None, None, stop, trace,
     )
 }
 
-/// [`feed`], with an optional resend for the `resume` feature.
+/// Copy the samples of one consumer queue to its socket, with an optional
+/// resend for the `resume` feature and optional channel/rate selection
+/// (`select/1`).
 ///
 /// With a resend, the connection first sends the history samples from `R`
 /// up to `N - 1`, in blocks, each sample with its full timestamp. Then it
@@ -969,9 +1020,11 @@ fn feed_with<W: Write>(
     numbered: bool,
     resend: Option<(&Fanout, &Resend)>,
     dgram: Option<crate::dgram_out::Setup>,
+    mut selector: Option<labstream_proto::select::StreamSelector>,
     stop: &dyn Fn() -> bool,
     trace: bool,
 ) -> usize {
+    let decimating = selector.as_ref().is_some_and(|s| s.param().decimate > 1);
     let mut numbering = numbered.then(Numbering::new);
     // The first history block decides the number of the first record.
     let mut history: Vec<PackedSample> = Vec::new();
@@ -984,12 +1037,16 @@ fn feed_with<W: Write>(
     // The first record goes out at once, before any sample. A gap before
     // this connection is then visible on a quiet stream too.
     if let Some(n) = numbering.as_mut() {
-        let next = match block {
-            Some((first, _)) => first,
-            None => {
-                queue
-                    .pop_many_numbered_packed(&mut Vec::new(), 0, Duration::ZERO)
-                    .1
+        let next = if decimating {
+            0
+        } else {
+            match block {
+                Some((first, _)) => first,
+                None => {
+                    queue
+                        .pop_many_numbered_packed(&mut Vec::new(), 0, Duration::ZERO)
+                        .1
+                }
             }
         };
         let mut record = Vec::new();
@@ -1020,6 +1077,10 @@ fn feed_with<W: Write>(
         true
     };
 
+    let proj_channels: Option<Vec<u16>> = selector
+        .as_ref()
+        .and_then(|s| (!s.param().channels.is_empty()).then(|| s.param().channels.clone()));
+
     // The resend. Each history sample has its full timestamp.
     let mut last: Option<u64> = None;
     while let Some((first, taken)) = block {
@@ -1031,7 +1092,14 @@ fn feed_with<W: Write>(
             if let Some(n) = numbering.as_mut() {
                 n.before(number, &mut pending);
             }
-            if codec.encode_packed(s, &mut pending).is_err() {
+            let enc = match proj_channels.as_deref() {
+                Some(chs) => {
+                    let p = labstream_proto::select::project_packed(s, chs);
+                    codec.encode_packed(&p, &mut pending)
+                }
+                None => codec.encode_packed(s, &mut pending),
+            };
+            if enc.is_err() {
                 return sent;
             }
             last = Some(number);
@@ -1067,6 +1135,7 @@ fn feed_with<W: Write>(
                 queue,
                 fanout,
                 codec,
+                channels: proj_channels,
                 out,
                 numbering,
                 last,
@@ -1077,13 +1146,15 @@ fn feed_with<W: Write>(
     }
 
     let mut full = Vec::new();
+    let mut prev_raw: Option<u64> = None;
+    let mut decimated_seq: u64 = 0;
     loop {
         if stop() || queue.is_closed() {
             break;
         }
         batch.clear();
         full.clear();
-        let (taken, first) = if resend.is_some() {
+        let (taken, first) = if resend.is_some() || decimating {
             queue.pop_many_full_packed(
                 &mut batch,
                 &mut full,
@@ -1096,30 +1167,66 @@ fn feed_with<W: Write>(
         if taken == 0 {
             continue;
         }
-        for (i, s) in batch.iter().enumerate() {
-            let number = first.wrapping_add(i as u64);
-            if let Some(n) = numbering.as_mut() {
-                n.before(number, &mut pending);
+        if decimating {
+            let sel = selector.as_mut().expect("decimating requires selector");
+            for (i, s) in batch.iter().enumerate() {
+                let raw_num = first.wrapping_add(i as u64);
+                if let Some(prev) = prev_raw {
+                    let expected = prev.wrapping_add(1);
+                    if raw_num > expected {
+                        let raw_lost = raw_num - expected;
+                        decimated_seq =
+                            decimated_seq.wrapping_add(raw_lost / sel.param().decimate as u64);
+                    }
+                }
+                prev_raw = Some(raw_num);
+                if let Some(emitted) = sel.push(s, full[i]) {
+                    if let Some(n) = numbering.as_mut() {
+                        n.before(decimated_seq, &mut pending);
+                    }
+                    decimated_seq = decimated_seq.wrapping_add(1);
+                    if codec.encode_packed(&emitted, &mut pending).is_err() {
+                        return sent;
+                    }
+                    count += 1;
+                    if count >= max_chunk && !write(&mut pending, &mut count, &mut sent) {
+                        return sent;
+                    }
+                }
             }
-            // After a gap, a deduced timestamp has no correct sample before
-            // it. `docs/extensions.md`, rule 5 of the resend timestamps.
-            let ts = if resend.is_some() {
-                let use_ts = if last.map(|l| l.wrapping_add(1)) != Some(number) {
-                    full[i]
+        } else {
+            for (i, s) in batch.iter().enumerate() {
+                let number = first.wrapping_add(i as u64);
+                if let Some(n) = numbering.as_mut() {
+                    n.before(number, &mut pending);
+                }
+                // After a gap, a deduced timestamp has no correct sample before
+                // it. `docs/extensions.md`, rule 5 of the resend timestamps.
+                let ts = if resend.is_some() {
+                    let use_ts = if last.map(|l| l.wrapping_add(1)) != Some(number) {
+                        full[i]
+                    } else {
+                        s.timestamp
+                    };
+                    last = Some(number);
+                    use_ts
                 } else {
                     s.timestamp
                 };
-                last = Some(number);
-                use_ts
-            } else {
-                s.timestamp
-            };
-            if codec.encode_packed_at(s, ts, &mut pending).is_err() {
-                return sent;
-            }
-            count += 1;
-            if count >= max_chunk && !write(&mut pending, &mut count, &mut sent) {
-                return sent;
+                let enc = match proj_channels.as_deref() {
+                    Some(chs) => {
+                        let p = labstream_proto::select::project_packed(s, chs);
+                        codec.encode_packed_at(&p, ts, &mut pending)
+                    }
+                    None => codec.encode_packed_at(s, ts, &mut pending),
+                };
+                if enc.is_err() {
+                    return sent;
+                }
+                count += 1;
+                if count >= max_chunk && !write(&mut pending, &mut count, &mut sent) {
+                    return sent;
+                }
             }
         }
         // The queue was empty when the batch came out, so nothing more is on
@@ -1523,6 +1630,7 @@ mod tests {
             usize::MAX,
             true,
             Some((f, &resend)),
+            None,
             None,
             stop,
             false,

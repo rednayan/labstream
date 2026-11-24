@@ -7,6 +7,16 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Channel and rate selection via `select/1` (`docs/roadmap.md`, step 6,
+  `docs/extensions.md`, section `select`): `SelectParam`, `fir_taps`,
+  `project_packed`, and `StreamSelector` in `labstream-proto` (bit-exact
+  channel projection and named Hamming-windowed sinc low-pass FIR decimator),
+  `StreamInfo::apply_selection`, `Inlet::open_selected`, and
+  `Inlet::selection` in `labstream-net`, `InletBuilder::{channels, decimate,
+  rate}` in `labstream`, and `labstream_create_inlet_selected` in
+  `labstream-capi`. Verified with unit tests, live tests in
+  `crates/labstream-net/tests/select_live.rs`, and the 1 Mbit/s netns test
+  `conformance/oracle/select_test.py` (4000 Hz x 64 ch to 250 Hz with 0 lost).
 - Local-to-network LSL stream relay (`docs/roadmap.md`, step 4):
   `labstream_net::relay::{StreamRelay, RelayOptions, is_relayed,
   build_relayed_info}` (re-exported in `labstream::relay`), the

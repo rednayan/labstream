@@ -38,6 +38,7 @@ pub use desc::Node;
 pub use health::{ConsumerHealth, Gap, GapKind, InletHealth, OutletHealth};
 pub use info::StreamInfo;
 pub use inlet::{build_property_query, read_fullinfo, resolve, Inlet};
+pub use labstream_proto::features::SelectParam;
 pub use outlet::Outlet;
 pub use queue::{Fanout, SampleQueue};
 pub use relay::{RelayOptions, StreamRelay};

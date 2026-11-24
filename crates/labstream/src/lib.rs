@@ -77,7 +77,7 @@ pub use labstream_net::doctor;
 pub use labstream_net::relay;
 
 /// Stream health snapshots and gap descriptors (`docs/health.md`).
-pub use labstream_net::{ConsumerHealth, Gap, GapKind, InletHealth, OutletHealth};
+pub use labstream_net::{ConsumerHealth, Gap, GapKind, InletHealth, OutletHealth, SelectParam};
 
 use std::time::Duration;
 

@@ -270,6 +270,7 @@ struct InletBox {
     info: StreamInfo,
     buffer_samples: i32,
     recover: bool,
+    selection: Option<labstream_net::SelectParam>,
     postproc: u32,
     /// The half-time of the smoothing filter, in seconds.
     /// `src/api_config.cpp` names 90 as the default.
@@ -289,7 +290,15 @@ impl InletBox {
             return true;
         }
         let t = Duration::from_secs_f64(if timeout <= 0.0 { 32.0 } else { timeout });
-        let opened = if self.recover {
+        let opened = if let Some(sel) = &self.selection {
+            Inlet::open_selected(
+                &self.info,
+                t,
+                self.buffer_samples,
+                self.recover,
+                sel.clone(),
+            )
+        } else if self.recover {
             Inlet::open_recovering(&self.info, t, self.buffer_samples)
         } else {
             Inlet::open_with_buffer(&self.info, t, self.buffer_samples)
@@ -1777,6 +1786,66 @@ pub unsafe extern "C" fn lsl_create_inlet_ex(
         info: b.info.clone(),
         buffer_samples,
         recover: recover != 0,
+        selection: None,
+        postproc: 0,
+        halftime: 90.0,
+        scratch: Vec::new(),
+    })) as lsl_inlet
+}
+
+/// Subscribe to a stream with optional channel and rate selection (`select/1`,
+/// `docs/roadmap.md`, step 6).
+///
+/// Pass null for `channels` (or `channel_count == 0`) to keep every channel.
+/// Pass `decimate <= 1` to keep the full sample rate. When the outlet does not
+/// support `select/1`, the inlet falls back cleanly to the full stream.
+///
+/// # Safety
+/// `info` must be a valid handle from this library. When `channel_count > 0`,
+/// `channels` must point to `channel_count` valid `u32` channel indices.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_create_inlet_selected(
+    info: lsl_streaminfo,
+    max_buflen: c_int,
+    _max_chunklen: c_int,
+    recover: c_int,
+    channels: *const u32,
+    channel_count: u32,
+    decimate: u32,
+) -> lsl_inlet {
+    let b = match (info as *mut InfoBox).as_ref() {
+        Some(b) => b,
+        None => return std::ptr::null_mut(),
+    };
+    let mut chs = Vec::new();
+    if channel_count > 0 {
+        if channels.is_null() {
+            return std::ptr::null_mut();
+        }
+        let slice = std::slice::from_raw_parts(channels, channel_count as usize);
+        for &idx in slice {
+            let Ok(v) = u16::try_from(idx) else {
+                return std::ptr::null_mut();
+            };
+            chs.push(v);
+        }
+    }
+    let sel = labstream_net::SelectParam {
+        decimate: decimate.max(1),
+        channels: chs,
+    };
+    let selection = sel.is_active().then_some(sel);
+    let mut effective_for_buf = b.info.clone();
+    if let Some(s) = &selection {
+        effective_for_buf = effective_for_buf.apply_selection(s);
+    }
+    let buffer_samples = effective_for_buf.buffer_samples(max_buflen, 0);
+    Box::into_raw(Box::new(InletBox {
+        inlet: None,
+        info: b.info.clone(),
+        buffer_samples,
+        recover: recover != 0,
+        selection,
         postproc: 0,
         halftime: 90.0,
         scratch: Vec::new(),
@@ -1856,14 +1925,27 @@ pub unsafe extern "C" fn lsl_get_fullinfo(
     }
     // The short description that discovery returned carries no tree. The tree
     // travels on the data port, so ask for it there. `src/info_receiver.cpp`.
-    let info =
-        match labstream_net::read_fullinfo(&b.info, Duration::from_secs_f64(timeout.max(0.1))) {
+    let dur = Duration::from_secs_f64(timeout.max(0.1));
+    let info = if let Some(i) = b.inlet.as_ref() {
+        match i.fullinfo(dur) {
             Ok(full) => full,
+            Err(_) => i.info().clone(),
+        }
+    } else {
+        match labstream_net::read_fullinfo(&b.info, dur) {
+            Ok(full) => match &b.selection {
+                Some(sel) => full.apply_selection(sel),
+                None => full,
+            },
             // liblsl blocks until the whole description arrives and reports a
             // timeout. A failure here leaves the short description, which holds
             // every field except the tree.
-            Err(_) => b.info.clone(),
-        };
+            Err(_) => match &b.selection {
+                Some(sel) => b.info.apply_selection(sel),
+                None => b.info.clone(),
+            },
+        }
+    };
     InfoBox::new(info) as lsl_streaminfo
 }
 
@@ -3643,6 +3725,77 @@ mod tests {
 
             lsl_destroy_inlet(inlet);
             lsl_destroy_streaminfo(full);
+            lsl_destroy_outlet(outlet);
+            lsl_destroy_streaminfo(info);
+        }
+    }
+
+    #[test]
+    fn capi_create_inlet_selected_filters_channels_and_updates_fullinfo() {
+        unsafe {
+            let info = lsl_create_streaminfo(
+                b"CapiSel0\0".as_ptr() as *const c_char,
+                b"EEG\0".as_ptr() as *const c_char,
+                6,
+                4000.0,
+                1,
+                b"capisel0\0".as_ptr() as *const c_char,
+            );
+            let desc = lsl_get_desc(info);
+            let chs_node = lsl_append_child(desc, b"channels\0".as_ptr() as *const c_char);
+            for idx in 0..6 {
+                let ch = lsl_append_child(chs_node, b"channel\0".as_ptr() as *const c_char);
+                let label = format!("E{idx}\0");
+                lsl_append_child_value(
+                    ch,
+                    b"label\0".as_ptr() as *const c_char,
+                    label.as_ptr() as *const c_char,
+                );
+            }
+            let outlet = lsl_create_outlet(info, 0, 360);
+            if outlet.is_null() {
+                eprintln!("no local network; skipping");
+                lsl_destroy_streaminfo(info);
+                return;
+            }
+            let pub_info = lsl_get_info(outlet);
+            let wanted = [4u32, 1];
+            let inlet = labstream_create_inlet_selected(
+                pub_info,
+                360,
+                0,
+                0,
+                wanted.as_ptr(),
+                wanted.len() as u32,
+                1,
+            );
+            assert!(!inlet.is_null());
+            let mut ec = 0;
+            lsl_open_stream(inlet, 5.0, &mut ec);
+            assert_eq!(ec, LSL_NO_ERROR);
+            assert_eq!(lsl_wait_for_consumers(outlet, 5.0), 1);
+
+            let full = lsl_get_fullinfo(inlet, 5.0, &mut ec);
+            assert_eq!(ec, LSL_NO_ERROR);
+            assert_eq!(lsl_get_channel_count(full), 2);
+            let xml_ptr = lsl_get_xml(full);
+            let xml = cstr(xml_ptr);
+            lsl_destroy_string(xml_ptr);
+            assert!(xml.contains("<label>E4</label>"), "xml={xml}");
+            assert!(xml.contains("<label>E1</label>"), "xml={xml}");
+            assert!(!xml.contains("<label>E0</label>"), "xml={xml}");
+            lsl_destroy_streaminfo(full);
+
+            let sample = [10.0f32, 20.0, 30.0, 40.0, 50.0, 60.0];
+            lsl_push_sample_ft(outlet, sample.as_ptr(), 123.5);
+            let mut got = [0.0f32; 2];
+            let ts = lsl_pull_sample_f(inlet, got.as_mut_ptr(), 2, 2.0, &mut ec);
+            assert_eq!(ec, LSL_NO_ERROR);
+            assert_eq!(ts, 123.5);
+            assert_eq!(got, [50.0, 20.0]);
+
+            lsl_destroy_inlet(inlet);
+            lsl_destroy_streaminfo(pub_info);
             lsl_destroy_outlet(outlet);
             lsl_destroy_streaminfo(info);
         }

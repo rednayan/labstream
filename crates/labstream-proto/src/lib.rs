@@ -29,6 +29,7 @@ pub mod features;
 pub mod feed;
 pub mod header;
 pub mod negotiate;
+pub mod select;
 pub mod seq;
 pub mod timesync;
 

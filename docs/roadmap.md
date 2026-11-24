@@ -388,6 +388,22 @@ consumer. The other consumers get the full stream.
 4. In step 0, with the limit of 1 Mbit/s, a preview of 250 Hz of a stream of
    4000 Hz x 64 channels arrives with no loss.
 
+**Status:** complete on 2026-11-24. `select/1` is on by default in
+`labstream.Features` (`docs/extensions.md`, section `select`).
+`labstream_proto::select` implements bit-exact channel projection and the
+named Hamming-windowed sinc low-pass FIR decimator (`N = min(4 * D + 1, 257)`,
+`fc = 0.45 / D`, center-tap timestamps) with unit tests against direct
+reference convolution. `Inlet::open_selected` (`labstream-net`),
+`InletBuilder::{channels, decimate, rate}` (`labstream`), and
+`labstream_create_inlet_selected` (`labstream-capi`) expose the feature and
+update `info()` and `fullinfo()` (including `<desc><channels>`). Live tests
+(`crates/labstream-net/tests/select_live.rs`) confirm bit-exact channel
+projection, > 8x wire byte reduction on 4 of 64 channels, reference FIR match,
+and clean fallback on plain LSL outlets. `conformance/oracle/select_test.py`
+streams 4000 Hz x 64 channels decimated to 250 Hz over a 1 Mbit/s `tc netem`
+veth link with 0 lost samples (20 Hz passband peak 0.9878, 300 Hz stopband
+peak 0.00025).
+
 ### Step 7: compression
 
 A wireless link has less bandwidth than a cable. A lossless compression of

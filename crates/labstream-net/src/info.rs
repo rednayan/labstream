@@ -323,6 +323,40 @@ impl StreamInfo {
     pub fn matches(&self, query: &str) -> bool {
         crate::xpath::matches(query, &self.document())
     }
+
+    /// Return a copy of this description updated for an active `select/1`
+    /// channel subset and decimation factor (`docs/roadmap.md`, step 6).
+    ///
+    /// Updates `channel_count`, `nominal_srate`, and any `<desc><channels>`
+    /// `<channel>` elements to match `sel.channels` in order.
+    pub fn apply_selection(&self, sel: &labstream_proto::features::SelectParam) -> Self {
+        let mut out = self.clone();
+        out.channel_count = sel.output_channels(self.channel_count as usize) as u32;
+        out.nominal_srate = sel.output_srate(self.nominal_srate);
+        if !sel.channels.is_empty() {
+            if let Some(channels_node) = out.desc.child_mut("channels") {
+                let orig: Vec<crate::desc::Node> = channels_node
+                    .children
+                    .iter()
+                    .filter(|c| c.kind == crate::desc::Kind::Element && c.name == "channel")
+                    .cloned()
+                    .collect();
+                if !orig.is_empty() {
+                    let mut filtered = Vec::with_capacity(sel.channels.len());
+                    for &idx in &sel.channels {
+                        if let Some(ch) = orig.get(idx as usize) {
+                            filtered.push(ch.clone());
+                        }
+                    }
+                    channels_node
+                        .children
+                        .retain(|c| !(c.kind == crate::desc::Kind::Element && c.name == "channel"));
+                    channels_node.children.extend(filtered);
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Write a double the way liblsl writes one into a description.

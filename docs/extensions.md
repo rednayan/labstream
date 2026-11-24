@@ -1083,6 +1083,41 @@ section "`dgram/1` over a slow, lossy, or cut link", gives the runs.
 - A rate limit of the outlet. Version 1 sends at the rate of the
   application. The fallback rule 1 is the only reaction to loss.
 
+### `select`: channel and rate selection
+
+A viewer on a slow link often needs a subset of channels, or a lower sample
+rate, or both. With `select/1`, one consumer asks for a narrower view while
+other consumers on the same outlet still receive the full stream.
+
+1. The inlet offers `select/1=<param>`. The lowercase hexadecimal parameter
+   holds:
+   - 8 hex digits: integer decimation factor `D` (`u32` big-endian, `D >= 1`)
+   - 4 hex digits: channel count `K` (`u16` big-endian, `0` = all channels)
+   - `4 * K` hex digits: each 0-based channel index (`u16` big-endian)
+2. The outlet checks that every index is in range and that `D > 1` only runs
+   on a numeric stream with a positive nominal rate. If valid, the outlet
+   answers with the same `select/1=<param>` token. A `liblsl` outlet ignores
+   the header and sends the full stream.
+3. The two test pattern samples after the headers use the full channel count.
+   Selected framing starts at the first byte after the second test pattern
+   sample.
+4. When `D == 1`, each selected channel keeps the exact bits of the full
+   stream. `seq/1`, `resume/1`, and `dgram/1` stay active, and `dgram/1` checks
+   datagram fit against the selected channel count.
+5. When `D > 1`, the outlet applies a symmetric Type I linear-phase
+   Hamming-windowed sinc low-pass FIR filter to each selected numeric channel
+   and emits one sample for every `D` input samples:
+   - Tap count: `N = min(4 * D + 1, 257)` (odd, center `M = (N - 1) / 2`)
+   - Normalized cutoff: `fc = 0.45 / D` cycles per input sample
+   - Window: `w[k] = 0.54 - 0.46 * cos(2 * pi * k / (N - 1))`
+   - Normalized taps sum to `1.0` (unit DC gain). Each output sample carries
+     the timestamp of the center tap, with zero phase lag.
+   Decimated sessions run over TCP with `seq/1` numbers on the decimated
+   timeline and leave `resume/1` and `dgram/1` off.
+6. The inlet updates `info()`, `current_info()`, and `fullinfo()` with the
+   selected channel count, the selected nominal rate, and the selected
+   `<channel>` entries under `<desc><channels>`.
+
 ### `shm`: shared memory on one machine
 
 The hostname does not prove that the two processes share a machine. Two

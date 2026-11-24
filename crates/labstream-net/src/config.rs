@@ -370,7 +370,7 @@ impl Config {
             port_range: ini.int("ports.PortRange", 32) as u16,
             session_id: ini.text("lab.SessionID", "default"),
             known_peers: ini.set("lab.KnownPeers", "{}"),
-            features: ini.set("labstream.Features", "{seq, resume, dgram}"),
+            features: ini.set("labstream.Features", "{seq, resume, dgram, select}"),
             resume_seconds,
             resume_memory_mib: ini.float("labstream.ResumeMemory", 64.0).max(0.0),
             resume_disk_mib,
@@ -574,7 +574,12 @@ mod tests {
         let c = Config::from_ini(&Ini::default(), "test");
         assert_eq!(
             c.features,
-            vec!["seq".to_string(), "resume".to_string(), "dgram".to_string()]
+            vec![
+                "seq".to_string(),
+                "resume".to_string(),
+                "dgram".to_string(),
+                "select".to_string()
+            ]
         );
         let off = Ini::parse("[labstream]\nFeatures = {}\n").expect("a file");
         assert!(Config::from_ini(&off, "test").features.is_empty());

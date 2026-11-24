@@ -32,6 +32,13 @@ pub const RESUME: &str = "resume";
 /// off by default in version 1.
 pub const DGRAM: &str = "dgram";
 
+/// The name of the channel and rate selection feature (`docs/roadmap.md`, step 6).
+///
+/// `select` carries a hexadecimal parameter naming the decimation factor and
+/// optional channel index list. [`offer_select`], [`select_request`], and
+/// [`select_answer`] handle it.
+pub const SELECT: &str = "select";
+
 /// The features with no parameter that this library implements, each with
 /// its versions.
 pub const SUPPORTED: &[(&str, &[u32])] = &[(SEQ, &[1])];
@@ -379,6 +386,172 @@ pub fn dgram_answer(agreed: &[Token]) -> Option<DgramParam> {
     resume_answer(agreed)?;
     let token = agreed.iter().find(|t| t.name == DGRAM && t.version == 1)?;
     DgramParam::parse(token.param.as_deref()?)
+}
+
+/// The parameter of a `select/1` offer and answer (`docs/roadmap.md`, step 6).
+///
+/// Wire encoding (lowercase hex, no separator):
+/// - 8 hex digits: `decimate` as `u32` big-endian (`>= 1`; `1` = full rate)
+/// - 4 hex digits: `channels.len()` as `u16` big-endian (`0` = all channels)
+/// - `4 * channels.len()` hex digits: each 0-based channel index as `u16` big-endian
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectParam {
+    /// Integer rate decimation factor (`1` keeps the full rate, `16` reduces
+    /// 4000 Hz to 250 Hz).
+    pub decimate: u32,
+    /// Ordered 0-based channel indices to keep. Empty means every channel.
+    pub channels: Vec<u16>,
+}
+
+impl SelectParam {
+    /// Select a subset of channels at full rate.
+    pub fn channels(channels: Vec<u16>) -> Self {
+        SelectParam {
+            decimate: 1,
+            channels,
+        }
+    }
+
+    /// Decimate all channels by `factor` (clamped to `>= 1`).
+    pub fn decimate(factor: u32) -> Self {
+        SelectParam {
+            decimate: factor.max(1),
+            channels: Vec::new(),
+        }
+    }
+
+    /// True when this parameter actually narrows channels or reduces rate.
+    pub fn is_active(&self) -> bool {
+        self.decimate > 1 || !self.channels.is_empty()
+    }
+
+    /// Effective channel count for a source stream with `source_channels`.
+    pub fn output_channels(&self, source_channels: usize) -> usize {
+        if self.channels.is_empty() {
+            source_channels
+        } else {
+            self.channels.len()
+        }
+    }
+
+    /// Effective sample rate for a source stream with `source_srate`.
+    pub fn output_srate(&self, source_srate: f64) -> f64 {
+        if source_srate <= 0.0 || self.decimate <= 1 {
+            source_srate
+        } else {
+            source_srate / self.decimate as f64
+        }
+    }
+
+    /// Read a `select/1` parameter from its lowercase hexadecimal string.
+    pub fn parse(param: &str) -> Option<SelectParam> {
+        if param.len() < 12
+            || (param.len() - 12) % 4 != 0
+            || !param
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return None;
+        }
+        let decimate = u32::from_str_radix(&param[..8], 16).ok()?;
+        if decimate == 0 {
+            return None;
+        }
+        let count = u16::from_str_radix(&param[8..12], 16).ok()? as usize;
+        if param.len() != 12 + count * 4 {
+            return None;
+        }
+        let mut channels = Vec::with_capacity(count);
+        for i in 0..count {
+            let start = 12 + i * 4;
+            channels.push(u16::from_str_radix(&param[start..start + 4], 16).ok()?);
+        }
+        Some(SelectParam { decimate, channels })
+    }
+
+    /// Encode this parameter as lowercase hexadecimal.
+    pub fn to_param(&self) -> String {
+        let mut s = format!(
+            "{:08x}{:04x}",
+            self.decimate.max(1),
+            self.channels.len() as u16
+        );
+        for &ch in &self.channels {
+            s.push_str(&format!("{ch:04x}"));
+        }
+        s
+    }
+
+    /// Build the `select/1=<hex>` wire token.
+    pub fn token(&self) -> Token {
+        Token {
+            name: SELECT.to_string(),
+            version: 1,
+            param: Some(self.to_param()),
+        }
+    }
+}
+
+/// True when the configuration allows `select`.
+fn select_allowed(allowed: &[String]) -> bool {
+    allowed.iter().any(|a| a == SELECT)
+}
+
+/// Build the `select/1` offer token when selection is active and allowed.
+pub fn offer_select(allowed: &[String], param: Option<&SelectParam>) -> Option<Token> {
+    if !select_allowed(allowed) {
+        return None;
+    }
+    let p = param?;
+    if !p.is_active() || p.channels.len() > u16::MAX as usize {
+        return None;
+    }
+    Some(p.token())
+}
+
+/// Validate an inlet's `select/1` offer against the outlet's stream metadata.
+///
+/// Rejects out-of-range channel indices, decimation on irregular or string
+/// streams, duplicate tokens, or inactive requests.
+pub fn select_request(
+    offered: &[Token],
+    allowed: &[String],
+    source_channels: usize,
+    source_srate: f64,
+    is_string: bool,
+) -> Option<SelectParam> {
+    if !select_allowed(allowed) {
+        return None;
+    }
+    let mut tokens = offered
+        .iter()
+        .filter(|t| t.name == SELECT && t.version == 1);
+    let token = tokens.next()?;
+    if tokens.next().is_some() {
+        return None;
+    }
+    let param = SelectParam::parse(token.param.as_deref()?)?;
+    if !param.is_active() {
+        return None;
+    }
+    if param.decimate > 1 && (is_string || source_srate <= 0.0 || !source_srate.is_finite()) {
+        return None;
+    }
+    if param
+        .channels
+        .iter()
+        .any(|&ch| (ch as usize) >= source_channels)
+    {
+        return None;
+    }
+    Some(param)
+}
+
+/// Read the outlet's confirmed `select/1` answer on the inlet side.
+pub fn select_answer(agreed: &[Token]) -> Option<SelectParam> {
+    let token = agreed.iter().find(|t| t.name == SELECT && t.version == 1)?;
+    let param = SelectParam::parse(token.param.as_deref()?)?;
+    param.is_active().then_some(param)
 }
 
 #[cfg(test)]

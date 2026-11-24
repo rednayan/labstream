@@ -108,6 +108,9 @@ pub struct Builder<'a> {
     buffer: Buffer,
     recover: bool,
     post: Post,
+    channels: Vec<u16>,
+    decimate: u32,
+    target_rate: Option<f64>,
 }
 
 impl Inlet {
@@ -118,12 +121,21 @@ impl Inlet {
             buffer: Buffer::DEFAULT,
             recover: true,
             post: Post::NONE,
+            channels: Vec::new(),
+            decimate: 1,
+            target_rate: None,
         }
     }
 
     /// The description of the connected stream, with its description tree.
     pub fn info(&self) -> &StreamInfo {
         &self.info
+    }
+
+    /// The active `select/1` channel and rate selection, or `None` when the
+    /// full stream is delivered.
+    pub fn selection(&self) -> Option<labstream_net::SelectParam> {
+        self.inner.selection()
     }
 
     /// Read one sample, as one value for each channel.
@@ -399,15 +411,68 @@ impl<'a> Builder<'a> {
         self
     }
 
+    /// Ask the outlet to send only these 0-based channels (`select/1`,
+    /// `docs/roadmap.md`, step 6).
+    ///
+    /// A `liblsl` outlet ignores the offer and sends the full stream.
+    pub fn channels<I>(mut self, indices: I) -> Builder<'a>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        self.channels = indices
+            .into_iter()
+            .filter_map(|i| u16::try_from(i).ok())
+            .collect();
+        self
+    }
+
+    /// Ask the outlet to decimate the stream by an integer `factor >= 1`
+    /// with a Hamming-windowed sinc low-pass FIR filter (`select/1`).
+    pub fn decimate(mut self, factor: u32) -> Builder<'a> {
+        self.decimate = factor.max(1);
+        self.target_rate = None;
+        self
+    }
+
+    /// Ask the outlet to decimate the stream down to `target_hz` (`select/1`).
+    ///
+    /// Converts `target_hz` to the nearest integer decimation factor
+    /// `round(source_rate / target_hz).max(1)`.
+    pub fn rate(mut self, target_hz: f64) -> Builder<'a> {
+        if target_hz.is_finite() && target_hz > 0.0 {
+            self.target_rate = Some(target_hz);
+        }
+        self
+    }
+
     /// Open the feed.
     ///
     /// # Errors
     /// The call fails when the source does not answer inside the timeout, or when
     /// the source is gone.
     pub fn open(self, timeout: Duration) -> Result<Inlet, Error> {
-        let samples = self.buffer.samples(self.info.rate());
+        let decimate = match self.target_rate {
+            Some(target) if self.info.rate() > 0.0 => {
+                (self.info.rate() / target).round().max(1.0) as u32
+            }
+            _ => self.decimate.max(1),
+        };
+        let sel = labstream_net::SelectParam {
+            decimate,
+            channels: self.channels,
+        };
+        let effective_rate = sel.output_srate(self.info.rate());
+        let samples = self.buffer.samples(effective_rate);
         let buffered = samples.min(i32::MAX as usize) as i32;
-        let mut inner = if self.recover {
+        let mut inner = if sel.is_active() {
+            labstream_net::Inlet::open_selected(
+                &self.info.inner,
+                timeout,
+                buffered,
+                self.recover,
+                sel,
+            )?
+        } else if self.recover {
             labstream_net::Inlet::open_recovering(&self.info.inner, timeout, buffered)?
         } else {
             labstream_net::Inlet::open_with_buffer(&self.info.inner, timeout, buffered)?
