@@ -1,0 +1,15 @@
+[workspace]
+
+[package]
+name = "demo7-multimodal-sync"
+version = "0.2.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+labstream-net = { path = "../../crates/labstream-net" }
+labstream-wire = { path = "../../crates/labstream-wire" }
+
+[[bin]]
+name = "demo7-multimodal"
+path = "src/bin/demo7_multimodal.rs"
