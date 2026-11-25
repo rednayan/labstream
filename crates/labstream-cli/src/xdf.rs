@@ -69,10 +69,7 @@ pub fn read_reader<R: Read>(mut r: R) -> io::Result<XdfFile> {
 
     let mut builders: BTreeMap<u32, Builder> = BTreeMap::new();
 
-    loop {
-        let Some(chunk_len) = read_varlen_opt(&mut r)? else {
-            break;
-        };
+    while let Some(chunk_len) = read_varlen_opt(&mut r)? {
         if chunk_len < 2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

@@ -1042,6 +1042,10 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
     let meta_enabled = answered
         .as_deref()
         .is_some_and(|a| features::has(a, features::META, 1));
+    // Snapshot live metadata before registering this consumer in the fanout so
+    // updates emitted right after `wait_for_consumers()` are never coalesced
+    // into the initial snapshot.
+    let initial_meta = meta_enabled.then(|| shared.fanout.metadata_snapshot());
 
     // Step 5 of `docs/extensions.md` (`shm`): wait up to 1 s for `shm-ok <token>`.
     // If the token matches, register the SHM ring directly in the fanout and
@@ -1068,8 +1072,7 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
             let mut meta_cursor = 0u64;
             let mut meta_buf = Vec::new();
             let mut meta_wire = Vec::new();
-            if meta_enabled {
-                let (gen, snap) = shared.fanout.metadata_snapshot();
+            if let Some((gen, snap)) = initial_meta {
                 meta_cursor = gen;
                 if !snap.is_empty() {
                     let mut vals: Vec<_> = snap.into_values().collect();
@@ -1199,6 +1202,7 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         labstream_proto::select::StreamSelector::new(sel, info.format, info.channel_count as usize)
     });
 
+    let meta_feed = initial_meta.map(|(gen, snap)| (&shared.fanout, gen, snap));
     let stop = || *shared.stop.lock().unwrap();
     let sent = if let Some(key) = enc_key {
         let mut enc_stream = crate::enc::EncWriter::new(&mut stream, &key)?;
@@ -1213,7 +1217,7 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
             max_chunk,
             numbered,
             compressed,
-            meta_enabled.then_some(&shared.fanout),
+            meta_feed,
             resend.as_ref().map(|r| (&shared.fanout, r)),
             dgram,
             selector,
@@ -1228,7 +1232,7 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
             max_chunk,
             numbered,
             compressed,
-            meta_enabled.then_some(&shared.fanout),
+            meta_feed,
             resend.as_ref().map(|r| (&shared.fanout, r)),
             dgram,
             selector,
@@ -1337,7 +1341,11 @@ fn feed_with<W: Write>(
     max_chunk: usize,
     numbered: bool,
     compressed: bool,
-    meta_fanout: Option<&Fanout>,
+    meta_init: Option<(
+        &Fanout,
+        u64,
+        std::collections::BTreeMap<String, labstream_proto::meta::MetadataUpdate>,
+    )>,
     resend: Option<(&Fanout, &Resend)>,
     dgram: Option<crate::dgram_out::Setup>,
     mut selector: Option<labstream_proto::select::StreamSelector>,
@@ -1382,8 +1390,8 @@ fn feed_with<W: Write>(
     let mut meta_queue: std::collections::VecDeque<labstream_proto::meta::MetadataUpdate> =
         std::collections::VecDeque::new();
     let mut meta_scratch: Vec<labstream_proto::meta::MetadataUpdate> = Vec::new();
-    if let Some(f) = meta_fanout {
-        let (gen, snap) = f.metadata_snapshot();
+    let meta_fanout = meta_init.as_ref().map(|(f, _, _)| *f);
+    if let Some((_, gen, snap)) = meta_init {
         meta_cursor = gen;
         if !snap.is_empty() {
             let mut vals: Vec<_> = snap.into_values().collect();
