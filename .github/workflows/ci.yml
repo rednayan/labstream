@@ -60,3 +60,35 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --no-deps
+
+  wasm-and-features:
+    name: WASM, feature matrix, and demos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build labstream-wasm (wasm32-unknown-unknown)
+        run: cargo build --release --target wasm32-unknown-unknown -p labstream-wasm
+
+      - name: Run browser WebSocket + WASM end-to-end test
+        run: cargo test -p labstream-net --test ws_browser_live
+
+      - name: Check optional feature matrix (--no-default-features)
+        run: |
+          cargo check -p labstream-core --no-default-features
+          cargo check -p labstream-net --no-default-features
+          cargo test -p labstream-net --no-default-features --lib
+
+      - name: Check standalone demos compile
+        run: |
+          for m in demos/*/Cargo.toml; do
+            echo "Checking $m"
+            cargo check --manifest-path "$m"
+          done
