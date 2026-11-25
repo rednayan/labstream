@@ -140,3 +140,47 @@ jobs:
           run_case "Isolated /dev/shm container TCP fallback" "conformance/oracle/shm_container_test.py"
 
           exit "$FAILED"
+
+  virtual-lab:
+    name: Docker Virtual Lab (4-node LAN + Chaos)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build
+
+      - name: Cache pinned C++ liblsl oracle build
+        id: oracle-cache
+        uses: actions/cache@v4
+        with:
+          path: conformance/.build/install
+          key: liblsl-oracle-${{ runner.os }}-${{ hashFiles('conformance/oracle/PINS') }}
+
+      - name: Build pinned C++ liblsl oracle
+        if: steps.oracle-cache.outputs.cache-hit != 'true'
+        run: |
+          cmake -S conformance/liblsl -B conformance/.build/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/conformance/.build/install" \
+            -DLSL_UNITTESTS=OFF \
+            -DLSL_BENCHMARKS=OFF
+          cmake --build conformance/.build/build -j"$(nproc)"
+          cmake --install conformance/.build/build
+
+      - name: Build labstream C ABI, CLI, and WASM decoder
+        run: |
+          cargo build --release -p labstream-capi -p labstream-cli
+          cargo build --release --target wasm32-unknown-unknown -p labstream-wasm
+
+      - name: Run 4-node Docker Virtual Lab (--profile quick)
+        run: ./conformance/labtest/run_labtest.sh --profile quick

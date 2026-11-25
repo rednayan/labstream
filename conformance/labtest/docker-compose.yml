@@ -1,0 +1,75 @@
+services:
+  vendor-amp:
+    build:
+      context: ../..
+      dockerfile: conformance/labtest/Dockerfile
+    image: labstream-labtest:latest
+    hostname: vendor-amp
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - LABTEST_DURATION=${LABTEST_DURATION:-45}
+    volumes:
+      - labtest-shared:/shared
+    networks:
+      labnet:
+        ipv4_address: 172.29.0.10
+    command: ["python3", "-u", "/labtest/nodes.py", "vendor-amp"]
+
+  hd-eeg-node:
+    image: labstream-labtest:latest
+    hostname: hd-eeg-node
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - vendor-amp
+    environment:
+      - LABTEST_DURATION=${LABTEST_DURATION:-45}
+    volumes:
+      - labtest-shared:/shared
+    networks:
+      labnet:
+        ipv4_address: 172.29.0.11
+    command: ["python3", "-u", "/labtest/nodes.py", "hd-eeg-node"]
+
+  browser-node:
+    image: labstream-labtest:latest
+    hostname: browser-node
+    depends_on:
+      - hd-eeg-node
+    environment:
+      - LABTEST_DURATION=${LABTEST_DURATION:-45}
+    volumes:
+      - labtest-shared:/shared
+    networks:
+      labnet:
+        ipv4_address: 172.29.0.13
+    command: ["node", "/labtest/browser_node.mjs"]
+
+  recorder-node:
+    image: labstream-labtest:latest
+    hostname: recorder-node
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      - vendor-amp
+      - hd-eeg-node
+    environment:
+      - LABTEST_DURATION=${LABTEST_DURATION:-45}
+      - LABTEST_CHAOS=${LABTEST_CHAOS:-1}
+    volumes:
+      - labtest-shared:/shared
+    networks:
+      labnet:
+        ipv4_address: 172.29.0.12
+    command: ["python3", "-u", "/labtest/nodes.py", "recorder-node"]
+
+networks:
+  labnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
+
+volumes:
+  labtest-shared:
