@@ -14,6 +14,7 @@ use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -129,6 +130,7 @@ struct SharedState {
     oracle: LaneState,
     labstream: LaneState,
     peer_label: String,
+    oracle_pid: Option<u32>,
 }
 
 fn main() {
@@ -195,14 +197,17 @@ fn main() {
             ..LaneState::default()
         },
         peer_label: peer.clone().unwrap_or_else(|| "LAN / multicast".to_string()),
+        oracle_pid: None,
     }));
+    let reset_gen = Arc::new(AtomicU64::new(0));
 
-    // 1. Spawn genuine C++ liblsl sidecar reader thread.
+    // 1. Spawn genuine C++ liblsl sidecar reader thread (restarts cleanly on Reset).
     {
         let st = Arc::clone(&shared);
+        let gen = Arc::clone(&reset_gen);
         let bin = oracle_bin.clone();
         let cfg = cfg_path.clone();
-        std::thread::spawn(move || run_oracle_reader(st, &bin, cfg.as_deref()));
+        std::thread::spawn(move || run_oracle_reader(st, gen, &bin, cfg.as_deref()));
     }
 
     // 2. Spawn native labstream EEG inlet reader thread.
@@ -227,56 +232,75 @@ fn main() {
 
     for conn in listener.incoming().flatten() {
         let st = Arc::clone(&shared);
+        let gen = Arc::clone(&reset_gen);
         std::thread::spawn(move || {
-            let _ = handle_http(conn, st);
+            let _ = handle_http(conn, st, gen);
         });
     }
 }
 
-fn run_oracle_reader(shared: Arc<Mutex<SharedState>>, bin: &str, cfg: Option<&std::path::Path>) {
-    let mut cmd = Command::new(bin);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::inherit());
-    if let Some(p) = cfg {
-        cmd.env("LSLAPICFG", p);
-    }
-    let Ok(mut child) = cmd.spawn() else {
-        eprintln!("[demo1-viewer] failed to spawn oracle_inlet at {bin}");
-        return;
-    };
-    let stdout = child.stdout.take().unwrap();
-    let reader = BufReader::new(stdout);
-    for line in reader.lines().map_while(Result::ok) {
-        let mut st = shared.lock().unwrap();
-        let o = &mut st.oracle;
-        if line.contains("\"k\":\"s\"") {
-            if let (Some(seq), Some(val)) = (json_u64(&line, "seq"), json_f32(&line, "v")) {
+fn run_oracle_reader(
+    shared: Arc<Mutex<SharedState>>,
+    reset_gen: Arc<AtomicU64>,
+    bin: &str,
+    cfg: Option<&std::path::Path>,
+) {
+    loop {
+        let my_gen = reset_gen.load(Ordering::SeqCst);
+        let mut cmd = Command::new(bin);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::inherit());
+        if let Some(p) = cfg {
+            cmd.env("LSLAPICFG", p);
+        }
+        let Ok(mut child) = cmd.spawn() else {
+            eprintln!("[demo1-viewer] failed to spawn oracle_inlet at {bin}");
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
+        };
+        shared.lock().unwrap().oracle_pid = Some(child.id());
+        let stdout = child.stdout.take().unwrap();
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            if reset_gen.load(Ordering::SeqCst) != my_gen {
+                let _ = child.kill();
+                break;
+            }
+            let mut st = shared.lock().unwrap();
+            let o = &mut st.oracle;
+            if line.contains("\"k\":\"s\"") {
+                if let (Some(seq), Some(val)) = (json_u64(&line, "seq"), json_f32(&line, "v")) {
+                    if let Some(rx) = json_u64(&line, "rx") {
+                        o.received = rx;
+                    }
+                    if let Some(lost) = json_u64(&line, "lost") {
+                        o.lost = lost;
+                    }
+                    o.push_point(seq, val, false);
+                }
+            } else if line.contains("\"k\":\"g\"") {
+                if let (Some(from), Some(to), Some(lost)) = (
+                    json_u64(&line, "from"),
+                    json_u64(&line, "to"),
+                    json_u64(&line, "lost"),
+                ) {
+                    o.push_gap(from, to, lost);
+                }
+            } else if line.contains("\"k\":\"m\"") {
+                if let Some(text) = json_str(&line, "text") {
+                    o.push_marker(text);
+                }
+            } else if line.contains("\"k\":\"hb\"") {
                 if let Some(rx) = json_u64(&line, "rx") {
                     o.received = rx;
                 }
                 if let Some(lost) = json_u64(&line, "lost") {
                     o.lost = lost;
                 }
-                o.push_point(seq, val, false);
             }
-        } else if line.contains("\"k\":\"g\"") {
-            if let (Some(from), Some(to), Some(lost)) = (
-                json_u64(&line, "from"),
-                json_u64(&line, "to"),
-                json_u64(&line, "lost"),
-            ) {
-                o.push_gap(from, to, lost);
-            }
-        } else if line.contains("\"k\":\"m\"") {
-            if let Some(text) = json_str(&line, "text") {
-                o.push_marker(text);
-            }
-        } else if line.contains("\"k\":\"hb\"") {
-            if let Some(rx) = json_u64(&line, "rx") {
-                o.received = rx;
-            }
-            if let Some(lost) = json_u64(&line, "lost") {
-                o.lost = lost;
-            }
+        }
+        let _ = child.wait();
+        if reset_gen.load(Ordering::SeqCst) == my_gen {
+            std::thread::sleep(Duration::from_millis(250));
         }
     }
 }
@@ -367,7 +391,11 @@ fn run_labstream_markers(shared: Arc<Mutex<SharedState>>) {
     }
 }
 
-fn handle_http(mut stream: TcpStream, shared: Arc<Mutex<SharedState>>) -> std::io::Result<()> {
+fn handle_http(
+    mut stream: TcpStream,
+    shared: Arc<Mutex<SharedState>>,
+    reset_gen: Arc<AtomicU64>,
+) -> std::io::Result<()> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut buf = [0u8; 4096];
     let n = stream.read(&mut buf)?;
@@ -389,9 +417,16 @@ fn handle_http(mut stream: TcpStream, shared: Arc<Mutex<SharedState>>) -> std::i
             respond(&mut stream, "200 OK", "application/json", &body)
         }
         ("POST", "/api/reset") => {
-            let mut st = shared.lock().unwrap();
-            st.oracle.reset();
-            st.labstream.reset();
+            let pid = {
+                let mut st = shared.lock().unwrap();
+                st.oracle.reset();
+                st.labstream.reset();
+                st.oracle_pid.take()
+            };
+            reset_gen.fetch_add(1, Ordering::SeqCst);
+            if let Some(p) = pid {
+                let _ = Command::new("kill").arg("-TERM").arg(p.to_string()).status();
+            }
             respond(&mut stream, "200 OK", "application/json", r#"{"ok":true}"#)
         }
         ("GET", "/api/export.svg") => {
@@ -748,10 +783,13 @@ function drawLane(canvas, lane, minSeq, maxSeq, liveColor, markerColor) {
   }
 }
 
+let latestState = null;
+
 async function poll() {
   try {
     const r = await fetch('/api/state');
     const st = await r.json();
+    latestState = st;
     const o = st.oracle, l = st.labstream;
     const maxSeq = Math.max(o.last_seq, l.last_seq, SPAN);
     const minSeq = Math.max(0, maxSeq - SPAN);
@@ -784,17 +822,52 @@ async function poll() {
 document.getElementById('resetBtn').onclick = () => fetch('/api/reset', { method: 'POST' });
 document.getElementById('exportPng').onclick = () => {
   const out = document.createElement('canvas');
-  out.width = 1240; out.height = 540;
+  out.width = 1240; out.height = 590;
   const c = out.getContext('2d');
   c.fillStyle = '#0d1117'; c.fillRect(0, 0, out.width, out.height);
+
+  const drawBadge = (x, y, text, fg, bg, border) => {
+    c.font = 'bold 12px ui-monospace, monospace';
+    const w = c.measureText(text).width + 16;
+    c.fillStyle = bg; c.strokeStyle = border; c.lineWidth = 1;
+    c.beginPath(); c.roundRect(x, y, w, 22, 11); c.fill(); c.stroke();
+    c.fillStyle = fg; c.fillText(text, x + 8, y + 15);
+    return x + w + 8;
+  };
+
   c.fillStyle = '#f0f6fc'; c.font = 'bold 20px system-ui, sans-serif';
-  c.fillText('Wi-Fi Dropout Comparison: liblsl vs labstream v0.2.0', 20, 32);
-  c.font = 'bold 14px system-ui, sans-serif'; c.fillStyle = '#38bdf8';
-  c.fillText('liblsl (C++ oracle — plain TCP)', 20, 62);
-  c.drawImage(oCanvas, 20, 72);
-  c.fillStyle = '#3fb950';
-  c.fillText('labstream v0.2.0 (seq/1 + resume/1 + dgram/1)', 20, 314);
-  c.drawImage(lCanvas, 20, 324);
+  c.fillText('Wi-Fi Dropout Comparison: liblsl vs labstream v0.2.0 (512 Hz EEG + Markers)', 20, 34);
+
+  const o = latestState ? latestState.oracle : null;
+  const l = latestState ? latestState.labstream : null;
+
+  // Top lane header + badges
+  c.font = 'bold 15px system-ui, sans-serif'; c.fillStyle = '#38bdf8';
+  c.fillText('liblsl (C++ oracle — plain TCP)', 20, 70);
+  if (o) {
+    let bx = 290;
+    bx = drawBadge(bx, 53, o.live ? 'LIVE' : 'DROPOUT / FROZEN', o.live ? '#3fb950' : '#f85149', o.live ? 'rgba(63,185,80,0.18)' : 'rgba(248,81,73,0.18)', o.live ? '#3fb950' : '#f85149');
+    bx = drawBadge(bx, 53, `RX: ${o.received.toLocaleString()}`, '#e6edf3', '#21262d', '#30363d');
+    const oUnrec = Math.max(0, (l ? l.last_seq : 0) - o.last_seq);
+    const oLostTotal = o.lost + (o.live ? 0 : oUnrec);
+    bx = drawBadge(bx, 53, `LOST: ${oLostTotal.toLocaleString()}`, oLostTotal > 0 ? '#f85149' : '#e6edf3', oLostTotal > 0 ? 'rgba(248,81,73,0.18)' : '#21262d', oLostTotal > 0 ? '#f85149' : '#30363d');
+    drawBadge(bx, 53, `MARKERS: ${o.markers_received} (${o.markers_lost} lost)`, o.markers_lost > 0 ? '#f85149' : '#e6edf3', '#21262d', '#30363d');
+  }
+  c.drawImage(oCanvas, 20, 84);
+
+  // Bottom lane header + badges
+  c.font = 'bold 15px system-ui, sans-serif'; c.fillStyle = '#3fb950';
+  c.fillText('labstream v0.2.0 (seq/1 + resume/1 + dgram/1)', 20, 338);
+  if (l) {
+    let bx = 395;
+    bx = drawBadge(bx, 321, l.live ? `LIVE · ${l.transport}` : 'RECOVERING', '#3fb950', 'rgba(63,185,80,0.18)', '#3fb950');
+    bx = drawBadge(bx, 321, `RX: ${l.received.toLocaleString()}`, '#e6edf3', '#21262d', '#30363d');
+    bx = drawBadge(bx, 321, `LOST: ${l.lost.toLocaleString()}`, l.lost === 0 ? '#3fb950' : '#f85149', l.lost === 0 ? 'rgba(63,185,80,0.18)' : 'rgba(248,81,73,0.18)', l.lost === 0 ? '#3fb950' : '#f85149');
+    bx = drawBadge(bx, 321, `BACKFILLED: ${l.resent.toLocaleString()}`, '#f59e0b', 'rgba(245,158,11,0.18)', '#f59e0b');
+    drawBadge(bx, 321, `MARKERS: ${l.markers_received} (${l.markers_lost} lost)`, '#3fb950', '#21262d', '#30363d');
+  }
+  c.drawImage(lCanvas, 20, 352);
+
   const a = document.createElement('a');
   a.download = 'labstream_vs_liblsl_dropout.png';
   a.href = out.toDataURL('image/png');
