@@ -18,10 +18,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Keep ~16 seconds of 128 Hz decimated plot points (2048 points).
-const MAX_POINTS: usize = 2048;
-const MAX_GAPS: usize = 64;
-const MAX_MARKERS: usize = 64;
+/// Keep ~120 seconds (2 minutes) of 128 Hz decimated plot points (15360 points)
+/// so the presenter can pause and scroll back through any dropout window.
+const MAX_POINTS: usize = 15360;
+const MAX_GAPS: usize = 128;
+const MAX_MARKERS: usize = 256;
 
 #[derive(Clone, Copy)]
 struct PlotPoint {
@@ -417,7 +418,10 @@ fn run_labstream_eeg(shared: Arc<Mutex<SharedState>>) {
             }
         }
     };
-    eprintln!("[labstream] connected to Demo1EEG at {}:{}", info.v4address, info.v4data_port);
+    eprintln!(
+        "[labstream] connected to Demo1EEG at v4={}:{} v6=[{}]:{}",
+        info.v4address, info.v4data_port, info.v6address, info.v6data_port
+    );
     let mut inlet = Inlet::open_recovering(&info, Duration::from_secs(5), 32768)
         .expect("open labstream Demo1EEG inlet");
 
@@ -431,8 +435,9 @@ fn run_labstream_eeg(shared: Arc<Mutex<SharedState>>) {
         ts.clear();
         let n = match inlet.pull_chunk_f32(&mut data, &mut ts, 512, Duration::from_millis(80)) {
             Ok(n) => n,
-            Err(_) => {
-                std::thread::sleep(Duration::from_millis(50));
+            Err(e) => {
+                eprintln!("[labstream] Demo1EEG pull error: {e}");
+                std::thread::sleep(Duration::from_millis(200));
                 continue;
             }
         };
@@ -766,9 +771,13 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
   header { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:1rem; margin-bottom:1rem; }
   h1 { margin:0; font-size:1.35rem; }
   .sub { color:var(--muted); font-size:0.88rem; margin-top:0.2rem; }
-  .actions { display:flex; gap:0.6rem; }
-  button, a.btn { background:#21262d; color:var(--text); border:1px solid var(--border); padding:0.45rem 0.9rem; border-radius:6px; font-size:0.85rem; cursor:pointer; text-decoration:none; }
+  .actions { display:flex; gap:0.6rem; align-items:center; flex-wrap:wrap; }
+  button, a.btn, select { background:#21262d; color:var(--text); border:1px solid var(--border); padding:0.45rem 0.9rem; border-radius:6px; font-size:0.85rem; cursor:pointer; text-decoration:none; }
   button:hover, a.btn:hover { background:#30363d; }
+  button.active { background:#1f6feb; border-color:#388bfd; color:#fff; }
+  .scrubber { display:flex; align-items:center; gap:0.85rem; background:var(--card); border:1px solid var(--border); border-radius:8px; padding:0.55rem 1rem; margin-bottom:1rem; font-size:0.85rem; }
+  .scrubber input[type=range] { flex:1; accent-color:#388bfd; cursor:pointer; }
+  .scrubber .pos { font-family:ui-monospace,monospace; color:var(--muted); min-width:130px; text-align:right; }
   .panel { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:0.9rem 1.1rem; margin-bottom:1rem; }
   .panel-head { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.75rem; margin-bottom:0.65rem; }
   .title { font-weight:700; font-size:1.05rem; display:flex; align-items:center; gap:0.6rem; }
@@ -792,11 +801,24 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
     <div class="sub">Toggle Wi-Fi off or unplug Ethernet on Machine A for 5–10 s, then reconnect. Both inlets read the exact same 512 Hz EEG + 1 Hz Marker stream.</div>
   </div>
   <div class="actions">
+    <button id="pauseBtn" class="active">▶ Following Live</button>
+    <select id="spanSelect" title="Visible window width">
+      <option value="8">8 s window</option>
+      <option value="16" selected>16 s window</option>
+      <option value="30">30 s window</option>
+      <option value="60">60 s window</option>
+    </select>
     <a class="btn" href="/api/export.svg" download>Export SVG</a>
     <button id="exportPng">Export PNG</button>
     <button id="resetBtn">Reset</button>
   </div>
 </header>
+
+<div class="scrubber">
+  <span>Timeline (scroll / drag to inspect dropout):</span>
+  <input id="scrubRange" type="range" min="0" max="1000" value="1000" />
+  <span class="pos" id="scrubPos">LIVE</span>
+</div>
 
 <section class="panel">
   <div class="panel-head">
@@ -827,7 +849,93 @@ const DASHBOARD_HTML: &str = r#"<!doctype html>
 <script>
 const oCanvas = document.getElementById('oCanvas');
 const lCanvas = document.getElementById('lCanvas');
-const SPAN = 512 * 16; // 16-second aligned window
+const pauseBtn = document.getElementById('pauseBtn');
+const scrubRange = document.getElementById('scrubRange');
+const scrubPos = document.getElementById('scrubPos');
+const spanSelect = document.getElementById('spanSelect');
+
+let spanSamples = 512 * 16;
+let followLive = true;
+let viewEndSeq = 512 * 16;
+
+function setFollow(live) {
+  followLive = live;
+  pauseBtn.textContent = live ? '▶ Following Live' : '⏸ Paused (Click for Live)';
+  pauseBtn.className = live ? 'active' : '';
+}
+
+pauseBtn.onclick = () => {
+  setFollow(!followLive);
+  if (followLive) scrubRange.value = '1000';
+  render();
+};
+
+spanSelect.onchange = () => {
+  spanSamples = 512 * Number(spanSelect.value);
+  render();
+};
+
+scrubRange.oninput = () => {
+  if (!latestState) return;
+  const { oldestSeq, newestSeq } = getSeqBounds(latestState);
+  const v = Number(scrubRange.value);
+  if (v >= 998) {
+    setFollow(true);
+  } else {
+    setFollow(false);
+    const minEnd = oldestSeq + spanSamples;
+    const maxEnd = Math.max(minEnd, newestSeq);
+    viewEndSeq = Math.round(minEnd + (v / 1000) * (maxEnd - minEnd));
+  }
+  render();
+};
+
+// Drag or mouse-wheel on either canvas to pan smoothly through the 2-minute history.
+for (const cv of [oCanvas, lCanvas]) {
+  cv.style.cursor = 'grab';
+  let dragging = false, startX = 0, startEnd = 0;
+  cv.addEventListener('mousedown', (e) => {
+    if (!latestState) return;
+    dragging = true; startX = e.clientX;
+    if (followLive) {
+      viewEndSeq = getSeqBounds(latestState).newestSeq;
+      setFollow(false);
+    }
+    startEnd = viewEndSeq;
+    cv.style.cursor = 'grabbing';
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging || !latestState) return;
+    const dx = e.clientX - startX;
+    const dSeq = Math.round((dx / cv.clientWidth) * spanSamples);
+    const { oldestSeq, newestSeq } = getSeqBounds(latestState);
+    const minEnd = Math.min(newestSeq, oldestSeq + spanSamples);
+    viewEndSeq = Math.max(minEnd, Math.min(newestSeq, startEnd - dSeq));
+    render();
+  });
+  window.addEventListener('mouseup', () => { dragging = false; cv.style.cursor = 'grab'; });
+  cv.addEventListener('wheel', (e) => {
+    if (!latestState) return;
+    e.preventDefault();
+    const { oldestSeq, newestSeq } = getSeqBounds(latestState);
+    if (followLive) { viewEndSeq = newestSeq; setFollow(false); }
+    const step = Math.round(spanSamples * 0.15) * (e.deltaY > 0 ? 1 : -1);
+    const minEnd = Math.min(newestSeq, oldestSeq + spanSamples);
+    viewEndSeq = Math.max(minEnd, Math.min(newestSeq, viewEndSeq + step));
+    if (viewEndSeq >= newestSeq) setFollow(true);
+    render();
+  }, { passive: false });
+}
+
+function getSeqBounds(st) {
+  const o = st.oracle, l = st.labstream;
+  const newestSeq = Math.max(o.last_seq, l.last_seq, spanSamples);
+  let oldestSeq = newestSeq;
+  if (o.points.length) oldestSeq = Math.min(oldestSeq, o.points[0][0]);
+  if (l.points.length) oldestSeq = Math.min(oldestSeq, l.points[0][0]);
+  if (oldestSeq >= newestSeq) oldestSeq = Math.max(0, newestSeq - spanSamples);
+  return { oldestSeq, newestSeq };
+}
 
 function drawLane(canvas, lane, minSeq, maxSeq, liveColor, markerColor) {
   const ctx = canvas.getContext('2d');
@@ -914,39 +1022,61 @@ function drawLane(canvas, lane, minSeq, maxSeq, liveColor, markerColor) {
 
 let latestState = null;
 
+function render() {
+  if (!latestState) return;
+  const st = latestState;
+  const o = st.oracle, l = st.labstream;
+  const { oldestSeq, newestSeq } = getSeqBounds(st);
+  if (followLive) {
+    viewEndSeq = newestSeq;
+    scrubRange.value = '1000';
+    scrubPos.textContent = 'LIVE';
+  } else {
+    const minEnd = Math.min(newestSeq, oldestSeq + spanSamples);
+    viewEndSeq = Math.max(minEnd, Math.min(newestSeq, viewEndSeq));
+    const frac = maxRangeFrac(viewEndSeq, minEnd, newestSeq);
+    scrubRange.value = String(Math.round(frac * 1000));
+    const behindS = ((newestSeq - viewEndSeq) / 512).toFixed(1);
+    scrubPos.textContent = `-${behindS}s behind live`;
+  }
+  const maxSeq = Math.max(viewEndSeq, spanSamples);
+  const minSeq = Math.max(0, maxSeq - spanSamples);
+
+  const oPill = document.getElementById('oPill');
+  oPill.textContent = o.live ? 'LIVE' : 'DROPOUT / WAITING';
+  oPill.className = 'pill ' + (o.live ? 'live' : 'down');
+
+  const lPill = document.getElementById('lPill');
+  lPill.textContent = l.live ? `LIVE · ${l.transport}` : 'DROPOUT / RECOVERING';
+  lPill.className = 'pill ' + (l.live ? 'live' : 'down');
+
+  document.getElementById('oStats').innerHTML =
+    `<div class="stat"><span>RX:</span> ${o.received.toLocaleString()}</div>` +
+    `<div class="stat"><span>LOST:</span> <b class="${o.lost > 0 ? 'bad' : ''}">${o.lost.toLocaleString()}</b></div>` +
+    `<div class="stat"><span>MARKERS:</span> ${o.markers_received} (<b class="${o.markers_lost > 0 ? 'bad' : ''}">${o.markers_lost} lost</b>)</div>`;
+
+  const crcTotal = l.crc_verified + l.crc_failed;
+  const crcTxt = crcTotal > 0 ? `${l.crc_verified}/${crcTotal} (100% BIT-EXACT)` : 'waiting...';
+  document.getElementById('lStats').innerHTML =
+    `<div class="stat"><span>RX:</span> ${l.received.toLocaleString()}</div>` +
+    `<div class="stat"><span>LOST:</span> <b class="${l.lost > 0 ? 'bad' : 'good'}">${l.lost.toLocaleString()}</b></div>` +
+    `<div class="stat"><span>BACKFILLED:</span> <b class="${l.resent > 0 ? 'gold' : ''}">${l.resent.toLocaleString()}</b></div>` +
+    `<div class="stat"><span>CRC32:</span> <b class="${l.crc_failed > 0 ? 'bad' : 'good'}">${l.crc_failed > 0 ? l.crc_verified + '/' + crcTotal + ' FAIL' : crcTxt}</b></div>` +
+    `<div class="stat"><span>MARKERS:</span> ${l.markers_received} (<b class="${l.markers_lost > 0 ? 'bad' : 'good'}">${l.markers_lost} lost</b>)</div>`;
+
+  drawLane(oCanvas, o, minSeq, maxSeq, '#38bdf8', '#f85149');
+  drawLane(lCanvas, l, minSeq, maxSeq, '#3fb950', '#a371f7');
+}
+
+function maxRangeFrac(val, lo, hi) {
+  return hi > lo ? (val - lo) / (hi - lo) : 1.0;
+}
+
 async function poll() {
   try {
     const r = await fetch('/api/state');
-    const st = await r.json();
-    latestState = st;
-    const o = st.oracle, l = st.labstream;
-    const maxSeq = Math.max(o.last_seq, l.last_seq, SPAN);
-    const minSeq = Math.max(0, maxSeq - SPAN);
-
-    const oPill = document.getElementById('oPill');
-    oPill.textContent = o.live ? 'LIVE' : 'DROPOUT / WAITING';
-    oPill.className = 'pill ' + (o.live ? 'live' : 'down');
-
-    const lPill = document.getElementById('lPill');
-    lPill.textContent = l.live ? `LIVE · ${l.transport}` : 'DROPOUT / RECOVERING';
-    lPill.className = 'pill ' + (l.live ? 'live' : 'down');
-
-    document.getElementById('oStats').innerHTML =
-      `<div class="stat"><span>RX:</span> ${o.received.toLocaleString()}</div>` +
-      `<div class="stat"><span>LOST:</span> <b class="${o.lost > 0 ? 'bad' : ''}">${o.lost.toLocaleString()}</b></div>` +
-      `<div class="stat"><span>MARKERS:</span> ${o.markers_received} (<b class="${o.markers_lost > 0 ? 'bad' : ''}">${o.markers_lost} lost</b>)</div>`;
-
-    const crcTotal = l.crc_verified + l.crc_failed;
-    const crcTxt = crcTotal > 0 ? `${l.crc_verified}/${crcTotal} (100% BIT-EXACT)` : 'waiting...';
-    document.getElementById('lStats').innerHTML =
-      `<div class="stat"><span>RX:</span> ${l.received.toLocaleString()}</div>` +
-      `<div class="stat"><span>LOST:</span> <b class="${l.lost > 0 ? 'bad' : 'good'}">${l.lost.toLocaleString()}</b></div>` +
-      `<div class="stat"><span>BACKFILLED:</span> <b class="${l.resent > 0 ? 'gold' : ''}">${l.resent.toLocaleString()}</b></div>` +
-      `<div class="stat"><span>CRC32:</span> <b class="${l.crc_failed > 0 ? 'bad' : 'good'}">${l.crc_failed > 0 ? l.crc_verified + '/' + crcTotal + ' FAIL' : crcTxt}</b></div>` +
-      `<div class="stat"><span>MARKERS:</span> ${l.markers_received} (<b class="${l.markers_lost > 0 ? 'bad' : 'good'}">${l.markers_lost} lost</b>)</div>`;
-
-    drawLane(oCanvas, o, minSeq, maxSeq, '#38bdf8', '#f85149');
-    drawLane(lCanvas, l, minSeq, maxSeq, '#3fb950', '#a371f7');
+    latestState = await r.json();
+    render();
   } catch (_) {}
 }
 

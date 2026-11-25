@@ -1926,7 +1926,12 @@ fn read_and_recover(
                     queue.record_skipped(count);
                 }
             }
-            if decoded.is_err() {
+            if let Err(ref e) = decoded {
+                if std::env::var_os("LSL_TRACE_RECOVER").is_some()
+                    || std::env::var_os("LSL_TRACE_DGRAM").is_some()
+                {
+                    eprintln!("TRACE decode error (closing inlet): {e:?}");
+                }
                 // A stream that cannot be decoded is not worth recovering.
                 // The bytes are wrong, not missing.
                 done.store(true, Ordering::SeqCst);

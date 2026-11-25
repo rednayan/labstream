@@ -132,7 +132,8 @@ impl DgramIn {
         };
         let socket = UdpSocket::bind((local, 0)).ok()?;
         socket.set_read_timeout(Some(HELLO_TIMEOUT)).ok()?;
-        let outlet = SocketAddr::new(peer.ip(), param.port);
+        let mut outlet = peer;
+        outlet.set_port(param.port);
         let state = Arc::new(Mutex::new(State {
             reorder: {
                 let mut r = Reorder::new();
