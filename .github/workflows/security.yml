@@ -1,0 +1,88 @@
+name: Security, Sanitizers & Fuzzing
+
+on:
+  schedule:
+    # Run every Sunday at 04:00 UTC.
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  miri:
+    name: Miri (UB check on pure-Rust protocol crates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Miri on labstream-wire, labstream-proto, and labstream-time
+        run: |
+          cargo +nightly miri test -p labstream-wire --lib
+          cargo +nightly miri test -p labstream-proto --lib
+          cargo +nightly miri test -p labstream-time --lib
+
+  sanitizers:
+    name: ASan (C ABI) & TSan (SHM / Concurrency)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run AddressSanitizer on labstream-capi
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          ASAN_OPTIONS: detect_leaks=0
+        run: cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p labstream-capi
+
+      - name: Run ThreadSanitizer on SHM and live concurrency tests
+        env:
+          RUSTFLAGS: -Zsanitizer=thread
+        run: |
+          cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p labstream-net \
+            --test shm_live --test meta_live --test enc_live --test sync_group_live
+
+  fuzz:
+    name: cargo-fuzz (6 untrusted wire/text parsers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+
+      - name: Run all 6 fuzz targets (45 s each)
+        run: |
+          set +e
+          FAILED=0
+          {
+            echo "## Fuzzing Scorecard (45 s / target)"
+            echo ""
+            echo "| Target | Result |"
+            echo "|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for target in \
+            fuzz_wire_decode \
+            fuzz_comp_decode \
+            fuzz_dgram_decode \
+            fuzz_meta_decode \
+            fuzz_xpath_xml \
+            fuzz_header_parse; do
+            echo "=== Fuzzing $target ==="
+            if cargo +nightly fuzz run "$target" -- -max_total_time=45 -rss_limit_mb=2048; then
+              echo "| \`$target\` | PASS |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| \`$target\` | FAIL |" >> "$GITHUB_STEP_SUMMARY"
+              FAILED=1
+            fi
+          done
+          exit "$FAILED"

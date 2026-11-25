@@ -1,0 +1,58 @@
+[workspace]
+
+[package]
+name = "labstream-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+labstream-wire = { path = "../crates/labstream-wire" }
+labstream-proto = { path = "../crates/labstream-proto" }
+labstream-net = { path = "../crates/labstream-net" }
+
+[[bin]]
+name = "fuzz_wire_decode"
+path = "fuzz_targets/fuzz_wire_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_comp_decode"
+path = "fuzz_targets/fuzz_comp_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_dgram_decode"
+path = "fuzz_targets/fuzz_dgram_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_meta_decode"
+path = "fuzz_targets/fuzz_meta_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_xpath_xml"
+path = "fuzz_targets/fuzz_xpath_xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_header_parse"
+path = "fuzz_targets/fuzz_header_parse.rs"
+test = false
+doc = false
+bench = false
