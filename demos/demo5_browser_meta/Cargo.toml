@@ -1,0 +1,15 @@
+[workspace]
+
+[package]
+name = "demo5-browser-meta"
+version = "0.2.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+labstream = { path = "../../crates/labstream" }
+labstream-net = { path = "../../crates/labstream-net" }
+
+[[bin]]
+name = "demo5-browser"
+path = "src/bin/demo5_browser.rs"
