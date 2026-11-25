@@ -21,3 +21,7 @@
 /conformance/captures/soak.xdf
 __pycache__/
 *.pyc
+
+# MkDocs build output and generated root-doc mirror.
+/site
+/docs/_ref

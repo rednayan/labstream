@@ -1,0 +1,82 @@
+site_name: labstream
+site_description: Rust implementation of Lab Streaming Layer (LSL) with full liblsl wire and C ABI compatibility.
+site_url: https://rednayan.github.io/labstream/
+repo_url: https://github.com/rednayan/labstream
+repo_name: rednayan/labstream
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+site_dir: site
+
+hooks:
+  - docs/hooks.py
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue grey
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue grey
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Overview: index.md
+  - User Guide:
+      - Quickstart: quickstart.md
+      - Command-Line Tools: tools.md
+      - Stream Health & Gaps: health.md
+      - Discovery & Networks: discovery.md
+      - Interactive Demos: demos.md
+      - FAQ: faq.md
+  - Protocol & Extensions:
+      - LSL 1.10 Specification: _ref/spec.md
+      - labstream Extensions: extensions.md
+      - Feature Roadmap: roadmap.md
+  - Verification & Benchmarks:
+      - Conformance Results: conformance.md
+      - Transport Latency: latency.md
+  - Internals & Release:
+      - Rust API Design: _ref/design.md
+      - Repository Layout: repository.md
+      - Versioning Policy: versioning.md
+      - Release Procedure: releasing.md
+      - Contributing: _ref/contributing.md
+      - Changelog: _ref/changelog.md
+      - API Docs (docs.rs): https://docs.rs/labstream
