@@ -1,0 +1,19 @@
+[workspace]
+
+[package]
+name = "demo1-dropout"
+version = "0.2.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "demo1-sender"
+path = "src/bin/demo1_sender.rs"
+
+[[bin]]
+name = "demo1-viewer"
+path = "src/bin/demo1_viewer.rs"
+
+[dependencies]
+labstream-net = { path = "../../crates/labstream-net" }
+labstream-wire = { path = "../../crates/labstream-wire" }
