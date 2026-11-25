@@ -1,0 +1,15 @@
+[workspace]
+
+[package]
+name = "demo3-bandwidth"
+version = "0.2.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+labstream = { path = "../../crates/labstream" }
+labstream-net = { path = "../../crates/labstream-net" }
+
+[[bin]]
+name = "demo3-bandwidth"
+path = "src/bin/demo3_bandwidth.rs"
