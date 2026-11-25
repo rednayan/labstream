@@ -22,6 +22,9 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod sync;
+pub use sync::{AlignedSample, StreamAligner, StreamSpec, SyncConfig};
+
 /// The default half-time of the jitter filter, in seconds.
 ///
 /// `src/api_config.cpp:325` reads it as a `float`.

@@ -7,6 +7,15 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Real-time multi-stream sync and resampler (`docs/roadmap.md`, step 18):
+  `labstream_time::sync::StreamAligner` and `labstream_net::SyncGroup`
+  (re-exported as `labstream::SyncGroup`) align `N` asynchronous numeric
+  inlets onto one strictly monotonic common time grid using Blackman-windowed
+  sinc fractional-delay interpolation with bounded lookahead and bounded
+  per-stream buffers, automatic opt-in `CLOCKSYNC | DRIFT | DEVICE_DELAY`, and
+  explicit per-stream gap bitmasks (`AlignedSample::gap_mask`). Adds C
+  functions `labstream_sync_create`, `labstream_sync_total_channels`,
+  `labstream_sync_pull`, and `labstream_sync_destroy`.
 - Opt-in negotiated transport encryption via `enc/1` (`docs/roadmap.md`, step
   14, `docs/extensions.md`, section `enc`): off by default, enabled via
   `labstream.Features` (`enc`), `labstream.RequireEncryption = 1`, or

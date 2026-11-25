@@ -1,8 +1,7 @@
 # Roadmap: features that liblsl does not have
 
-**Status:** approved by the user on 2026-11-16. The gate and steps 0 to 17
-(step 11 and step 16 library and C API) are complete. Step 18 is not
-implemented.
+**Status:** approved by the user on 2026-11-16. The gate and all steps 0 to 18
+(step 11 and step 16 library and C API) are complete.
 
 This page gives the order of the labstream-only features, the success
 criterion of each feature, and the dependencies. Each feature follows the
@@ -734,6 +733,22 @@ sinc interpolation and a small bounded lookahead.
    inlet gap propagates as an explicit gap marker on the aligned output.
 3. The aligner works in both Rust (`labstream`) and C (`labstream-capi`) with
    bounded memory and configurable lookahead latency.
+
+**Status:** complete on 2026-11-25. `labstream_time::sync::StreamAligner`
+implements a zero-dependency Blackman-windowed sinc fractional-delay resampler
+with configurable kernel half-width (`SyncConfig::half_width`, default `16`)
+and bounded per-stream ring buffers (`SyncConfig::max_buffer_samples`, default
+`8192`). `labstream_net::SyncGroup` (re-exported in `labstream::SyncGroup`)
+combines `N` live numeric inlets (enabling `CLOCKSYNC | DRIFT | DEVICE_DELAY`
+by default), propagates explicit inlet gaps as per-stream bitmasks
+(`AlignedSample::gap_mask`) with `NaN` placeholders, and keeps output
+timestamps strictly monotonic. `labstream_sync_create`,
+`labstream_sync_total_channels`, `labstream_sync_pull`, and
+`labstream_sync_destroy` expose the aligner in `labstream-capi`. Unit tests in
+`labstream-time` and live tests in
+`crates/labstream-net/tests/sync_group_live.rs` confirm phase error below 2
+degrees on asynchronous 250 SPS 100 Hz streams with a 2 ms offset, explicit
+gap propagation, and bounded memory.
 
 ## Requirements for each step
 

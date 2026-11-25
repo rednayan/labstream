@@ -33,6 +33,7 @@ pub mod queue;
 pub mod relay;
 pub mod resolver;
 pub(crate) mod shm;
+pub mod sync;
 pub mod ws;
 pub mod xpath;
 
@@ -49,6 +50,7 @@ pub use outlet::Outlet;
 pub use queue::{Fanout, SampleQueue};
 pub use relay::{RelayOptions, StreamRelay};
 pub use resolver::ContinuousResolver;
+pub use sync::{AlignedSample, SyncConfig, SyncGroup};
 pub use ws::{WsBridge, WsOptions};
 
 /// The session that a stream belongs to, when no file names another.

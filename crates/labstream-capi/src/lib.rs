@@ -3938,6 +3938,126 @@ pub unsafe extern "C" fn labstream_inlet_encrypted(inlet: lsl_inlet) -> i32 {
     i32::from(b.inlet.as_ref().is_some_and(|i| i.is_encrypted()))
 }
 
+/// Opaque handle to a real-time multi-stream [`labstream_net::SyncGroup`]
+/// (`docs/roadmap.md`, step 18).
+#[allow(non_camel_case_types)]
+pub type labstream_sync_group = *mut c_void;
+
+/// Create a [`labstream_sync_group`] from `count` resolved stream infos,
+/// opening one recovering inlet per stream and resampling them onto a common
+/// monotonic grid at `output_rate` Hz.
+///
+/// - `half_width`: sinc kernel half-width in source samples (`0` uses default `16`).
+/// - `auto_postprocess`: non-zero enables `CLOCKSYNC | DRIFT | DEVICE_DELAY` on each inlet.
+/// - `timeout`: open timeout per stream in seconds.
+///
+/// Returns null on invalid arguments or connection failure. Free with
+/// [`labstream_sync_destroy`].
+///
+/// # Safety
+/// `infos` must point to `count` valid [`lsl_streaminfo`] handles.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_sync_create(
+    infos: *const lsl_streaminfo,
+    count: u32,
+    output_rate: c_double,
+    half_width: u32,
+    auto_postprocess: i32,
+    timeout: c_double,
+) -> labstream_sync_group {
+    if infos.is_null() || count == 0 || !output_rate.is_finite() || output_rate <= 0.0 {
+        return std::ptr::null_mut();
+    }
+    let dur = Duration::from_secs_f64(timeout.max(0.1));
+    let mut inlets = Vec::with_capacity(count as usize);
+    for i in 0..count as usize {
+        let info_ptr = *infos.add(i);
+        let Some(b) = (info_ptr as *mut InfoBox).as_mut() else {
+            return std::ptr::null_mut();
+        };
+        b.sync();
+        match labstream_net::Inlet::open_recovering(&b.info, dur, 4096) {
+            Ok(inlet) => inlets.push(inlet),
+            Err(_) => return std::ptr::null_mut(),
+        }
+    }
+    let mut cfg = labstream_net::SyncConfig::new(output_rate);
+    if half_width >= 2 {
+        cfg.half_width = half_width as usize;
+    }
+    cfg.auto_postprocess = auto_postprocess != 0;
+    match labstream_net::SyncGroup::new(inlets, cfg) {
+        Ok(group) => Box::into_raw(Box::new(group)) as labstream_sync_group,
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Return the total concatenated channel count of a [`labstream_sync_group`].
+///
+/// # Safety
+/// `sync` must be null or a valid handle from [`labstream_sync_create`].
+#[no_mangle]
+pub unsafe extern "C" fn labstream_sync_total_channels(sync: labstream_sync_group) -> u32 {
+    let Some(g) = (sync as *const labstream_net::SyncGroup).as_ref() else {
+        return 0;
+    };
+    g.total_channels() as u32
+}
+
+/// Pull up to `max_samples` aligned samples from `sync`.
+///
+/// Writes `count * total_channels` interleaved `double` values to `data_out`,
+/// `count` monotonic timestamps to `ts_out`, and `count` gap bitmasks to
+/// `gap_mask_out` (optional, may be null). Returns the number of samples
+/// written (`>= 0`), or a negative LSL error code.
+///
+/// # Safety
+/// `sync` must be a valid handle. `data_out` must hold `max_samples * total_channels`
+/// doubles, `ts_out` must hold `max_samples` doubles, and non-null `gap_mask_out`
+/// must hold `max_samples` `u64` entries.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_sync_pull(
+    sync: labstream_sync_group,
+    data_out: *mut c_double,
+    ts_out: *mut c_double,
+    gap_mask_out: *mut u64,
+    max_samples: u32,
+    timeout: c_double,
+) -> i32 {
+    let Some(g) = (sync as *mut labstream_net::SyncGroup).as_mut() else {
+        return LSL_ARGUMENT_ERROR;
+    };
+    if data_out.is_null() || ts_out.is_null() || max_samples == 0 {
+        return LSL_ARGUMENT_ERROR;
+    }
+    let mut aligned = Vec::with_capacity(max_samples as usize);
+    let dur = Duration::from_secs_f64(timeout.max(0.0));
+    let n = match g.pull(&mut aligned, max_samples as usize, dur) {
+        Ok(n) => n,
+        Err(_) => return LSL_LOST_ERROR,
+    };
+    let ch = g.total_channels();
+    for (i, sample) in aligned.iter().take(n).enumerate() {
+        *ts_out.add(i) = sample.timestamp;
+        if !gap_mask_out.is_null() {
+            *gap_mask_out.add(i) = sample.gap_mask;
+        }
+        std::ptr::copy_nonoverlapping(sample.values.as_ptr(), data_out.add(i * ch), ch);
+    }
+    n as i32
+}
+
+/// Destroy a [`labstream_sync_group`] returned by [`labstream_sync_create`].
+///
+/// # Safety
+/// `sync` must be null or a valid handle that has not yet been destroyed.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_sync_destroy(sync: labstream_sync_group) {
+    if !sync.is_null() {
+        drop(Box::from_raw(sync as *mut labstream_net::SyncGroup));
+    }
+}
+
 /// Run network and discovery diagnostics and return the report as JSON.
 ///
 /// Pass null or an empty string for `peers` to skip remote peer checks, or a
