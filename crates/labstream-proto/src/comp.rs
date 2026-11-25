@@ -554,8 +554,11 @@ impl CompState {
                 if codec.suppress_subnormals && self.format.is_float() {
                     let mut owned = bytes.to_vec();
                     suppress_subnormals_in_place(self.format, &mut owned);
-                    sample =
-                        PackedSample::from_raw_bytes(sample.timestamp, self.format, Arc::from(owned));
+                    sample = PackedSample::from_raw_bytes(
+                        sample.timestamp,
+                        self.format,
+                        Arc::from(owned),
+                    );
                 }
             }
             Ok((sample, used, used))
@@ -643,9 +646,8 @@ fn encode_channels(
         }
         Format::Int64 => {
             for (c, ch) in raw.chunks_exact(8).enumerate() {
-                let v = u64::from_ne_bytes([
-                    ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7],
-                ]);
+                let v =
+                    u64::from_ne_bytes([ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7]]);
                 let d = (v as i64).wrapping_sub(prev[c] as i64);
                 prev[c] = v;
                 let u = zz64(d);
@@ -707,9 +709,8 @@ fn observe_channels(format: Format, raw: &[u8], prev: &mut [u64], ema: &mut [u64
         }
         Format::Int64 => {
             for (c, ch) in raw.chunks_exact(8).enumerate() {
-                let v = u64::from_ne_bytes([
-                    ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7],
-                ]);
+                let v =
+                    u64::from_ne_bytes([ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7]]);
                 let d = (v as i64).wrapping_sub(prev[c] as i64);
                 prev[c] = v;
                 update_ema(&mut ema[c], zz64(d));
@@ -755,9 +756,8 @@ fn seed_prev_from_raw(format: Format, raw: &[u8], prev: &mut [u64]) {
         }
         Format::Int64 => {
             for (c, ch) in raw.chunks_exact(8).enumerate() {
-                prev[c] = u64::from_ne_bytes([
-                    ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7],
-                ]);
+                prev[c] =
+                    u64::from_ne_bytes([ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], ch[7]]);
             }
         }
         Format::Double64 => {
@@ -1007,9 +1007,7 @@ impl DgramCompEncoder {
                 self.writer
                     .put_aligned_bytes(&timestamp.to_bits().to_le_bytes());
                 // Continue seamlessly from sample 0's bit accumulator!
-                self.writer
-                    .buf
-                    .extend_from_slice(&self.sample0_scratch.buf);
+                self.writer.buf.extend_from_slice(&self.sample0_scratch.buf);
                 self.writer.acc = self.sample0_scratch.acc;
                 self.writer.bits = self.sample0_scratch.bits;
                 // Do not let sample 0's absolute DC offset poison delta EMA.
@@ -1119,7 +1117,14 @@ pub fn decode_dgram_payload(
     } else {
         let mut r = BitReader::new(&payload[9..]);
         let mut raw0 = vec![0u8; raw_sample_bytes];
-        decode_channels(codec.format, channels, &mut prev, &mut ema, &mut r, &mut raw0)?;
+        decode_channels(
+            codec.format,
+            channels,
+            &mut prev,
+            &mut ema,
+            &mut r,
+            &mut raw0,
+        )?;
         ema.fill(ema0);
         if codec.suppress_subnormals {
             suppress_subnormals_in_place(codec.format, &mut raw0);
@@ -1372,7 +1377,10 @@ mod tests {
 
         enc.reset();
         for (s, ts) in &samples {
-            assert!(enc.try_push(s, *ts, 1177), "all 32 EEG samples fit in 1 UDP datagram");
+            assert!(
+                enc.try_push(s, *ts, 1177),
+                "all 32 EEG samples fit in 1 UDP datagram"
+            );
         }
         let payload = enc.finish().to_vec();
         let raw_bytes = samples.len() * (9 + channels * 4);

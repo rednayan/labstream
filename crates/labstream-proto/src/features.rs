@@ -722,9 +722,7 @@ pub fn offer_enc(pubkey: [u8; 32]) -> Token {
 
 /// Extract the inlet's `enc/1=<pubkey>` offer on the outlet side.
 pub fn enc_request(offered: &[Token]) -> Option<EncParam> {
-    let mut tokens = offered
-        .iter()
-        .filter(|t| t.name == ENC && t.version == 1);
+    let mut tokens = offered.iter().filter(|t| t.name == ENC && t.version == 1);
     let token = tokens.next()?;
     if tokens.next().is_some() {
         return None;

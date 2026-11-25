@@ -161,7 +161,9 @@ fn opt_in_drift_clock_runs_smoothly_and_reports_health() {
     inlet.set_postprocessing(flags::CLOCKSYNC | flags::DRIFT | flags::MONOTONIZE);
 
     // Wait for initial time-sync burst.
-    assert!(inlet.wait_for_time_correction(Duration::from_secs(3)).is_some());
+    assert!(inlet
+        .wait_for_time_correction(Duration::from_secs(3))
+        .is_some());
     assert!(inlet.clock_drift().is_some());
     let h = inlet.health();
     assert!(h.clock_drift.is_some());

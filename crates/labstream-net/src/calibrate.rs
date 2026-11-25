@@ -127,11 +127,7 @@ impl CalibrationResult {
 
 /// Detect rising-edge timestamps on a scalar `(timestamp, value)` sequence
 /// using sub-sample linear interpolation between adjacent samples.
-pub fn detect_rising_edges(
-    samples: &[(f64, f64)],
-    threshold: f64,
-    refractory_s: f64,
-) -> Vec<f64> {
+pub fn detect_rising_edges(samples: &[(f64, f64)], threshold: f64, refractory_s: f64) -> Vec<f64> {
     let mut edges = Vec::new();
     let mut last_edge = f64::NEG_INFINITY;
     for w in samples.windows(2) {

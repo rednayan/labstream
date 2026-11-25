@@ -71,8 +71,14 @@ fn load_xdf_first_f32(path: &Path, max_samples: usize) -> Option<XdfLoaded> {
                         p += 1;
                         let ts = if ts_flag == 8 && p + 8 <= end {
                             let t = f64::from_le_bytes([
-                                data[p], data[p + 1], data[p + 2], data[p + 3],
-                                data[p + 4], data[p + 5], data[p + 6], data[p + 7],
+                                data[p],
+                                data[p + 1],
+                                data[p + 2],
+                                data[p + 3],
+                                data[p + 4],
+                                data[p + 5],
+                                data[p + 6],
+                                data[p + 7],
                             ]);
                             p += 8;
                             last_ts = t;
@@ -195,7 +201,8 @@ fn bench_dataset(label: &str, format: Format, channels: usize, samples: &[(Packe
     let t0 = Instant::now();
     let mut comp_tcp = Vec::with_capacity(plain_tcp.len());
     for (s, ts) in samples {
-        enc.encode_tcp_sample(&codec, s, *ts, &mut comp_tcp).unwrap();
+        enc.encode_tcp_sample(&codec, s, *ts, &mut comp_tcp)
+            .unwrap();
     }
     let enc_s = t0.elapsed().as_secs_f64();
 
@@ -204,7 +211,11 @@ fn bench_dataset(label: &str, format: Format, channels: usize, samples: &[(Packe
     for (idx, (exp, exp_ts)) in samples.iter().enumerate() {
         let (got, used, _) = dec.decode_tcp_sample(&codec, &comp_tcp[pos..]).unwrap();
         pos += used;
-        assert_eq!(got.timestamp.to_bits(), exp_ts.to_bits(), "{label} tcp ts {idx}");
+        assert_eq!(
+            got.timestamp.to_bits(),
+            exp_ts.to_bits(),
+            "{label} tcp ts {idx}"
+        );
         assert_eq!(
             got.as_numeric_bytes(format),
             exp.as_numeric_bytes(format),
@@ -283,5 +294,10 @@ fn main() {
     bench_dataset("16-bit ADC EEG 512 Hz", Format::Int16, 32, &ds_i16_512);
 
     let ds_f32_512 = gen_adc_eeg(64, 512.0, 2560, Format::Float32);
-    bench_dataset("24-bit ADC scaled f32 512 Hz", Format::Float32, 64, &ds_f32_512);
+    bench_dataset(
+        "24-bit ADC scaled f32 512 Hz",
+        Format::Float32,
+        64,
+        &ds_f32_512,
+    );
 }

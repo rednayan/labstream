@@ -451,8 +451,12 @@ mod tests {
         let out_kp2 = EphemeralKey::generate().unwrap();
         let in_pk2 = in_kp2.public_bytes();
         let out_pk2 = out_kp2.public_bytes();
-        let k_out2 = out_kp2.derive_feed_key(in_pk2, true, Some("key-A")).unwrap();
-        let k_in2 = in_kp2.derive_feed_key(out_pk2, false, Some("key-B")).unwrap();
+        let k_out2 = out_kp2
+            .derive_feed_key(in_pk2, true, Some("key-A"))
+            .unwrap();
+        let k_in2 = in_kp2
+            .derive_feed_key(out_pk2, false, Some("key-B"))
+            .unwrap();
         assert_ne!(k_out2, k_in2);
         let mut wire2 = Vec::new();
         EncWriter::new(&mut wire2, &k_out2)

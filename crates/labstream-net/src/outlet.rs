@@ -310,11 +310,7 @@ impl Outlet {
     /// Every connected `labstream` consumer that negotiated `meta/1` receives
     /// the update in order with the sample stream. `liblsl` inlets see no
     /// change.
-    pub fn push_metadata(
-        &self,
-        key: &str,
-        value: &str,
-    ) -> labstream_proto::meta::MetadataUpdate {
+    pub fn push_metadata(&self, key: &str, value: &str) -> labstream_proto::meta::MetadataUpdate {
         self.push_metadata_at(key, value, 0.0)
     }
 
@@ -337,7 +333,9 @@ impl Outlet {
     }
 
     /// Snapshot the latest live metadata value emitted for each key.
-    pub fn metadata(&self) -> std::collections::BTreeMap<String, labstream_proto::meta::MetadataUpdate> {
+    pub fn metadata(
+        &self,
+    ) -> std::collections::BTreeMap<String, labstream_proto::meta::MetadataUpdate> {
         self.shared.fanout.metadata_snapshot().1
     }
 

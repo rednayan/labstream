@@ -9,8 +9,8 @@ fn live_metadata_arrives_in_order_with_exact_timestamps_and_seq() {
     let mut info = StreamInfo::new("MetaEeg", "EEG", 2, Format::Float32, 250.0);
     info.source_id = format!("meta-live-{}", std::process::id());
     let outlet = Outlet::new(info).expect("outlet");
-    let mut inlet = Inlet::open_with_buffer(outlet.info(), Duration::from_secs(2), 4096)
-        .expect("inlet");
+    let mut inlet =
+        Inlet::open_with_buffer(outlet.info(), Duration::from_secs(2), 4096).expect("inlet");
     assert!(outlet.wait_for_consumers(Duration::from_secs(2)));
     assert!(inlet.has_live_metadata(), "meta/1 must negotiate");
 
@@ -89,8 +89,8 @@ fn late_joining_inlet_receives_initial_metadata_snapshot() {
     outlet.push_chunk_f32(&[1.0, 2.0, 3.0], 50.03);
 
     // Connect after the metadata was already emitted.
-    let inlet = Inlet::open_with_buffer(outlet.info(), Duration::from_secs(2), 1024)
-        .expect("inlet");
+    let inlet =
+        Inlet::open_with_buffer(outlet.info(), Duration::from_secs(2), 1024).expect("inlet");
     assert!(inlet.has_live_metadata());
 
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -112,8 +112,8 @@ fn string_stream_on_tcp_delivers_live_metadata() {
     let mut info = StreamInfo::new("MetaMarkers", "Markers", 1, Format::String, 0.0);
     info.source_id = format!("meta-str-{}", std::process::id());
     let outlet = Outlet::new(info).expect("outlet");
-    let mut inlet = Inlet::open_with_buffer(outlet.info(), Duration::from_secs(2), 1024)
-        .expect("inlet");
+    let mut inlet =
+        Inlet::open_with_buffer(outlet.info(), Duration::from_secs(2), 1024).expect("inlet");
     assert!(outlet.wait_for_consumers(Duration::from_secs(2)));
     assert!(inlet.has_live_metadata());
     assert!(!inlet.on_shm());

@@ -161,8 +161,8 @@ fn enc_off_by_default_and_encrypts_wire_bytes_when_enabled() {
     let mut eeg_info = StreamInfo::new("EncEeg", "EEG", 8, Format::Float32, 512.0);
     eeg_info.source_id = format!("enc-eeg-{}", std::process::id());
     let eeg_out = Outlet::new(eeg_info).expect("eeg out");
-    let mut eeg_in = Inlet::open_with_buffer(eeg_out.info(), Duration::from_secs(2), 4096)
-        .expect("eeg in");
+    let mut eeg_in =
+        Inlet::open_with_buffer(eeg_out.info(), Duration::from_secs(2), 4096).expect("eeg in");
     assert!(eeg_out.wait_for_consumers(Duration::from_secs(2)));
     assert!(eeg_in.is_encrypted());
     assert!(!eeg_in.on_shm());

@@ -319,12 +319,7 @@ impl CompPacker {
         9 + self.codec.format.width().unwrap_or(0) * self.codec.channels
     }
 
-    fn emit_datagram(
-        &mut self,
-        first: u64,
-        slice: &[(PackedSample, f64)],
-        gram: &mut Vec<u8>,
-    ) {
+    fn emit_datagram(&mut self, first: u64, slice: &[(PackedSample, f64)], gram: &mut Vec<u8>) {
         let count = slice.len();
         let serial = self.next_serial();
         let plain_len = count * self.plain_sample_len();

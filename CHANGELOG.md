@@ -5,6 +5,17 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-25
+
+This release completes the full labstream feature roadmap (steps 0 to 18) while
+keeping wire compatibility with liblsl. Highlights include dropout-free `resume/1`
+and disk store-and-forward, UDP datagrams (`dgram/1`), shared memory (`shm/1`),
+lossless wire compression (`comp/1`), channel and rate selection (`select/1`),
+live metadata (`meta/1`), opt-in transport encryption (`enc/1`), opt-in drift
+clock and device-delay calibration, browser reach (WebSocket and WebAssembly),
+CLI tools (`doctor`, `top`, `play`, `relay`, `calibrate`), and real-time
+multi-stream sync (`SyncGroup`).
+
 ### Added
 
 - Real-time multi-stream sync and resampler (`docs/roadmap.md`, step 18):
@@ -441,7 +452,8 @@ Layer.
 - Protocol 1.00. That version carries every sample in a Boost archive. An
   inlet that asks for 1.00 gets a refusal, not a wrong read.
 
-[Unreleased]: https://github.com/rednayan/labstream/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/rednayan/labstream/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/rednayan/labstream/releases/tag/v0.2.0
 [0.1.2]: https://github.com/rednayan/labstream/releases/tag/v0.1.2
 [0.1.1]: https://github.com/rednayan/labstream/releases/tag/v0.1.1
 [0.1.0]: https://github.com/rednayan/labstream/releases/tag/v0.1.0

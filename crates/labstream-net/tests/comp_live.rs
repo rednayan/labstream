@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 fn init_features_no_shm() {
     // Runs before any `config::get()` in this test binary.
-    labstream_net::config::set_content("[labstream]\nFeatures = {seq, resume, dgram, select, comp}\n");
+    labstream_net::config::set_content(
+        "[labstream]\nFeatures = {seq, resume, dgram, select, comp}\n",
+    );
 }
 
 fn realistic_int32_eeg_rows(channels: usize, count: usize) -> Vec<Vec<i32>> {
@@ -52,7 +54,10 @@ fn comp_round_trips_eeg_over_udp_and_reduces_wire_bytes_over_50_pct() {
     let mut inlet = Inlet::open(&pub_info, Duration::from_secs(5)).expect("open inlet");
     assert!(outlet.wait_for_consumers(Duration::from_secs(5)));
     assert!(!inlet.on_shm(), "shm is disabled in this test binary");
-    assert!(inlet.is_compressed(), "comp/1 must negotiate on numeric stream");
+    assert!(
+        inlet.is_compressed(),
+        "comp/1 must negotiate on numeric stream"
+    );
 
     // Wait briefly so UDP hello finishes and the path switches to UDP.
     let rows = realistic_int32_eeg_rows(channels, 512);
@@ -225,7 +230,10 @@ fn comp_stays_off_for_string_marker_streams() {
     };
     let pub_info = outlet.info().clone();
     let mut inlet = Inlet::open(&pub_info, Duration::from_secs(5)).expect("open string inlet");
-    assert!(!inlet.is_compressed(), "comp/1 must not activate on strings");
+    assert!(
+        !inlet.is_compressed(),
+        "comp/1 must not activate on strings"
+    );
     assert_eq!(inlet.compression_ratio(), None);
 
     outlet.push_packed(PackedSample::from_strings(12.5, vec![b"stimulus".to_vec()]));

@@ -52,7 +52,11 @@ fn live_sync_group_aligns_two_async_250sps_100hz_outlets_below_2_deg() {
             .pull(&mut aligned, 256, Duration::from_millis(50))
             .unwrap();
     }
-    assert!(aligned.len() >= 200, "got only {} aligned samples", aligned.len());
+    assert!(
+        aligned.len() >= 200,
+        "got only {} aligned samples",
+        aligned.len()
+    );
 
     let slice = &aligned[10..190];
     let mut sum_sq_err = 0.0f64;

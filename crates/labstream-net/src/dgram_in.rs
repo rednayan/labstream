@@ -453,8 +453,11 @@ fn udp_loop(
                     .is_ok()
                     {
                         for (k, sample) in comp_decoded.drain(..).enumerate() {
-                            s.reorder
-                                .insert_or_emit(first.wrapping_add(k as u64), sample, &mut out);
+                            s.reorder.insert_or_emit(
+                                first.wrapping_add(k as u64),
+                                sample,
+                                &mut out,
+                            );
                         }
                         wire_bytes.fetch_add(payload.len() as u64, Ordering::Relaxed);
                         raw_bytes.fetch_add(

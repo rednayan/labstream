@@ -935,10 +935,11 @@ impl Inlet {
     /// `<desc><synchronization><offset_mean>` from the stream description.
     pub fn set_postprocessing(&mut self, options: u32) {
         if (options & flags::DEVICE_DELAY) != 0 && !self.device_delay_explicit {
-            let delay = self
-                .info
-                .device_delay()
-                .or_else(|| self.fullinfo(Duration::from_secs(2)).ok().and_then(|f| f.device_delay()));
+            let delay = self.info.device_delay().or_else(|| {
+                self.fullinfo(Duration::from_secs(2))
+                    .ok()
+                    .and_then(|f| f.device_delay())
+            });
             if let Some(d) = delay {
                 self.post.set_device_delay(d);
             }
@@ -2067,8 +2068,7 @@ fn read_and_recover(
                     carry = rest;
                     codec = new_codec;
                     enc_reader = new_enc;
-                    conn.encrypted
-                        .store(enc_reader.is_some(), Ordering::SeqCst);
+                    conn.encrypted.store(enc_reader.is_some(), Ordering::SeqCst);
                     let eff_srate = new_sel.as_ref().map_or(known.nominal_srate, |sel| {
                         sel.output_srate(known.nominal_srate)
                     });
@@ -2157,8 +2157,7 @@ fn read_and_recover(
                             carry = rest;
                             codec = new_codec;
                             enc_reader = new_enc;
-                            conn.encrypted
-                                .store(enc_reader.is_some(), Ordering::SeqCst);
+                            conn.encrypted.store(enc_reader.is_some(), Ordering::SeqCst);
                             let eff_srate = new_sel.as_ref().map_or(fresh.nominal_srate, |sel| {
                                 sel.output_srate(fresh.nominal_srate)
                             });
@@ -2185,8 +2184,7 @@ fn read_and_recover(
                             *conn.shm.lock().unwrap() = new_shm.clone();
                             conn.on_shm.store(new_shm.is_some(), Ordering::SeqCst);
                             conn.shm_gen.fetch_add(1, Ordering::Release);
-                            let new_comp =
-                                new_shm.is_none() && features::comp_answer(c.features());
+                            let new_comp = new_shm.is_none() && features::comp_answer(c.features());
                             conn.compressed.store(new_comp, Ordering::SeqCst);
                             conn.wire_bytes.store(0, Ordering::Relaxed);
                             conn.raw_bytes.store(0, Ordering::Relaxed);

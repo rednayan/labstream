@@ -169,7 +169,13 @@ impl StreamBuf {
     ///
     /// Returns `true` if the interpolation is clean, or `false` if a gap covers
     /// `t_target` (in which case `dst` is filled with `f64::NAN`).
-    fn interpolate(&self, t_target: f64, half_width: usize, gap_factor: f64, dst: &mut [f64]) -> bool {
+    fn interpolate(
+        &self,
+        t_target: f64,
+        half_width: usize,
+        gap_factor: f64,
+        dst: &mut [f64],
+    ) -> bool {
         let ch = self.spec.channels;
         if self.timestamps.is_empty() || self.has_explicit_gap(t_target) {
             dst.fill(f64::NAN);
@@ -374,7 +380,9 @@ impl StreamAligner {
 
     /// Number of buffered samples currently held for `stream_idx`.
     pub fn buffered_samples(&self, stream_idx: usize) -> usize {
-        self.streams.get(stream_idx).map_or(0, |b| b.timestamps.len())
+        self.streams
+            .get(stream_idx)
+            .map_or(0, |b| b.timestamps.len())
     }
 
     /// Pull up to `max_samples` aligned samples onto the common monotonic grid.
@@ -568,7 +576,10 @@ mod tests {
             assert!(w[1].timestamp > w[0].timestamp);
         }
         // Gap on stream 1 (bit 1 = 0b10) must be explicitly flagged.
-        let gap_samples: Vec<_> = aligned.iter().filter(|s| (s.gap_mask & 0b10) != 0).collect();
+        let gap_samples: Vec<_> = aligned
+            .iter()
+            .filter(|s| (s.gap_mask & 0b10) != 0)
+            .collect();
         assert!(
             !gap_samples.is_empty(),
             "expected explicit gap markers on stream 1"

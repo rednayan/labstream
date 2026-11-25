@@ -4438,8 +4438,7 @@ mod tests {
             );
 
             let deadline = std::time::Instant::now() + Duration::from_secs(2);
-            while labstream_inlet_metadata_count(inlet) < 1
-                && std::time::Instant::now() < deadline
+            while labstream_inlet_metadata_count(inlet) < 1 && std::time::Instant::now() < deadline
             {
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -4461,7 +4460,10 @@ mod tests {
                 ),
                 1
             );
-            assert_eq!(CStr::from_ptr(kbuf.as_ptr()).to_str().unwrap(), "impedance/Fp1");
+            assert_eq!(
+                CStr::from_ptr(kbuf.as_ptr()).to_str().unwrap(),
+                "impedance/Fp1"
+            );
             assert_eq!(CStr::from_ptr(vbuf.as_ptr()).to_str().unwrap(), "3.8 kOhm");
             assert_eq!(ts.to_bits(), 50.5f64.to_bits());
             assert_eq!(seq, 1);

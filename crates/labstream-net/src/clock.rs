@@ -391,11 +391,9 @@ pub fn start(target: SocketAddr, state: Arc<ClockState>, rng: Arc<Mutex<u64>>) {
             if burst.accepted() >= update_min_probes()
                 && state.epoch.load(Ordering::SeqCst) == epoch
             {
-                if let (Some(o), Some(u), Some(lt)) = (
-                    burst.time_offset(),
-                    burst.uncertainty(),
-                    burst.local_time(),
-                ) {
+                if let (Some(o), Some(u), Some(lt)) =
+                    (burst.time_offset(), burst.uncertainty(), burst.local_time())
+                {
                     state.publish_at(lt, o, u);
                 }
             }

@@ -425,7 +425,10 @@ fn run_ws_session(mut reader: TcpStream, shared: Arc<Shared>) -> io::Result<()> 
                                 frame_buf.extend_from_slice(&sub_id.to_le_bytes());
                                 frame_buf.extend_from_slice(&(n as u32).to_le_bytes());
                                 for s in &batch {
-                                    if codec.encode_packed_at(s, s.timestamp, &mut frame_buf).is_err() {
+                                    if codec
+                                        .encode_packed_at(s, s.timestamp, &mut frame_buf)
+                                        .is_err()
+                                    {
                                         return;
                                     }
                                 }
@@ -482,7 +485,10 @@ fn run_ws_session(mut reader: TcpStream, shared: Arc<Shared>) -> io::Result<()> 
                 }
             }
             _ => {
-                let msg = format!("{{\"op\":\"error\",\"message\":\"unknown op: {}\"}}", json_escape(op));
+                let msg = format!(
+                    "{{\"op\":\"error\",\"message\":\"unknown op: {}\"}}",
+                    json_escape(op)
+                );
                 send_ws_text(&writer, &msg)?;
             }
         }
@@ -716,8 +722,7 @@ fn parse_flat_json(input: &str) -> HashMap<String, String> {
             }
         } else {
             let start = i;
-            while i < bytes.len()
-                && !matches!(bytes[i], b',' | b'}' | b' ' | b'\t' | b'\r' | b'\n')
+            while i < bytes.len() && !matches!(bytes[i], b',' | b'}' | b' ' | b'\t' | b'\r' | b'\n')
             {
                 i += 1;
             }
@@ -963,12 +968,17 @@ mod tests {
         let (op, ack) = ws_client_read_frame(&mut ws);
         assert_eq!(op, 1);
         let ack_text = String::from_utf8(ack).unwrap();
-        assert!(ack_text.contains("\"op\":\"subscribed\""), "ack: {ack_text}");
+        assert!(
+            ack_text.contains("\"op\":\"subscribed\""),
+            "ack: {ack_text}"
+        );
 
         // Also open a native inlet to verify bit-exact equality.
         let mut native =
             Inlet::open_with_buffer(outlet.info(), Duration::from_secs(2), 4096).unwrap();
-        assert!(wait_until(Duration::from_secs(2), || outlet.consumer_count() >= 2));
+        assert!(wait_until(Duration::from_secs(2), || outlet
+            .consumer_count()
+            >= 2));
 
         let sample_vals: Vec<f32> = (0..8).map(|c| c as f32 * 1.25 - 3.5).collect();
         outlet.push_chunk_f32(&sample_vals, 42.125);
@@ -1025,10 +1035,7 @@ mod tests {
             .unwrap()
             .expect("marker sample");
         assert_eq!(marker_sample.timestamp.to_bits(), 100.25f64.to_bits());
-        assert_eq!(
-            marker_sample.values[0],
-            Value::Str(b"response_1".to_vec())
-        );
+        assert_eq!(marker_sample.values[0], Value::Str(b"response_1".to_vec()));
 
         bridge.stop();
     }

@@ -903,9 +903,13 @@ mod tests {
 
         // Compare max step across burst boundary (k=19 -> k=20):
         // stepped model jumps by ~100 us (2 s * 50 ppm); drift model step is tiny.
-        let before = model.offset_for_remote(1039.99 - true_offset(1039.99)).unwrap();
+        let before = model
+            .offset_for_remote(1039.99 - true_offset(1039.99))
+            .unwrap();
         model.update(1040.0, true_offset(1040.0), 0.0005);
-        let after = model.offset_for_remote(1040.01 - true_offset(1040.01)).unwrap();
+        let after = model
+            .offset_for_remote(1040.01 - true_offset(1040.01))
+            .unwrap();
         let jump = ((after - before) - 50e-6 * 0.02).abs();
         assert!(
             jump < 10e-6,
@@ -920,7 +924,10 @@ mod tests {
         default_pp.set_device_delay(0.025);
         let mut s = src(100.0);
         // Without `flags::DEVICE_DELAY`, timestamps must not change at all.
-        assert_eq!(default_pp.process(500.0, &mut s).to_bits(), 500.0f64.to_bits());
+        assert_eq!(
+            default_pp.process(500.0, &mut s).to_bits(),
+            500.0f64.to_bits()
+        );
 
         // With `flags::DEVICE_DELAY`, the 25 ms delay is subtracted.
         default_pp.set_options(flags::DEVICE_DELAY);

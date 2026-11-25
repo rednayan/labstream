@@ -458,7 +458,10 @@ mod tests {
         assert_eq!(parsed.ram_mib, Some(32.0));
         assert!(parsed.local_only);
         assert_eq!(parsed.duration, Some(Duration::from_secs(5)));
-        assert!(parsed.ws_bind.is_none(), "WebSocket bridge must be off by default");
+        assert!(
+            parsed.ws_bind.is_none(),
+            "WebSocket bridge must be off by default"
+        );
 
         let ws_args: Vec<String> = [
             "--ws-port",

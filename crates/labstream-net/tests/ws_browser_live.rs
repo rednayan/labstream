@@ -96,7 +96,10 @@ fn wasm_browser_client_decodes_512hz_8ch_and_sends_marker() {
         output.status.success(),
         "node browser_test.mjs failed:\nstdout: {stdout}\nstderr: {stderr}"
     );
-    assert!(stdout.contains("\"ok\":true"), "unexpected stdout: {stdout}");
+    assert!(
+        stdout.contains("\"ok\":true"),
+        "unexpected stdout: {stdout}"
+    );
 
     // The marker outlet created by the bridge stays alive for the bridge lifetime;
     // the resolver in `marker_rx` discovers it. Push one more marker via a quick
