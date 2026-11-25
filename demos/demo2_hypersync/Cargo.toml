@@ -1,0 +1,15 @@
+[workspace]
+
+[package]
+name = "demo2-hypersync"
+version = "0.2.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "demo2-hypersync"
+path = "src/bin/demo2_hypersync.rs"
+
+[dependencies]
+labstream-net = { path = "../../crates/labstream-net" }
+labstream-wire = { path = "../../crates/labstream-wire" }
