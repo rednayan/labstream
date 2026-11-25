@@ -18,7 +18,7 @@ ABI, so the C ABI will not change. `docs/versioning.md` gives the full rule.
 | Example programs of liblsl that link and agree | 21 of 21 |
 | XPath queries answered as the oracle answers them | 42 of 42 |
 | Longest recording | 7.81 hours, 8.4 million samples, no loss |
-| Tests in this repository | 252 |
+| Tests in this repository | 508 |
 
 The conformance workbench in `conformance/` made each measurement against a
 pinned build of liblsl at commit `e651023c`. `docs/conformance.md` gives the
@@ -31,7 +31,9 @@ method and the full result.
 | `crates/` | every crate, one directory for each crate |
 | `conformance/` | the tools that measure the crates against liblsl, and their records |
 | `conformance/liblsl/` | the pinned C++ library, a git submodule |
-| `docs/` | the layout of the repository, the release steps, the version rule, and the conformance result |
+| `docs/` | the layout of the repository, the release steps, the version rule, the extensions, and the conformance result |
+| `demos/` | seven standalone interactive demos (`demos/README.md`) |
+| `web/` | the browser WebSocket and WebAssembly viewer (`labstream.js`, `index.html`) |
 | `SPEC.md` | the protocol, with a citation for every claim |
 
 One Cargo workspace holds every crate. A crate takes another crate of this
@@ -49,6 +51,8 @@ the published crate asks crates.io for the version.
 | `labstream-time` | the timestamp filter, bit exact | no |
 | `labstream-net` | sockets, outlet, inlet, resolver, configuration, XPath | yes |
 | `labstream-capi` | the C ABI, built as `liblsl.so` | yes |
+| `labstream-cli` | the `labstream` command-line tool (`doctor`, `top`, `play`, `relay`, `calibrate`) | yes |
+| `labstream-wasm` | the `wasm32-unknown-unknown` browser wire decoder | no |
 
 `labstream-core` holds no code. It names the four crates below it, so a program
 takes one dependency. `labstream-capi` is not one of them, because it builds a
@@ -96,7 +100,7 @@ A program that opens no socket can drop the one crate that does:
 
 ```toml
 [dependencies]
-labstream-core = { version = "0.1", default-features = false }
+labstream-core = { version = "0.2", default-features = false }
 ```
 
 `labstream-wire`, `labstream-proto`, and `labstream-time` stay. Each one holds
@@ -245,11 +249,43 @@ that submodule. To read the C++ source, fetch it once:
 git submodule update --init conformance/liblsl
 ```
 
+## Extensions in v0.2.0
+
+Every extension negotiates in the LSL handshake. A liblsl peer ignores the offer
+and uses standard LSL 1.10 with zero change. `docs/extensions.md` gives the wire
+rules for each feature.
+
+| Feature | What it provides |
+|---|---|
+| `seq/1` + `resume/1` | per-sample sequence numbers, gap reports, RAM and disk store-and-forward recovery |
+| `dgram/1` | UDP sample delivery with selective retransmit for lower tail latency |
+| `shm/1` | same-machine lock-free shared-memory ring (`1 us` p50 local IPC) |
+| `comp/1` | bit-exact lossless wire compression (adaptive Golomb-Rice delta coding) |
+| `select/1` | outlet-side channel subset and Hamming-sinc FIR decimation |
+| `meta/1` | in-band live metadata updates (`0xFC`) with zero reconnect |
+| `enc/1` | opt-in transport encryption (X25519, HKDF-SHA256, ChaCha20-Poly1305) |
+| `SyncGroup` | real-time multi-stream Blackman-sinc resampler and aligner with explicit `gap_mask` |
+| `ws` + `labstream-wasm` | opt-in RFC 6455 WebSocket bridge and 27 KB WebAssembly browser decoder |
+| `labstream-cli` | `doctor`, `top`, `play`, `relay`, and `calibrate` tools |
+
+## Interactive demos
+
+`demos/README.md` holds seven standalone demos with browser dashboards and PNG
+export: Wi-Fi dropout recovery against C++ liblsl, hyperscanning phase-lock,
+bandwidth compression, local shared-memory IPC, browser WebAssembly + live
+`meta/1`, `enc/1` wire sniffer, and multi-modal `SyncGroup` fusion.
+
 ## Documentation
 
 | Document | What it holds |
 |---|---|
 | `SPEC.md` | the protocol, with a citation for every claim |
+| `docs/extensions.md` | wire format and rules for every `labstream` extension |
+| `docs/tools.md` | CLI tools (`top`, `play`, `relay`, `calibrate`) |
+| `docs/health.md` | stream health snapshots and gap descriptors |
+| `docs/latency.md` | latency measurements across transports |
+| `docs/discovery.md` | cross-machine discovery and `labstream doctor` |
+| `docs/roadmap.md` | the full feature roadmap (steps 0 to 18) |
 | `docs/conformance.md` | what was measured, how, and the result |
 | `conformance/README.md` | the tools of the workbench, and how to run them |
 | `crates/labstream/docs/design.md` | why the API is a separate crate |

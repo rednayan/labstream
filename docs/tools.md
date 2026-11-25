@@ -109,7 +109,7 @@ Both `labstream top` and `labstream play` use standard Rust threads, I/O, and
 ## `labstream relay`
 
 ```sh
-labstream relay [--name NAME] [--type TYPE] [--query PRED] [--name-suffix TEXT] [--session ID] [--out-session ID] [--disk-mb MIB] [--disk-dir DIR] [--ram-mb MIB] [--local-only] [--duration SECONDS]
+labstream relay [--name NAME] [--type TYPE] [--query PRED] [--name-suffix TEXT] [--session ID] [--out-session ID] [--disk-mb MIB] [--disk-dir DIR] [--ram-mb MIB] [--local-only] [--ws-port PORT] [--ws-bind ADDR] [--ws-allow IP] [--ws-marker-stream NAME] [--duration SECONDS]
 ```
 
 `labstream relay` (roadmap step 4) attaches to existing LSL outlets (such as
@@ -120,6 +120,22 @@ disk store-and-forward (`--disk-mb`). Each relayed stream keeps the full
 `<labstream_relay>` tag to `<desc>`, and marks `source_id` with `-relay` so
 inlets and `labstream_streaminfo_is_relayed` can tell relayed streams from
 source streams.
+
+With `--ws-port PORT` (roadmap step 13), `labstream relay` also starts the
+opt-in RFC 6455 WebSocket bridge (`labstream::ws::WsBridge`) bound to
+`127.0.0.1` by default. Browser clients decode binary LSL frames with
+`labstream-wasm` and publish markers onto `--ws-marker-stream`.
+
+## `labstream calibrate`
+
+```sh
+labstream calibrate --target NAME --reference NAME [--channel INDEX] [--threshold VALUE] [--pulses N] [--timeout SECONDS] [--json]
+```
+
+`labstream calibrate` (roadmap step 15) measures fixed device delay between a
+target sensor stream and a reference trigger or marker stream with sub-sample
+edge interpolation. The reported offset goes into
+`<desc><synchronization><offset_mean>` through `StreamInfo::set_device_delay`.
 
 ## Conformance plan
 

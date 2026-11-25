@@ -45,7 +45,10 @@ labstream/
 │   ├── labstream-time/       the timestamp filter
 │   ├── labstream-net/        sockets, outlet, inlet, resolver, doctor
 │   ├── labstream-capi/       the C ABI, built as liblsl.so
-│   └── labstream-cli/        the `labstream` command-line tool (`doctor`, `top`, `play`)
+│   ├── labstream-cli/        the `labstream` command-line tool (`doctor`, `top`, `play`, `relay`, `calibrate`)
+│   └── labstream-wasm/       the `wasm32-unknown-unknown` browser wire decoder
+├── demos/                seven standalone interactive demos (`demos/README.md`)
+├── web/                  the browser WebSocket and WebAssembly viewer
 ├── conformance/          the tools that measure the crates against liblsl
 │   ├── peer/                 lsl-peer, the program that the interop tool drives
 │   ├── oracle/               the measurement tools and the Docker build of liblsl
@@ -76,7 +79,8 @@ labstream/
 | `labstream-time` | the timestamp filter, bit exact to liblsl. No input and no output | nothing | yes |
 | `labstream-net` | sockets, outlet, inlet, resolver, configuration, XPath, doctor | `-wire`, `-proto`, `-time` | yes |
 | `labstream-capi` | the C ABI. It builds `liblsl.so`, `liblsl.dylib`, or `lsl.dll` | `-wire`, `-net`, `-time` | no |
-| `labstream-cli` | the `labstream` binary (`doctor`, `top`, `play`) | `-net`, `-wire` | no |
+| `labstream-cli` | the `labstream` binary (`doctor`, `top`, `play`, `relay`, `calibrate`) | `-net`, `-wire` | no |
+| `labstream-wasm` | the WebAssembly wire decoder for browser viewers | `-wire` | no |
 | `lsl-peer` | a program that the interop tool drives. It is at `conformance/peer/` | `-wire`, `-net` | no |
 
 This list gives which crate needs which:

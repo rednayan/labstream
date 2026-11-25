@@ -18,6 +18,14 @@ multi-stream sync (`SyncGroup`).
 
 ### Added
 
+- Seven standalone interactive demos under `demos/` (`demos/README.md`) with
+  browser dashboards and PNG export: `demo1_dropout` (Wi-Fi dropout recovery
+  against C++ liblsl with CRC32 proof), `demo2_hypersync` (`SyncGroup`
+  phase-lock), `demo3_bandwidth` (`comp/1` + `select/1`), `demo4_shm_ipc`
+  (cross-process `shm/1` vs TCP loopback), `demo5_browser_meta` (`labstream-wasm`
+  + `WsBridge` + live `meta/1`), `demo6_encryption` (`enc/1` live TCP wire
+  sniffer), and `demo7_multimodal_sync` (multi-modal `SyncGroup` fusion with
+  `gap_mask`).
 - Real-time multi-stream sync and resampler (`docs/roadmap.md`, step 18):
   `labstream_time::sync::StreamAligner` and `labstream_net::SyncGroup`
   (re-exported as `labstream::SyncGroup`) align `N` asynchronous numeric
@@ -305,6 +313,13 @@ multi-stream sync (`SyncGroup`).
   version. A release that stops partway now completes when a person reruns the
   failed jobs. Before, the workflow refused a partial state, and a person had
   to publish the rest by hand. `docs/releasing.md` gives the recovery.
+
+### Fixed
+
+- `crates/labstream-net/src/dgram_in.rs`: preserve IPv6 link-local `scope_id`
+  when building the `dgram/1` UDP peer address from the TCP peer socket. Before,
+  `SocketAddr::new(peer.ip(), param.port)` zeroed `scope_id`, so `dgram/1` UDP
+  hello failed over IPv6 link-local Wi-Fi links.
 
 ## [0.1.2] - 2026-09-29
 

@@ -94,6 +94,11 @@ crate gives the measurements and the reason for each choice.
 | `Error::Lost` | one error type for "the source is gone" and "the socket failed" |
 | `Scalar`, `as_f64`, `as_text` | a match over seven value formats in each program |
 | `Watcher` | a browser that pays a full timeout for each refresh |
+| `Inlet::health()` and `gaps()` | silent sample loss with no visibility into transport or queue fill |
+| `InletBuilder::{channels, decimate, rate}` | client-side discard of unwanted channels over slow links (`select/1`) |
+| `Outlet::push_metadata` and `Inlet::pull_metadata` | stream reconnects for live electrode impedance or battery updates (`meta/1`) |
+| `SyncGroup` | manual multi-stream resampling and phase alignment across asynchronous ADCs |
+| `ws`, `enc`, `calibrate`, `relay`, `doctor` | separate external tools for browser reach, encryption, delay calibration, relay, and network diagnostics |
 
 ## Build and test
 
