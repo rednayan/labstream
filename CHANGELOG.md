@@ -7,6 +7,24 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Browser reach via opt-in WebSocket bridge and WebAssembly decoder
+  (`docs/roadmap.md`, step 13): `labstream_net::ws::WsBridge` (re-exported in
+  `labstream::ws`) and `labstream relay` (`--ws-port`, `--ws-bind`,
+  `--ws-allow`, `--ws-marker-stream`) expose a zero-dependency RFC 6455
+  WebSocket endpoint (off by default, loopback-only unless configured) that
+  forwards exact LSL wire samples in binary frames and publishes browser
+  markers onto live LSL marker outlets. `crates/labstream-wasm` compiles
+  `labstream-wire` to `wasm32-unknown-unknown` with `web/labstream.js` and
+  `web/index.html`, and `labstream-capi` adds `labstream_ws_bridge_start`,
+  `labstream_ws_bridge_port`, and `labstream_ws_bridge_stop`.
+- In-band live metadata via `meta/1` (`docs/roadmap.md`, step 16,
+  `docs/extensions.md`, section `meta`): `labstream_proto::meta` adds the
+  `0xFC` record (`seq`, `timestamp`, `key`, `value`) on the TCP feed channel
+  across TCP, `dgram/1`, and `shm/1` transports while leaving liblsl inlets
+  unchanged. Adds `Outlet::{push_metadata, push_metadata_at, metadata}`,
+  `Inlet::{has_live_metadata, pull_metadata, metadata}`, and C functions
+  `labstream_outlet_push_metadata`, `labstream_inlet_has_live_metadata`,
+  `labstream_inlet_metadata_count`, and `labstream_inlet_pull_metadata`.
 - Opt-in linear offset-and-drift clock model (`docs/roadmap.md`, step 17):
   `labstream_time::DriftModel` and `DriftFit` fit a 64-burst RTT-weighted line
   with Huber outlier down-weighting from each time-sync burst midpoint.

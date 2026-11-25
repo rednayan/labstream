@@ -71,6 +71,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "labstream-wasm"
+version = "0.1.2"
+dependencies = [
+ "labstream-wire",
+]
+
+[[package]]
 name = "labstream-wire"
 version = "0.1.2"
 dependencies = [

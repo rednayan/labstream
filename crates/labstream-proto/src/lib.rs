@@ -29,6 +29,7 @@ pub mod discovery;
 pub mod features;
 pub mod feed;
 pub mod header;
+pub mod meta;
 pub mod negotiate;
 pub mod select;
 pub mod seq;

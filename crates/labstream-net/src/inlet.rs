@@ -652,6 +652,25 @@ pub struct Inlet {
 }
 
 /// What the reader thread and the application share about the connection.
+/// Maximum number of unread live metadata updates kept in the inlet inbox.
+const MAX_META_INBOX: usize = 4096;
+
+#[derive(Debug, Default)]
+struct MetadataInbox {
+    pending: VecDeque<labstream_proto::meta::MetadataUpdate>,
+    latest: std::collections::BTreeMap<String, labstream_proto::meta::MetadataUpdate>,
+}
+
+impl MetadataInbox {
+    fn push(&mut self, upd: labstream_proto::meta::MetadataUpdate) {
+        if self.pending.len() >= MAX_META_INBOX {
+            self.pending.pop_front();
+        }
+        self.latest.insert(upd.key.clone(), upd.clone());
+        self.pending.push_back(upd);
+    }
+}
+
 struct ConnState {
     /// True when the inlet finds the stream again after its source restarts.
     recover: bool,
@@ -672,6 +691,10 @@ struct ConnState {
     on_shm: AtomicBool,
     /// True while wire compression (`comp/1`) is active on this connection.
     compressed: AtomicBool,
+    /// True when the current connection negotiated `meta/1` live metadata.
+    meta_enabled: AtomicBool,
+    /// Live metadata updates received over `meta/1`.
+    metadata: Mutex<MetadataInbox>,
     /// Compressed (or fallback) wire payload bytes received on this connection.
     wire_bytes: Arc<AtomicU64>,
     /// Equivalent uncompressed wire payload bytes received on this connection.
@@ -788,6 +811,7 @@ impl Inlet {
         );
         debug_assert_eq!(client.state(), State::Streaming);
         let numbered = uses_seq(&client);
+        let meta_enabled = features::has(client.features(), features::META, 1);
         let resume = features::resume_answer(client.features());
         let compressed = shm.is_none() && features::comp_answer(client.features());
         let dgram = if shm.is_some() {
@@ -829,6 +853,8 @@ impl Inlet {
             shm_gen: AtomicU64::new(0),
             on_shm: AtomicBool::new(on_shm_init),
             compressed: AtomicBool::new(compressed),
+            meta_enabled: AtomicBool::new(meta_enabled),
+            metadata: Mutex::new(MetadataInbox::default()),
             wire_bytes: Arc::new(AtomicU64::new(0)),
             raw_bytes: Arc::new(AtomicU64::new(0)),
             shm_next_expected: AtomicU64::new(u64::MAX),
@@ -1521,6 +1547,73 @@ impl Inlet {
         self.conn.compressed.load(Ordering::SeqCst)
     }
 
+    /// True when the current connection negotiated `meta/1` live metadata
+    /// (`docs/roadmap.md`, step 16).
+    pub fn has_live_metadata(&self) -> bool {
+        self.conn.meta_enabled.load(Ordering::SeqCst)
+    }
+
+    /// Number of unread live metadata updates currently queued on this inlet.
+    pub fn pending_metadata_count(&self) -> usize {
+        self.conn.metadata.lock().unwrap().pending.len()
+    }
+
+    /// Adjust a raw outlet metadata timestamp with the inlet's active clock
+    /// synchronization and device-delay settings (opt-in flags match sample
+    /// timestamps).
+    fn adjust_metadata_timestamp(&self, raw: f64) -> f64 {
+        let mut ts = raw;
+        let flags = self.post.options();
+        if flags & labstream_time::flags::DRIFT != 0 {
+            if let Some(off) = self.clock.smooth_offset_at(ts) {
+                ts += off;
+            } else if let Some(off) = self.clock.offset() {
+                ts += off;
+            }
+        } else if flags & labstream_time::flags::CLOCKSYNC != 0 {
+            if let Some(off) = self.clock.offset() {
+                ts += off;
+            }
+        }
+        if flags & labstream_time::flags::DEVICE_DELAY != 0 {
+            let d = self.post.device_delay();
+            if d.is_finite() {
+                ts -= d;
+            }
+        }
+        ts
+    }
+
+    /// Drain all pending live metadata updates in order.
+    pub fn pull_metadata(&self) -> Vec<labstream_proto::meta::MetadataUpdate> {
+        let mut drained: Vec<labstream_proto::meta::MetadataUpdate> = {
+            let mut inbox = self.conn.metadata.lock().unwrap();
+            inbox.pending.drain(..).collect()
+        };
+        for u in &mut drained {
+            u.timestamp = self.adjust_metadata_timestamp(u.timestamp);
+        }
+        drained
+    }
+
+    /// Pop the oldest pending live metadata update, if any.
+    pub fn pull_metadata_one(&self) -> Option<labstream_proto::meta::MetadataUpdate> {
+        let mut u = self.conn.metadata.lock().unwrap().pending.pop_front()?;
+        u.timestamp = self.adjust_metadata_timestamp(u.timestamp);
+        Some(u)
+    }
+
+    /// Snapshot the latest live metadata value received for each key.
+    pub fn metadata(
+        &self,
+    ) -> std::collections::BTreeMap<String, labstream_proto::meta::MetadataUpdate> {
+        let mut map = self.conn.metadata.lock().unwrap().latest.clone();
+        for u in map.values_mut() {
+            u.timestamp = self.adjust_metadata_timestamp(u.timestamp);
+        }
+        map
+    }
+
     /// Ratio `wire_bytes / raw_bytes` observed on this connection when
     /// `comp/1` is active, or `None` when uncompressed or before data arrives.
     pub fn compression_ratio(&self) -> Option<f64> {
@@ -1739,11 +1832,35 @@ fn read_and_recover(
         }
 
         // While `shm/1` is active, samples travel through shared memory and
-        // the TCP socket only carries end-of-stream and recovery triggers.
+        // the TCP socket carries end-of-stream, recovery triggers, and `meta/1`
+        // live metadata records.
         let ended = if let Some(ref reader) = shm {
             match sock.read(&mut tmp) {
                 Ok(0) => Some(Ending::Closed),
-                Ok(_) => None,
+                Ok(n) => {
+                    if conn.meta_enabled.load(Ordering::SeqCst) {
+                        carry.extend_from_slice(&tmp[..n]);
+                        let mut pos = 0usize;
+                        loop {
+                            match labstream_proto::meta::peek(&carry[pos..]) {
+                                labstream_proto::meta::Next::Record(upd, used) => {
+                                    conn.metadata.lock().unwrap().push(upd);
+                                    pos += used;
+                                }
+                                labstream_proto::meta::Next::Incomplete => break,
+                                labstream_proto::meta::Next::Other
+                                | labstream_proto::meta::Next::Invalid => {
+                                    pos = carry.len();
+                                    break;
+                                }
+                            }
+                        }
+                        if pos > 0 {
+                            carry.drain(..pos);
+                        }
+                    }
+                    None
+                }
                 Err(ref e) if read_timed_out(e) => {
                     if reader.is_closed() {
                         Some(Ending::Closed)
@@ -1757,6 +1874,7 @@ fn read_and_recover(
             // Decode everything already buffered before reading more. The whole
             // read goes into the queue with one lock.
             let numbered = conn.numbered.load(Ordering::SeqCst);
+            let meta_on = conn.meta_enabled.load(Ordering::SeqCst);
             batch_skips.clear();
             let decoded = decode_buffered(
                 &codec,
@@ -1768,6 +1886,7 @@ fn read_and_recover(
                 Some(&conn.gaps),
                 tcp_comp.as_mut(),
                 Some((&conn.wire_bytes, &conn.raw_bytes)),
+                meta_on.then_some(&conn.metadata),
                 &mut batch_skips,
                 &mut batch,
             );
@@ -1965,6 +2084,10 @@ fn read_and_recover(
                     };
                     conn.resumed.store(answer.is_some(), Ordering::SeqCst);
                     conn.numbered.store(uses_seq(&c), Ordering::SeqCst);
+                    conn.meta_enabled.store(
+                        features::has(c.features(), features::META, 1),
+                        Ordering::SeqCst,
+                    );
                     conn.recoveries.fetch_add(1, Ordering::SeqCst);
                     conn.connected.store(true, Ordering::SeqCst);
                     last_data = Instant::now();
@@ -2052,6 +2175,10 @@ fn read_and_recover(
                             };
                             conn.resumed.store(answer.is_some(), Ordering::SeqCst);
                             conn.numbered.store(uses_seq(&c), Ordering::SeqCst);
+                            conn.meta_enabled.store(
+                                features::has(c.features(), features::META, 1),
+                                Ordering::SeqCst,
+                            );
                             *conn.info.lock().unwrap() = *fresh;
                             conn.recoveries.fetch_add(1, Ordering::SeqCst);
                             conn.connected.store(true, Ordering::SeqCst);
@@ -2111,6 +2238,7 @@ fn decode_buffered(
     tcp_gaps: Option<&Arc<Mutex<GapTracker>>>,
     mut comp: Option<&mut labstream_proto::comp::CompState>,
     byte_stats: Option<(&AtomicU64, &AtomicU64)>,
+    meta_inbox: Option<&Mutex<MetadataInbox>>,
     batch_skips: &mut Vec<(usize, u64)>,
     out: &mut Vec<PackedSample>,
 ) -> Result<(), labstream_wire::Error> {
@@ -2163,6 +2291,21 @@ fn decode_buffered(
                 }
                 Record::Incomplete => break Ok(()),
                 _ => {}
+            }
+        }
+        // With `meta/1`, a live metadata record can stand before a sample.
+        if let Some(inbox) = meta_inbox {
+            match labstream_proto::meta::peek(&carry[pos..]) {
+                labstream_proto::meta::Next::Record(upd, used) => {
+                    inbox.lock().unwrap().push(upd);
+                    pos += used;
+                    continue;
+                }
+                labstream_proto::meta::Next::Incomplete => break Ok(()),
+                labstream_proto::meta::Next::Invalid => {
+                    break Err(labstream_wire::Error::BadTag(labstream_proto::meta::TAG))
+                }
+                labstream_proto::meta::Next::Other => {}
             }
         }
         let step = match comp.as_deref_mut() {
@@ -2512,6 +2655,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 &mut Vec::new(),
                 &mut out,
             )
@@ -2541,6 +2685,7 @@ mod tests {
                 &mut carry,
                 &mut deducer,
                 Some(&mut counter),
+                None,
                 None,
                 None,
                 None,
@@ -2583,6 +2728,7 @@ mod tests {
             &mut deducer,
             Some(&mut counter),
             Some((27, &mut resent)),
+            None,
             None,
             None,
             None,
@@ -2685,6 +2831,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             &mut Vec::new(),
             &mut out
         )
@@ -2733,6 +2880,7 @@ mod tests {
             None,
             None,
             Some(&gaps),
+            None,
             None,
             None,
             &mut skips,

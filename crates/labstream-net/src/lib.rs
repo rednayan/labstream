@@ -32,6 +32,7 @@ pub mod queue;
 pub mod relay;
 pub mod resolver;
 pub(crate) mod shm;
+pub mod ws;
 pub mod xpath;
 
 pub use calibrate::{CalibrationOptions, CalibrationResult};
@@ -42,10 +43,12 @@ pub use health::{ConsumerHealth, Gap, GapKind, InletHealth, OutletHealth};
 pub use info::StreamInfo;
 pub use inlet::{build_property_query, read_fullinfo, resolve, Inlet};
 pub use labstream_proto::features::SelectParam;
+pub use labstream_proto::meta::MetadataUpdate;
 pub use outlet::Outlet;
 pub use queue::{Fanout, SampleQueue};
 pub use relay::{RelayOptions, StreamRelay};
 pub use resolver::ContinuousResolver;
+pub use ws::{WsBridge, WsOptions};
 
 /// The session that a stream belongs to, when no file names another.
 ///

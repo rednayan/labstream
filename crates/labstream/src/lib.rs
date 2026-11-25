@@ -79,8 +79,13 @@ pub use labstream_net::doctor;
 /// Local-to-network LSL stream relay (`labstream relay`).
 pub use labstream_net::relay;
 
-/// Stream health snapshots and gap descriptors (`docs/health.md`).
-pub use labstream_net::{ConsumerHealth, Gap, GapKind, InletHealth, OutletHealth, SelectParam};
+/// Opt-in WebSocket bridge for browser reach (`docs/roadmap.md`, step 13).
+pub use labstream_net::ws;
+
+/// Stream health snapshots, gap descriptors, and live metadata (`docs/health.md`, `docs/extensions.md`).
+pub use labstream_net::{
+    ConsumerHealth, Gap, GapKind, InletHealth, MetadataUpdate, OutletHealth, SelectParam,
+};
 
 use std::time::Duration;
 

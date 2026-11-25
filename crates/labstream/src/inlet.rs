@@ -409,6 +409,21 @@ impl Inlet {
         self.inner.compression_ratio()
     }
 
+    /// True when the current connection negotiated `meta/1` live metadata.
+    pub fn has_live_metadata(&self) -> bool {
+        self.inner.has_live_metadata()
+    }
+
+    /// Drain all pending live metadata updates in order (`meta/1`).
+    pub fn pull_metadata(&self) -> Vec<crate::MetadataUpdate> {
+        self.inner.pull_metadata()
+    }
+
+    /// Snapshot the latest live metadata value received for each key (`meta/1`).
+    pub fn metadata(&self) -> std::collections::BTreeMap<String, crate::MetadataUpdate> {
+        self.inner.metadata()
+    }
+
     /// Snapshot the health of this inlet in one call.
     pub fn health(&self) -> crate::InletHealth {
         self.inner.health()

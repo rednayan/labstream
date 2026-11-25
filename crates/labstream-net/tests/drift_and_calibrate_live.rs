@@ -117,7 +117,11 @@ fn simulated_device_delay_is_calibrated_within_1_ms_and_applied_opt_in() {
         Inlet::open(cal_outlet.info(), Duration::from_secs(5)).expect("default inlet");
     let mut corrected_inlet =
         Inlet::open(cal_outlet.info(), Duration::from_secs(5)).expect("corrected inlet");
-    assert!(cal_outlet.wait_for_consumers(Duration::from_secs(5)));
+    let wait_end = std::time::Instant::now() + Duration::from_secs(5);
+    while cal_outlet.consumer_count() < 2 && std::time::Instant::now() < wait_end {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(cal_outlet.consumer_count(), 2);
     corrected_inlet.set_postprocessing(flags::DEVICE_DELAY);
 
     let pushed_ts = 5000.025;

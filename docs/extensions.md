@@ -1223,6 +1223,59 @@ which liblsl tools and LabRecorder keep verbatim in XDF files. Opt-in
 `LABSTREAM_POST_DEVICE_DELAY`) reads that value and subtracts it from each
 timestamp while default timestamps stay unchanged.
 
+### `meta`: in-band live metadata
+
+**Status:** implemented on `main` (`docs/roadmap.md`, step 16). The token is
+`meta/1`, on by default in `labstream.Features`.
+
+#### Comparison with a second LSL stream
+
+A second irregular string LSL stream also carries live metadata and works with
+liblsl tools and LabRecorder. It has three costs for an application:
+
+1. The viewer must discover, open, and track a second stream for each device,
+   and match its `source_id` or name by convention.
+2. The second stream runs its own TCP socket and clock sync thread, so sample
+   boundary ordering with the data stream is approximate.
+3. A device driver that opens one outlet must open and manage two outlets.
+
+In-band `meta/1` avoids those costs for labstream peers. A device can still
+publish a second LSL marker stream when XDF archival of metadata through
+liblsl LabRecorder is necessary.
+
+#### Wire format
+
+When both peers negotiate `meta/1`, the outlet can write a `0xFC` record on
+the TCP feed channel (active on TCP, `dgram/1`, and `shm/1`):
+
+```text
+u8   tag        0xFC
+u64  seq        little-endian outlet sample sequence number at emission
+f64  timestamp  little-endian IEEE-754 seconds on the outlet clock
+u32  key_len    little-endian UTF-8 byte length (max 65536)
+u32  val_len    little-endian UTF-8 byte length (max 65536)
+[u8; key_len]   UTF-8 key (for example `impedance/Fp1`)
+[u8; val_len]   UTF-8 value (for example `4.2 kOhm`)
+```
+
+On TCP, the outlet writes each record before the first sample whose sequence
+number is at or above `seq`. On initial connection, the outlet sends the
+latest value of each key in `seq` order. A liblsl inlet never offers `meta/1`
+and never receives a `0xFC` record.
+
+### Browser reach (WebSocket and WebAssembly)
+
+**Status:** implemented on `main` (`docs/roadmap.md`, step 13).
+
+`WsBridge` (`crates/labstream-net/src/ws.rs`) and `labstream relay --ws-port`
+expose an opt-in RFC 6455 WebSocket endpoint. The endpoint is off by default
+and accepts only loopback peers unless `--ws-allow` lists other addresses.
+Subscribed streams send binary frames with an 8-byte header
+(`[u32 stream_id LE][u32 sample_count LE]`) followed by exact little-endian
+LSL wire samples (`TAG_TRANSMITTED_TIMESTAMP = 2`) for decoding by
+`crates/labstream-wasm` (`wasm32-unknown-unknown`). Text JSON frames handle
+`list`, `subscribe`, `unsubscribe`, `marker`, and forwarded `meta/1` updates.
+
 ## Alternatives that this proposal rejects
 
 **A higher `Data-Protocol-Version`, for example 120.** liblsl uses the lower

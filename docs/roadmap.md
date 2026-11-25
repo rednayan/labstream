@@ -1,8 +1,8 @@
 # Roadmap: features that liblsl does not have
 
-**Status:** approved by the user on 2026-11-16. The gate, steps 0 to 12
-(step 11 library and C API), step 15, and step 17 are complete. Steps 13, 14,
-16, and 18 are not implemented.
+**Status:** approved by the user on 2026-11-16. The gate, steps 0 to 13
+(step 11 library and C API), step 15, step 16 (library and C API), and
+step 17 are complete. Steps 14 and 18 are not implemented.
 
 This page gives the order of the labstream-only features, the success
 criterion of each feature, and the dependencies. Each feature follows the
@@ -571,6 +571,19 @@ A page can then read a stream and send markers.
 3. The endpoint is off by default, and accepts only the local machine
    unless the configuration gives other addresses.
 
+**Status:** complete on 2026-11-25. `labstream_net::ws::WsBridge`
+(re-exported in `labstream::ws`) adds a zero-dependency RFC 6455 WebSocket
+endpoint to `labstream relay` (`--ws-port`, `--ws-bind`, `--ws-allow`,
+`--ws-marker-stream`), off by default and restricted to loopback peers unless
+configured otherwise. `crates/labstream-wasm` builds `labstream-wire` as a
+zero-dependency `wasm32-unknown-unknown` decoder, paired with `web/labstream.js`
+and `web/index.html`. `labstream_ws_bridge_start`, `labstream_ws_bridge_port`,
+and `labstream_ws_bridge_stop` expose the bridge in `labstream-capi`. Unit
+tests in `ws.rs`, `labstream-wasm`, and `labstream-cli`, plus the Node.js
+WebAssembly live test (`crates/labstream-net/tests/ws_browser_live.rs` and
+`conformance/oracle/browser_test.mjs`), confirm bit-exact 512 Hz x 8 channel
+streaming and live browser marker publication.
+
 ### Step 14: encryption
 
 LSL sends each sample as plain bytes. An encrypted variant of liblsl exists
@@ -644,6 +657,19 @@ that sends such a change, with a timestamp, to each labstream consumer.
 
 The spec must first compare this design with a second LSL stream for the
 metadata. A second stream also works with liblsl.
+
+**Status:** library, wire protocol, and C API complete on 2026-11-25
+(`docs/extensions.md`, section `meta`). `meta/1` is on by default in
+`labstream.Features`. `labstream_proto::meta` defines the in-band `0xFC`
+record carrying `(seq, timestamp, key, value)` on the TCP feed channel across
+TCP, `dgram/1`, and `shm/1` transports, while liblsl inlets receive plain LSL
+with no `0xFC` records. `Outlet::{push_metadata, push_metadata_at, metadata}`,
+`Inlet::{has_live_metadata, pull_metadata, metadata}`, and C functions
+`labstream_outlet_push_metadata`, `labstream_inlet_has_live_metadata`,
+`labstream_inlet_metadata_count`, and `labstream_inlet_pull_metadata` expose
+the feature. Unit tests in `labstream-proto`, live tests in
+`crates/labstream-net/tests/meta_live.rs`, and C API tests in `labstream-capi`
+confirm criteria 1 and 2. Phasic UI display remains in the Phasic repository.
 
 ### Step 17: drift clock (opt-in)
 

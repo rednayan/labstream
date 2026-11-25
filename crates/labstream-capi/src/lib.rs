@@ -3682,6 +3682,110 @@ pub unsafe extern "C" fn labstream_inlet_device_delay(inlet: lsl_inlet) -> c_dou
     b.inlet.as_ref().map_or(0.0, |i| i.device_delay())
 }
 
+/// Emit a live metadata update (`key`, `value`, `timestamp`; `0.0` uses local
+/// clock) to all connected `meta/1` consumers (`docs/roadmap.md`, step 16).
+///
+/// # Safety
+/// `outlet` must be a valid handle from this library, and `key` and `value`
+/// must be valid null-terminated UTF-8 strings.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_outlet_push_metadata(
+    outlet: lsl_outlet,
+    key: *const c_char,
+    value: *const c_char,
+    timestamp: c_double,
+) -> i32 {
+    let Some(b) = (outlet as *mut OutletBox).as_ref() else {
+        return LSL_ARGUMENT_ERROR;
+    };
+    if key.is_null() || value.is_null() {
+        return LSL_ARGUMENT_ERROR;
+    }
+    let Ok(k) = CStr::from_ptr(key).to_str() else {
+        return LSL_ARGUMENT_ERROR;
+    };
+    let Ok(v) = CStr::from_ptr(value).to_str() else {
+        return LSL_ARGUMENT_ERROR;
+    };
+    b.outlet.push_metadata_at(k, v, timestamp);
+    LSL_NO_ERROR
+}
+
+/// Return `1` when `inlet` negotiated `meta/1` live metadata, or `0` otherwise.
+///
+/// # Safety
+/// `inlet` must be null or a valid handle from this library.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_inlet_has_live_metadata(inlet: lsl_inlet) -> i32 {
+    let Some(b) = (inlet as *mut InletBox).as_ref() else {
+        return 0;
+    };
+    i32::from(b.inlet.as_ref().is_some_and(|i| i.has_live_metadata()))
+}
+
+/// Return the number of pending unread live metadata updates on `inlet`, or
+/// `-1` if `inlet` is null or not open.
+///
+/// # Safety
+/// `inlet` must be null or a valid handle from this library.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_inlet_metadata_count(inlet: lsl_inlet) -> i64 {
+    let Some(b) = (inlet as *mut InletBox).as_ref() else {
+        return -1;
+    };
+    b.inlet
+        .as_ref()
+        .map_or(-1, |i| i.pending_metadata_count() as i64)
+}
+
+/// Pop the oldest pending live metadata update from `inlet`.
+///
+/// Returns `1` when an update was written into the output buffers, `0` when no
+/// update is pending, or a negative LSL error code on invalid arguments.
+/// `key_buf` and `val_buf` are null-terminated (truncated if smaller than the
+/// string + NUL). `timestamp_out` and `seq_out` may be null.
+///
+/// # Safety
+/// `inlet` must be a valid handle from this library. Non-null output buffers
+/// must be writable for `key_buf_len` / `val_buf_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_inlet_pull_metadata(
+    inlet: lsl_inlet,
+    key_buf: *mut c_char,
+    key_buf_len: u32,
+    val_buf: *mut c_char,
+    val_buf_len: u32,
+    timestamp_out: *mut c_double,
+    seq_out: *mut u64,
+) -> i32 {
+    let Some(b) = (inlet as *mut InletBox).as_ref() else {
+        return LSL_ARGUMENT_ERROR;
+    };
+    let Some(i) = b.inlet.as_ref() else {
+        return 0;
+    };
+    let Some(upd) = i.pull_metadata_one() else {
+        return 0;
+    };
+    let copy_cstr = |src: &str, dst: *mut c_char, cap: u32| {
+        if dst.is_null() || cap == 0 {
+            return;
+        }
+        let max_copy = (cap as usize - 1).min(src.len());
+        std::ptr::copy_nonoverlapping(src.as_ptr(), dst as *mut u8, max_copy);
+        *dst.add(max_copy) = 0;
+    };
+    copy_cstr(&upd.key, key_buf, key_buf_len);
+    copy_cstr(&upd.value, val_buf, val_buf_len);
+    if !timestamp_out.is_null() {
+        *timestamp_out = upd.timestamp;
+    }
+    if !seq_out.is_null() {
+        *seq_out = upd.seq;
+    }
+    1
+}
+
 /// True (`1`) when `info` describes a stream published by a `labstream` relay,
 /// or `0` otherwise (`docs/roadmap.md`, step 4).
 ///
@@ -3694,6 +3798,92 @@ pub unsafe extern "C" fn labstream_streaminfo_is_relayed(info: lsl_streaminfo) -
     };
     b.sync();
     i32::from(labstream_net::relay::is_relayed(&b.info))
+}
+
+/// Opaque handle to a running opt-in WebSocket bridge (`docs/roadmap.md`, step 13).
+#[allow(non_camel_case_types)]
+pub type labstream_ws_bridge = *mut c_void;
+
+/// Start an opt-in WebSocket bridge (`docs/roadmap.md`, step 13).
+///
+/// - `bind_addr`: socket address such as `"127.0.0.1:8765"` (null defaults to `"127.0.0.1:8765"`).
+/// - `allow_csv`: optional comma-separated non-loopback peer IPs or `"*"` (null = loopback only).
+/// - `session_id`: optional LSL session identifier (null = active configuration).
+///
+/// Returns null on invalid arguments or bind error. Free with
+/// [`labstream_ws_bridge_stop`].
+///
+/// # Safety
+/// Any non-null pointer must be a valid null-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_ws_bridge_start(
+    bind_addr: *const c_char,
+    allow_csv: *const c_char,
+    session_id: *const c_char,
+) -> labstream_ws_bridge {
+    let mut opts = labstream_net::ws::WsOptions::default();
+    if !bind_addr.is_null() {
+        let Ok(s) = CStr::from_ptr(bind_addr).to_str() else {
+            return std::ptr::null_mut();
+        };
+        let Ok(addr) = s.parse() else {
+            return std::ptr::null_mut();
+        };
+        opts.bind = addr;
+    }
+    if !allow_csv.is_null() {
+        let Ok(s) = CStr::from_ptr(allow_csv).to_str() else {
+            return std::ptr::null_mut();
+        };
+        for item in s.split(',') {
+            let t = item.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if t == "*" {
+                opts.allow_any = true;
+            } else if let Ok(ip) = t.parse() {
+                opts.allowed_peers.push(ip);
+            } else {
+                return std::ptr::null_mut();
+            }
+        }
+    }
+    if !session_id.is_null() {
+        let Ok(s) = CStr::from_ptr(session_id).to_str() else {
+            return std::ptr::null_mut();
+        };
+        if !s.is_empty() {
+            opts.session_id = Some(s.to_string());
+        }
+    }
+    match labstream_net::ws::WsBridge::start(opts) {
+        Ok(b) => Box::into_raw(Box::new(b)) as labstream_ws_bridge,
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Return the bound TCP port of a running WebSocket bridge, or `0` if null.
+///
+/// # Safety
+/// `bridge` must be null or a valid handle from [`labstream_ws_bridge_start`].
+#[no_mangle]
+pub unsafe extern "C" fn labstream_ws_bridge_port(bridge: labstream_ws_bridge) -> u16 {
+    let Some(b) = (bridge as *const labstream_net::ws::WsBridge).as_ref() else {
+        return 0;
+    };
+    b.local_addr().port()
+}
+
+/// Stop and destroy a WebSocket bridge returned by [`labstream_ws_bridge_start`].
+///
+/// # Safety
+/// `bridge` must be null or a valid handle that has not yet been stopped.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_ws_bridge_stop(bridge: labstream_ws_bridge) {
+    if !bridge.is_null() {
+        drop(Box::from_raw(bridge as *mut labstream_net::ws::WsBridge));
+    }
 }
 
 /// Run network and discovery diagnostics and return the report as JSON.
@@ -4030,6 +4220,79 @@ mod tests {
             assert_eq!(ec, LSL_NO_ERROR);
             assert!(labstream_inlet_clock_drift(inlet).is_finite());
             assert!(labstream_inlet_smooth_time_correction(inlet, 200.0).is_finite());
+
+            lsl_destroy_inlet(inlet);
+            lsl_destroy_streaminfo(pub_info);
+            lsl_destroy_outlet(outlet);
+            lsl_destroy_streaminfo(info);
+        }
+    }
+
+    #[test]
+    fn capi_live_metadata_round_trips_in_order() {
+        unsafe {
+            let info = lsl_create_streaminfo(
+                b"CapiMeta0\0".as_ptr() as *const c_char,
+                b"EEG\0".as_ptr() as *const c_char,
+                1,
+                250.0,
+                1,
+                b"capimeta0\0".as_ptr() as *const c_char,
+            );
+            let outlet = lsl_create_outlet(info, 0, 360);
+            if outlet.is_null() {
+                eprintln!("no local network; skipping");
+                lsl_destroy_streaminfo(info);
+                return;
+            }
+            let pub_info = lsl_get_info(outlet);
+            let inlet = lsl_create_inlet(pub_info, 360, 0, 0);
+            let mut ec = 0;
+            lsl_open_stream(inlet, 5.0, &mut ec);
+            assert_eq!(ec, LSL_NO_ERROR);
+            assert_eq!(lsl_wait_for_consumers(outlet, 5.0), 1);
+            assert_eq!(labstream_inlet_has_live_metadata(inlet), 1);
+
+            let v = 1.0f32;
+            lsl_push_sample_ft(outlet, &v, 50.0);
+            assert_eq!(
+                labstream_outlet_push_metadata(
+                    outlet,
+                    b"impedance/Fp1\0".as_ptr() as *const c_char,
+                    b"3.8 kOhm\0".as_ptr() as *const c_char,
+                    50.5,
+                ),
+                LSL_NO_ERROR
+            );
+
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while labstream_inlet_metadata_count(inlet) < 1
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(labstream_inlet_metadata_count(inlet) >= 1);
+
+            let mut kbuf = [0 as c_char; 64];
+            let mut vbuf = [0 as c_char; 64];
+            let mut ts = 0.0;
+            let mut seq = 0u64;
+            assert_eq!(
+                labstream_inlet_pull_metadata(
+                    inlet,
+                    kbuf.as_mut_ptr(),
+                    kbuf.len() as u32,
+                    vbuf.as_mut_ptr(),
+                    vbuf.len() as u32,
+                    &mut ts,
+                    &mut seq,
+                ),
+                1
+            );
+            assert_eq!(CStr::from_ptr(kbuf.as_ptr()).to_str().unwrap(), "impedance/Fp1");
+            assert_eq!(CStr::from_ptr(vbuf.as_ptr()).to_str().unwrap(), "3.8 kOhm");
+            assert_eq!(ts.to_bits(), 50.5f64.to_bits());
+            assert_eq!(seq, 1);
 
             lsl_destroy_inlet(inlet);
             lsl_destroy_streaminfo(pub_info);

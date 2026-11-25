@@ -3,8 +3,10 @@
 //! and optional disk store-and-forward (`docs/roadmap.md`, step 4).
 
 use labstream_net::relay::{is_relayed, RelayOptions, StreamRelay, DEFAULT_SUFFIX};
+use labstream_net::ws::{WsBridge, WsOptions};
 use labstream_net::{config, ContinuousResolver, StreamInfo};
 use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -23,6 +25,14 @@ pub struct RelayArgs {
     pub ram_mib: Option<f64>,
     pub local_only: bool,
     pub duration: Option<Duration>,
+    /// Opt-in WebSocket bind address (off by default, `docs/roadmap.md`, step 13).
+    pub ws_bind: Option<SocketAddr>,
+    /// Additional peer IP addresses allowed to connect to the WebSocket endpoint.
+    pub ws_allow: Vec<IpAddr>,
+    /// Allow any IP address to connect to the WebSocket endpoint (`--ws-allow *`).
+    pub ws_allow_any: bool,
+    /// Default marker stream name for markers sent from browsers.
+    pub ws_marker_stream: String,
     pub help: bool,
 }
 
@@ -40,6 +50,10 @@ impl Default for RelayArgs {
             ram_mib: None,
             local_only: false,
             duration: None,
+            ws_bind: None,
+            ws_allow: Vec::new(),
+            ws_allow_any: false,
+            ws_marker_stream: "BrowserMarkers".to_string(),
             help: false,
         }
     }
@@ -60,6 +74,10 @@ Options:
   --disk-dir DIR       Directory for disk spool files (default: temp dir).
   --ram-mb MIB         RAM limit for resume history in MiB (default: 64).
   --local-only         Relay only streams hosted on this machine.
+  --ws-port PORT       Enable WebSocket bridge on 127.0.0.1:PORT (default: off).
+  --ws-bind ADDR       Enable WebSocket bridge on ADDR (for example 127.0.0.1:8765).
+  --ws-allow IP        Allow non-loopback peer IP (repeat, comma-separate, or *).
+  --ws-marker-stream N Default LSL marker stream for browser markers (BrowserMarkers).
   --duration SECONDS   Stop after SECONDS seconds (default: run until stopped).
   -h, --help           Show this help text."
 }
@@ -132,6 +150,27 @@ pub fn parse_relay_args(args: &[String]) -> Result<RelayArgs, String> {
                 }
                 out.duration = Some(Duration::from_secs_f64(secs));
             }
+            "--ws-port" => {
+                let v = next_val(&mut i, "--ws-port")?;
+                let port: u16 = v
+                    .parse()
+                    .map_err(|_| format!("invalid --ws-port value: {v}"))?;
+                out.ws_bind = Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
+            }
+            "--ws-bind" => {
+                let v = next_val(&mut i, "--ws-bind")?;
+                let addr: SocketAddr = v
+                    .parse()
+                    .map_err(|_| format!("invalid --ws-bind address: {v}"))?;
+                out.ws_bind = Some(addr);
+            }
+            "--ws-allow" => {
+                let v = next_val(&mut i, "--ws-allow")?;
+                parse_ws_allow(&v, &mut out)?;
+            }
+            "--ws-marker-stream" => {
+                out.ws_marker_stream = next_val(&mut i, "--ws-marker-stream")?;
+            }
             other => {
                 if let Some(v) = other.strip_prefix("--name=") {
                     split_into(v, &mut out.names);
@@ -171,6 +210,20 @@ pub fn parse_relay_args(args: &[String]) -> Result<RelayArgs, String> {
                         return Err(format!("--duration must be positive: {v}"));
                     }
                     out.duration = Some(Duration::from_secs_f64(secs));
+                } else if let Some(v) = other.strip_prefix("--ws-port=") {
+                    let port: u16 = v
+                        .parse()
+                        .map_err(|_| format!("invalid --ws-port value: {v}"))?;
+                    out.ws_bind = Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
+                } else if let Some(v) = other.strip_prefix("--ws-bind=") {
+                    let addr: SocketAddr = v
+                        .parse()
+                        .map_err(|_| format!("invalid --ws-bind address: {v}"))?;
+                    out.ws_bind = Some(addr);
+                } else if let Some(v) = other.strip_prefix("--ws-allow=") {
+                    parse_ws_allow(v, &mut out)?;
+                } else if let Some(v) = other.strip_prefix("--ws-marker-stream=") {
+                    out.ws_marker_stream = v.to_string();
                 } else {
                     return Err(format!("unknown argument: {other}"));
                 }
@@ -179,6 +232,24 @@ pub fn parse_relay_args(args: &[String]) -> Result<RelayArgs, String> {
         i += 1;
     }
     Ok(out)
+}
+
+fn parse_ws_allow(val: &str, out: &mut RelayArgs) -> Result<(), String> {
+    for item in val.split(',') {
+        let t = item.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if t == "*" {
+            out.ws_allow_any = true;
+        } else {
+            let ip: IpAddr = t
+                .parse()
+                .map_err(|_| format!("invalid --ws-allow IP address: {t}"))?;
+            out.ws_allow.push(ip);
+        }
+    }
+    Ok(())
 }
 
 /// Discovery-driven manager that attaches [`StreamRelay`] instances to matching
@@ -303,6 +374,33 @@ pub fn run_relay(args: &[String]) -> ExitCode {
     }
 
     let deadline = parsed.duration.map(|d| Instant::now() + d);
+    let _ws_bridge = if let Some(bind) = parsed.ws_bind {
+        let ws_opts = WsOptions {
+            bind,
+            allowed_peers: parsed.ws_allow.clone(),
+            allow_any: parsed.ws_allow_any,
+            session_id: parsed
+                .out_session_id
+                .clone()
+                .or_else(|| parsed.session_id.clone()),
+            marker_stream_name: parsed.ws_marker_stream.clone(),
+        };
+        match WsBridge::start(ws_opts) {
+            Ok(b) => {
+                eprintln!(
+                    "labstream relay: WebSocket bridge listening on ws://{}/ws",
+                    b.local_addr()
+                );
+                Some(b)
+            }
+            Err(e) => {
+                eprintln!("error: failed to start WebSocket bridge on {bind}: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        None
+    };
     let mut service = RelayService::new(parsed);
     eprintln!("labstream relay: watching for matching LSL streams...");
 
@@ -360,9 +458,33 @@ mod tests {
         assert_eq!(parsed.ram_mib, Some(32.0));
         assert!(parsed.local_only);
         assert_eq!(parsed.duration, Some(Duration::from_secs(5)));
+        assert!(parsed.ws_bind.is_none(), "WebSocket bridge must be off by default");
+
+        let ws_args: Vec<String> = [
+            "--ws-port",
+            "9876",
+            "--ws-allow",
+            "192.168.1.50",
+            "--ws-marker-stream",
+            "WebEvents",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let ws_parsed = parse_relay_args(&ws_args).unwrap();
+        assert_eq!(
+            ws_parsed.ws_bind,
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9876))
+        );
+        assert_eq!(
+            ws_parsed.ws_allow,
+            vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))]
+        );
+        assert_eq!(ws_parsed.ws_marker_stream, "WebEvents");
 
         assert!(parse_relay_args(&["--disk-mb".to_string(), "-1".to_string()]).is_err());
         assert!(parse_relay_args(&["--ram-mb".to_string(), "0".to_string()]).is_err());
+        assert!(parse_relay_args(&["--ws-allow".to_string(), "not-an-ip".to_string()]).is_err());
         assert!(parse_relay_args(&["--bogus".to_string()]).is_err());
     }
 

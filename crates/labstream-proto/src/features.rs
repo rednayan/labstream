@@ -53,9 +53,13 @@ pub const SHM: &str = "shm";
 /// parameter. [`offer_comp`], [`comp_request`], and [`comp_answer`] handle it.
 pub const COMP: &str = "comp";
 
+/// The name of the in-band live metadata feature (`docs/extensions.md`,
+/// section `meta`, `docs/roadmap.md`, step 16).
+pub const META: &str = "meta";
+
 /// The features with no parameter that this library implements, each with
 /// its versions.
-pub const SUPPORTED: &[(&str, &[u32])] = &[(SEQ, &[1])];
+pub const SUPPORTED: &[(&str, &[u32])] = &[(SEQ, &[1]), (META, &[1])];
 
 /// One feature with a version, and an optional parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -304,6 +304,43 @@ impl Outlet {
         self.push_packed(PackedSample::from_sample(s));
     }
 
+    /// Emit a live metadata update stamped with the current local clock
+    /// (`docs/roadmap.md`, step 16).
+    ///
+    /// Every connected `labstream` consumer that negotiated `meta/1` receives
+    /// the update in order with the sample stream. `liblsl` inlets see no
+    /// change.
+    pub fn push_metadata(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> labstream_proto::meta::MetadataUpdate {
+        self.push_metadata_at(key, value, 0.0)
+    }
+
+    /// Emit a live metadata update with an explicit timestamp (`0.0` uses the
+    /// current local clock).
+    pub fn push_metadata_at(
+        &self,
+        key: &str,
+        value: &str,
+        timestamp: f64,
+    ) -> labstream_proto::meta::MetadataUpdate {
+        let ts = if timestamp == 0.0 || config::get().force_default_timestamps {
+            crate::clock()
+        } else {
+            timestamp
+        };
+        self.shared
+            .fanout
+            .push_metadata(key.to_string(), value.to_string(), ts)
+    }
+
+    /// Snapshot the latest live metadata value emitted for each key.
+    pub fn metadata(&self) -> std::collections::BTreeMap<String, labstream_proto::meta::MetadataUpdate> {
+        self.shared.fanout.metadata_snapshot().1
+    }
+
     /// Send one [`PackedSample`] to every connected consumer without copying
     /// its channel payload across consumer queues or the `resume` history.
     pub fn push_packed(&self, mut s: PackedSample) {
@@ -975,6 +1012,10 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         return Ok(());
     }
 
+    let meta_enabled = answered
+        .as_deref()
+        .is_some_and(|a| features::has(a, features::META, 1));
+
     // Step 5 of `docs/extensions.md` (`shm`): wait up to 1 s for `shm-ok <token>`.
     // If the token matches, register the SHM ring directly in the fanout and
     // keep the TCP socket open to detect end-of-stream and recovery.
@@ -997,11 +1038,50 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
                 fanout: &shared.fanout,
                 writer: Arc::clone(&writer),
             };
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            let mut meta_cursor = 0u64;
+            let mut meta_buf = Vec::new();
+            let mut meta_wire = Vec::new();
+            if meta_enabled {
+                let (gen, snap) = shared.fanout.metadata_snapshot();
+                meta_cursor = gen;
+                if !snap.is_empty() {
+                    let mut vals: Vec<_> = snap.into_values().collect();
+                    vals.sort_by_key(|u| u.seq);
+                    for u in &vals {
+                        labstream_proto::meta::write_record(&mut meta_wire, u);
+                    }
+                    if stream.write_all(&meta_wire).is_err() || stream.flush().is_err() {
+                        let _ = stream.shutdown(std::net::Shutdown::Both);
+                        return Ok(());
+                    }
+                    meta_wire.clear();
+                }
+            }
+            let poll_timeout = if meta_enabled {
+                Duration::from_millis(25)
+            } else {
+                Duration::from_millis(200)
+            };
+            let _ = stream.set_read_timeout(Some(poll_timeout));
             let mut probe = [0u8; 64];
             loop {
                 if *shared.stop.lock().unwrap() || writer.is_closed() {
                     break;
+                }
+                if meta_enabled {
+                    meta_buf.clear();
+                    shared
+                        .fanout
+                        .read_metadata_since(&mut meta_cursor, &mut meta_buf);
+                    if !meta_buf.is_empty() {
+                        meta_wire.clear();
+                        for u in &meta_buf {
+                            labstream_proto::meta::write_record(&mut meta_wire, u);
+                        }
+                        if stream.write_all(&meta_wire).is_err() || stream.flush().is_err() {
+                            break;
+                        }
+                    }
                 }
                 match stream.read(&mut probe) {
                     Ok(0) => break,
@@ -1100,6 +1180,7 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         max_chunk,
         numbered,
         compressed,
+        meta_enabled.then_some(&shared.fanout),
         resend.as_ref().map(|r| (&shared.fanout, r)),
         dgram,
         selector,
@@ -1186,7 +1267,7 @@ fn feed<W: Write>(
     trace: bool,
 ) -> usize {
     feed_with(
-        queue, codec, out, max_chunk, numbered, false, None, None, None, stop, trace,
+        queue, codec, out, max_chunk, numbered, false, None, None, None, None, stop, trace,
     )
 }
 
@@ -1207,6 +1288,7 @@ fn feed_with<W: Write>(
     max_chunk: usize,
     numbered: bool,
     compressed: bool,
+    meta_fanout: Option<&Fanout>,
     resend: Option<(&Fanout, &Resend)>,
     dgram: Option<crate::dgram_out::Setup>,
     mut selector: Option<labstream_proto::select::StreamSelector>,
@@ -1246,6 +1328,26 @@ fn feed_with<W: Write>(
             return 0;
         }
         let _ = out.flush();
+    }
+    let mut meta_cursor: u64 = 0;
+    let mut meta_queue: std::collections::VecDeque<labstream_proto::meta::MetadataUpdate> =
+        std::collections::VecDeque::new();
+    let mut meta_scratch: Vec<labstream_proto::meta::MetadataUpdate> = Vec::new();
+    if let Some(f) = meta_fanout {
+        let (gen, snap) = f.metadata_snapshot();
+        meta_cursor = gen;
+        if !snap.is_empty() {
+            let mut vals: Vec<_> = snap.into_values().collect();
+            vals.sort_by_key(|u| u.seq);
+            let mut init_meta = Vec::new();
+            for u in &vals {
+                labstream_proto::meta::write_record(&mut init_meta, u);
+            }
+            if out.write_all(&init_meta).is_err() {
+                return 0;
+            }
+            let _ = out.flush();
+        }
     }
     let mut batch: Vec<PackedSample> = Vec::new();
     let mut pending: Vec<u8> = Vec::new();
@@ -1333,6 +1435,8 @@ fn feed_with<W: Write>(
                 codec,
                 channels: proj_channels,
                 compressed: tcp_comp.is_some(),
+                meta_enabled: meta_fanout.is_some(),
+                meta_cursor,
                 out,
                 numbering,
                 last,
@@ -1363,12 +1467,38 @@ fn feed_with<W: Write>(
             queue.pop_many_numbered_packed(&mut batch, usize::MAX, Duration::from_millis(200))
         };
         if taken == 0 {
+            if let Some(f) = meta_fanout {
+                meta_scratch.clear();
+                f.read_metadata_since(&mut meta_cursor, &mut meta_scratch);
+                meta_queue.extend(meta_scratch.drain(..));
+                if !meta_queue.is_empty() {
+                    while let Some(u) = meta_queue.pop_front() {
+                        labstream_proto::meta::write_record(&mut pending, &u);
+                    }
+                    if !write(&mut pending, &mut count, &mut sent) {
+                        return sent;
+                    }
+                }
+            }
             continue;
+        }
+        if let Some(f) = meta_fanout {
+            meta_scratch.clear();
+            f.read_metadata_since(&mut meta_cursor, &mut meta_scratch);
+            meta_queue.extend(meta_scratch.drain(..));
         }
         if decimating {
             let sel = selector.as_mut().expect("decimating requires selector");
             for (i, s) in batch.iter().enumerate() {
                 let raw_num = first.wrapping_add(i as u64);
+                while let Some(front) = meta_queue.front() {
+                    if front.seq <= raw_num {
+                        let u = meta_queue.pop_front().unwrap();
+                        labstream_proto::meta::write_record(&mut pending, &u);
+                    } else {
+                        break;
+                    }
+                }
                 if let Some(prev) = prev_raw {
                     let expected = prev.wrapping_add(1);
                     if raw_num > expected {
@@ -1401,6 +1531,14 @@ fn feed_with<W: Write>(
         } else {
             for (i, s) in batch.iter().enumerate() {
                 let number = first.wrapping_add(i as u64);
+                while let Some(front) = meta_queue.front() {
+                    if front.seq <= number {
+                        let u = meta_queue.pop_front().unwrap();
+                        labstream_proto::meta::write_record(&mut pending, &u);
+                    } else {
+                        break;
+                    }
+                }
                 if let Some(n) = numbering.as_mut() {
                     n.before(number, &mut pending);
                 }
@@ -1437,6 +1575,10 @@ fn feed_with<W: Write>(
                     return sent;
                 }
             }
+        }
+        // Flush any metadata updates emitted after the last sample in this batch.
+        while let Some(u) = meta_queue.pop_front() {
+            labstream_proto::meta::write_record(&mut pending, &u);
         }
         // The queue was empty when the batch came out, so nothing more is on
         // the way. Write what is left.
@@ -1839,6 +1981,7 @@ mod tests {
             usize::MAX,
             true,
             false,
+            None,
             Some((f, &resend)),
             None,
             None,

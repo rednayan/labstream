@@ -12,11 +12,15 @@
 
 use crate::health::{ConsumerHealth, Gap, GapKind, OutletHealth, MAX_GAPS};
 use crate::history::{History, HistoryLimits, HistoryRead};
+use labstream_proto::meta::MetadataUpdate;
 use labstream_wire::{PackedSample, Sample, TimestampDeducer, IRREGULAR_RATE};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+/// Maximum number of live metadata updates retained in the outlet log.
+const MAX_META_LOG: usize = 4096;
 
 /// The samples of a queue, and the number after the last one.
 ///
@@ -806,6 +810,15 @@ struct ShmConsumerEntry {
 #[derive(Debug, Default)]
 pub struct Fanout {
     consumers: Mutex<Consumers>,
+    meta_gen: AtomicU64,
+    meta: Mutex<MetadataLog>,
+}
+
+#[derive(Debug, Default)]
+struct MetadataLog {
+    next_id: u64,
+    entries: VecDeque<(u64, MetadataUpdate)>,
+    latest: BTreeMap<String, MetadataUpdate>,
 }
 
 /// The queues of a fanout, the number of the next pushed sample, and the
@@ -878,7 +891,70 @@ impl Fanout {
                 limits,
                 ..Consumers::default()
             }),
+            meta_gen: AtomicU64::new(0),
+            meta: Mutex::new(MetadataLog::default()),
         }
+    }
+
+    /// Record a live metadata change at the current sample sequence boundary
+    /// and wake all active consumers (`docs/roadmap.md`, step 16).
+    pub fn push_metadata(&self, key: String, value: String, timestamp: f64) -> MetadataUpdate {
+        let (seq, queues): (u64, Vec<Arc<SampleQueue>>) = {
+            let set = self.consumers.lock().unwrap();
+            let qs = set.list.iter().map(|c| Arc::clone(&c.queue)).collect();
+            (set.next, qs)
+        };
+        let update = MetadataUpdate {
+            seq,
+            timestamp,
+            key: key.clone(),
+            value,
+        };
+        {
+            let mut log = self.meta.lock().unwrap();
+            log.next_id = log.next_id.wrapping_add(1);
+            let id = log.next_id;
+            if log.entries.len() >= MAX_META_LOG {
+                log.entries.pop_front();
+            }
+            log.entries.push_back((id, update.clone()));
+            log.latest.insert(key, update.clone());
+            self.meta_gen.store(id, Ordering::Release);
+        }
+        for q in queues {
+            q.wake();
+        }
+        update
+    }
+
+    /// Current metadata generation counter (0 when no metadata was pushed).
+    pub fn metadata_generation(&self) -> u64 {
+        self.meta_gen.load(Ordering::Acquire)
+    }
+
+    /// Snapshot the current latest metadata map together with its generation.
+    pub fn metadata_snapshot(&self) -> (u64, BTreeMap<String, MetadataUpdate>) {
+        if self.meta_gen.load(Ordering::Acquire) == 0 {
+            return (0, BTreeMap::new());
+        }
+        let log = self.meta.lock().unwrap();
+        (log.next_id, log.latest.clone())
+    }
+
+    /// Append any live metadata updates emitted after `*cursor` into `out` and
+    /// advance `*cursor`. Fast-paths with a single atomic load when idle.
+    pub fn read_metadata_since(&self, cursor: &mut u64, out: &mut Vec<MetadataUpdate>) {
+        let gen = self.meta_gen.load(Ordering::Acquire);
+        if gen == *cursor {
+            return;
+        }
+        let log = self.meta.lock().unwrap();
+        for (id, upd) in &log.entries {
+            if *id > *cursor {
+                out.push(upd.clone());
+            }
+        }
+        *cursor = log.next_id;
     }
 
     /// Start the history, if the limits allow it. The result is true when

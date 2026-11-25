@@ -172,4 +172,25 @@ impl Outlet {
     pub fn history_disk_bytes(&self) -> u64 {
         self.inner.history_disk_bytes()
     }
+
+    /// Emit a live metadata update stamped with the current local clock (`meta/1`).
+    pub fn push_metadata(&self, key: &str, value: &str) -> crate::MetadataUpdate {
+        self.inner.push_metadata(key, value)
+    }
+
+    /// Emit a live metadata update with an explicit timestamp (`0.0` uses the
+    /// current local clock).
+    pub fn push_metadata_at(
+        &self,
+        key: &str,
+        value: &str,
+        timestamp: f64,
+    ) -> crate::MetadataUpdate {
+        self.inner.push_metadata_at(key, value, timestamp)
+    }
+
+    /// Snapshot the latest live metadata value emitted for each key.
+    pub fn metadata(&self) -> std::collections::BTreeMap<String, crate::MetadataUpdate> {
+        self.inner.metadata()
+    }
 }

@@ -201,6 +201,8 @@ pub(crate) struct Live<'a, W: Write> {
     pub codec: &'a Codec,
     pub channels: Option<Vec<u16>>,
     pub compressed: bool,
+    pub meta_enabled: bool,
+    pub meta_cursor: u64,
     pub out: &'a mut W,
     pub numbering: Numbering,
     /// The number of the last sample on TCP, for the timestamp rule.
@@ -535,6 +537,7 @@ impl<W: Write> Live<'_, W> {
         let mut slab: Vec<u8> = Vec::new();
         let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
         let mut gram: Vec<u8> = Vec::with_capacity(dgram::MAX_DATAGRAM);
+        let mut meta_buf: Vec<labstream_proto::meta::MetadataUpdate> = Vec::new();
         let mut sent = 0usize;
         // The number after the last sample that left the queue.
         let mut next = self
@@ -545,6 +548,19 @@ impl<W: Write> Live<'_, W> {
         loop {
             if stop() || self.queue.is_closed() {
                 break;
+            }
+            if self.meta_enabled {
+                meta_buf.clear();
+                self.fanout
+                    .read_metadata_since(&mut self.meta_cursor, &mut meta_buf);
+                if !meta_buf.is_empty() {
+                    for u in &meta_buf {
+                        labstream_proto::meta::write_record(&mut pending, u);
+                    }
+                    if !self.flush(&mut pending) {
+                        return sent;
+                    }
+                }
             }
             if target.is_none() {
                 target = *hello.lock().unwrap();

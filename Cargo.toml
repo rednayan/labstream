@@ -7,6 +7,7 @@ members = [
     "crates/labstream-core",
     "crates/labstream-capi",
     "crates/labstream-cli",
+    "crates/labstream-wasm",
     "crates/labstream",
     "conformance/peer",
 ]
