@@ -93,7 +93,7 @@ pub fn estimate(a: &Answer, t3: f64) -> Estimate {
 #[derive(Debug, Clone)]
 pub struct Burst {
     wave_id: i32,
-    best: Option<Estimate>,
+    best: Option<(Estimate, f64)>,
     seen: usize,
 }
 
@@ -126,10 +126,11 @@ impl Burst {
             return false;
         }
         let e = estimate(a, t3);
+        let local_mid = 0.5 * (a.t0 + t3);
         self.seen += 1;
         match self.best {
-            Some(b) if b.rtt <= e.rtt => {}
-            _ => self.best = Some(e),
+            Some((b, _)) if b.rtt <= e.rtt => {}
+            _ => self.best = Some((e, local_mid)),
         }
         true
     }
@@ -139,13 +140,19 @@ impl Burst {
     /// liblsl stores the negative of the computed offset
     /// (`src/time_receiver.cpp:204`).
     pub fn time_offset(&self) -> Option<f64> {
-        self.best.map(|e| -e.offset)
+        self.best.map(|(e, _)| -e.offset)
     }
 
     /// The round-trip time of the best estimate. liblsl calls it the
     /// uncertainty (`src/time_receiver.cpp:204`).
     pub fn uncertainty(&self) -> Option<f64> {
-        self.best.map(|e| e.rtt)
+        self.best.map(|(e, _)| e.rtt)
+    }
+
+    /// Local midpoint timestamp `(t0 + t3) / 2` of the best estimate in this
+    /// burst, used by the opt-in drift clock (`docs/roadmap.md`, step 17).
+    pub fn local_time(&self) -> Option<f64> {
+        self.best.map(|(_, t)| t)
     }
 }
 

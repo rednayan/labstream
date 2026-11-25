@@ -628,6 +628,8 @@ pub struct Inlet {
     post: PostProcessor,
     /// Active post-processing flags so gap timestamps match `CLOCKSYNC`.
     post_options: u32,
+    /// True once the caller explicitly set a device delay override.
+    device_delay_explicit: bool,
     /// Reusable scratch buffer for sparse skip offsets during `pull_chunk`.
     skip_scratch: Vec<(usize, u64)>,
     /// Reusable scratch buffer for packed samples during typed chunk pulls.
@@ -881,6 +883,7 @@ impl Inlet {
             // default (`include/lsl/common.h:103`).
             post: PostProcessor::new(),
             post_options: 0,
+            device_delay_explicit: false,
             skip_scratch: Vec::new(),
             packed_scratch: Vec::new(),
             shm_meta_scratch: Vec::new(),
@@ -895,9 +898,33 @@ impl Inlet {
     /// Choose the post-processing stages. SPEC.md 8.5.
     ///
     /// The default applies none, so a timestamp arrives as the sender wrote it.
+    /// When `flags::DEVICE_DELAY` is enabled and no explicit delay was set via
+    /// [`Inlet::set_device_delay`], the inlet reads
+    /// `<desc><synchronization><offset_mean>` from the stream description.
     pub fn set_postprocessing(&mut self, options: u32) {
+        if (options & flags::DEVICE_DELAY) != 0 && !self.device_delay_explicit {
+            let delay = self
+                .info
+                .device_delay()
+                .or_else(|| self.fullinfo(Duration::from_secs(2)).ok().and_then(|f| f.device_delay()));
+            if let Some(d) = delay {
+                self.post.set_device_delay(d);
+            }
+        }
         self.post_options = options;
         self.post.set_options(options);
+    }
+
+    /// Set an explicit calibrated device delay (in seconds) subtracted when
+    /// `flags::DEVICE_DELAY` is enabled (`docs/roadmap.md`, step 15).
+    pub fn set_device_delay(&mut self, delay_s: f64) {
+        self.device_delay_explicit = true;
+        self.post.set_device_delay(delay_s);
+    }
+
+    /// The device delay (in seconds) currently configured on the post-processor.
+    pub fn device_delay(&self) -> f64 {
+        self.post.device_delay()
     }
 
     /// Apply every stage: clock sync, then jitter removal, then the clamp.
@@ -924,6 +951,19 @@ impl Inlet {
     /// The round-trip time of the estimate that the offset came from.
     pub fn time_uncertainty(&self) -> Option<f64> {
         self.clock.uncertainty()
+    }
+
+    /// Estimated relative clock drift (`d(offset)/d(t_local)` in s/s) from the
+    /// opt-in drift clock (`docs/roadmap.md`, step 17), or `None` before the
+    /// first burst completes.
+    pub fn clock_drift(&self) -> Option<f64> {
+        self.clock.drift()
+    }
+
+    /// Smooth offset `local - remote` evaluated for `remote_ts` using the
+    /// opt-in drift clock (`docs/roadmap.md`, step 17).
+    pub fn smooth_time_correction(&self, remote_ts: f64) -> Option<f64> {
+        self.clock.smooth_offset_at(remote_ts)
     }
 
     /// The description of the connected stream.
@@ -1530,6 +1570,7 @@ impl Inlet {
             dropped: self.samples_dropped(),
             resent: self.samples_resent(),
             clock_uncertainty: self.time_uncertainty(),
+            clock_drift: self.clock_drift(),
             recoveries: self.recoveries(),
             connected: self.is_connected(),
             on_udp: self.on_udp(),

@@ -70,6 +70,9 @@ pub use scalar::{as_f64, as_text, Scalar};
 /// The sample format of a stream.
 pub use labstream_wire::Format;
 
+/// Device-delay calibration (`docs/roadmap.md`, step 15).
+pub use labstream_net::calibrate;
+
 /// Network diagnostics for LSL discovery (`labstream doctor`).
 pub use labstream_net::doctor;
 

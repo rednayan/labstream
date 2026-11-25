@@ -1,7 +1,8 @@
 # Roadmap: features that liblsl does not have
 
-**Status:** approved by the user on 2026-11-16. The gate and steps 0 to 12
-(step 11 library and C API) are complete. Steps 13 to 17 are not implemented.
+**Status:** approved by the user on 2026-11-16. The gate, steps 0 to 12
+(step 11 library and C API), step 15, and step 17 are complete. Steps 13, 14,
+16, and 18 are not implemented.
 
 This page gives the order of the labstream-only features, the success
 criterion of each feature, and the dependencies. Each feature follows the
@@ -79,6 +80,8 @@ flowchart TD
   G --> F15["15 device-delay calibration"]
   G --> F16["16 live metadata"]
   G --> F17["17 drift clock (opt-in)"]
+  F15 --> F18["18 real-time multi-stream sync and resampler"]
+  F17 --> F18
   F17 -.-> F11
   F4 -.-> F5
   F8 -.-> F1
@@ -111,6 +114,7 @@ later feature works without the earlier one, and gets better with it.
 | 15 | Device-delay calibration | Cannot measure the delay of the device | gate | medium |
 | 16 | Live metadata | The description is fixed when the outlet opens | gate | medium |
 | 17 | Drift clock (opt-in) | Steps the offset every 2 s | gate | medium |
+| 18 | Real-time multi-stream sync and resampler | Aligns asynchronous streams offline only | step 15, step 17 | medium |
 
 Steps 2, 10, 11, and 12 are small and independent. They can run in parallel
 with a large step. Step 10 helps each Wi-Fi user, so an early start is
@@ -606,6 +610,24 @@ tool stores the result, and the inlet can apply it.
    tools also keep in an XDF file.
 3. The correction is opt-in. The default timestamps do not change.
 
+**Status:** complete on 2026-11-25. `labstream_net::calibrate` (re-exported in
+`labstream::calibrate`) and `labstream calibrate` (`crates/labstream-cli`)
+detect rising edges with sub-sample linear interpolation against a reference
+marker or trigger stream, filter outliers via MAD, and report mean, median, RMS
+jitter, and 5th to 95th percentiles. `StreamInfo::set_device_delay` and
+`StreamInfo::device_delay` store and read `<desc><synchronization><offset_mean>`
+(and optional `<offset_rms>`, `<offset_median>`, `<offset_5_percentile>`,
+`<offset_95_percentile>`), which liblsl tools and LabRecorder keep verbatim in
+XDF files. `flags::DEVICE_DELAY` (`Post::DEVICE_DELAY`,
+`LABSTREAM_POST_DEVICE_DELAY`) subtracts the calibrated delay opt-in while
+default timestamps stay unchanged. `labstream_streaminfo_set_device_delay`,
+`labstream_streaminfo_device_delay`, `labstream_inlet_set_device_delay`, and
+`labstream_inlet_device_delay` expose the feature in `labstream-capi`. Unit
+tests in `calibrate.rs` and `labstream-time`, C API tests in `labstream-capi`,
+and live tests in `crates/labstream-net/tests/drift_and_calibrate_live.rs`
+confirm calibration error below 1 ms on a 25 ms simulated device, XDF XML
+round-trip, and opt-in timestamp subtraction.
+
 ### Step 16: live metadata
 
 The description of an LSL stream is fixed when the outlet opens. A value
@@ -633,6 +655,42 @@ The default stays bit-exact with liblsl.
 same bits as today. On two machines, the model removes the step at each
 burst, and decreases the error of the offset. A reference clock (for
 example, a shared trigger) measures the error.
+
+**Status:** complete on 2026-11-25. `labstream_time::DriftModel` fits a
+sliding-window (64-burst) RTT-weighted linear offset-and-drift line with soft
+Huber down-weighting of asymmetric RTT spikes. `ClockState` updates the model
+from each lowest-RTT burst midpoint `(t0 + t3) / 2` and exposes `drift()`,
+`drift_fit()`, and `smooth_offset_at()`. Opt-in `flags::DRIFT` (`16`,
+`Post::DRIFT`, `LABSTREAM_POST_DRIFT`) evaluates the smooth offset continuously
+for each sample timestamp with no 2 s step, while default `flags::CLOCKSYNC`
+stays bit-exact with liblsl. `Inlet::clock_drift`,
+`Inlet::smooth_time_correction`, `InletHealth::clock_drift`,
+`labstream_inlet_clock_drift`, and `labstream_inlet_smooth_time_correction`
+expose the model in Rust and C. Unit tests in `labstream-time` confirm +50 ppm
+drift recovery within 1 ppm, asymmetric Wi-Fi RTT spike rejection, and burst
+step removal below 10 us. Live tests in
+`crates/labstream-net/tests/drift_and_calibrate_live.rs` and `labstream-capi`
+confirm smooth live operation.
+
+### Step 18: real-time multi-stream sync and resampler
+
+Two asynchronous ADCs without a shared hardware clock sample the same signal
+with a worst-case sub-sample offset of `T_s / 2` (up to 72 degrees at 100 Hz
+for 250 SPS streams). Nearest-sample pairing cannot remove this error. A
+real-time multi-inlet aligner (`SyncGroup`) can combine `N` inlets that use
+the drift clock (step 17) and device-delay calibration (step 15), and resample
+each bandlimited stream onto one common monotonic time grid with fractional-delay
+sinc interpolation and a small bounded lookahead.
+
+**Success criterion:**
+
+1. Two simulated asynchronous 250 SPS streams of a 100 Hz sine wave with a
+   half-sample (`2 ms`) clock phase offset align to less than 2 degrees of
+   phase error in real time (down from 72 degrees with nearest-sample pairing).
+2. Output timestamps stay monotonic across clock drift and recovery, and every
+   inlet gap propagates as an explicit gap marker on the aligned output.
+3. The aligner works in both Rust (`labstream`) and C (`labstream-capi`) with
+   bounded memory and configurable lookahead latency.
 
 ## Requirements for each step
 

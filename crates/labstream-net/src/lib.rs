@@ -14,6 +14,7 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod calibrate;
 pub mod clock;
 pub mod config;
 pub mod desc;
@@ -33,6 +34,7 @@ pub mod resolver;
 pub(crate) mod shm;
 pub mod xpath;
 
+pub use calibrate::{CalibrationOptions, CalibrationResult};
 pub use clock::{ClockState, LiveSource};
 pub use config::Config;
 pub use desc::Node;

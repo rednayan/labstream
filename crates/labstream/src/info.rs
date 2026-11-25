@@ -59,6 +59,7 @@ impl StreamInfo {
             source_id: String::new(),
             channels: Vec::new(),
             count: None,
+            device_delay_s: None,
         }
     }
 
@@ -159,6 +160,13 @@ impl StreamInfo {
     pub fn desc(&self) -> &labstream_net::desc::Node {
         &self.inner.desc
     }
+
+    /// Calibrated device delay (in seconds) stored in
+    /// `<desc><synchronization><offset_mean>`, if present (`docs/roadmap.md`,
+    /// step 15).
+    pub fn device_delay(&self) -> Option<f64> {
+        self.inner.device_delay()
+    }
 }
 
 /// The builder for [`StreamInfo`].
@@ -175,6 +183,7 @@ pub struct Builder {
     source_id: String,
     channels: Vec<Channel>,
     count: Option<usize>,
+    device_delay_s: Option<f64>,
 }
 
 impl Builder {
@@ -227,6 +236,15 @@ impl Builder {
         self
     }
 
+    /// Store a calibrated device delay (in seconds) in
+    /// `<desc><synchronization><offset_mean>` (`docs/roadmap.md`, step 15).
+    pub fn device_delay(mut self, delay_s: f64) -> Builder {
+        if delay_s.is_finite() {
+            self.device_delay_s = Some(delay_s);
+        }
+        self
+    }
+
     /// Build the description.
     ///
     /// # Errors
@@ -272,6 +290,9 @@ impl Builder {
                     node.append_child_value("type", &c.kind);
                 }
             }
+        }
+        if let Some(delay) = self.device_delay_s {
+            inner.set_device_delay(delay, None);
         }
         Ok(StreamInfo { inner })
     }

@@ -357,6 +357,7 @@ pub fn to_json(snap: &TopSnapshot) -> String {
         ));
         push_opt_f64(&mut s, "latency_s", r.health.latency);
         push_opt_f64(&mut s, "clock_uncertainty_s", r.health.clock_uncertainty);
+        push_opt_f64(&mut s, "clock_drift", r.health.clock_drift);
         push_opt_u64(&mut s, "lost", r.health.lost);
         s.push_str(&format!(",\"dropped\":{}", r.health.dropped));
         push_opt_u64(&mut s, "resent", r.health.resent);

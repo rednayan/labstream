@@ -1201,9 +1201,27 @@ Platform behavior:
 
 ### A clock model with drift
 
+**Status:** implemented on `main` (`docs/roadmap.md`, step 17).
+
 A fit of offset and drift is a choice of the inlet alone. The outlet answers
 the same time probes as today. Thus this feature needs no negotiation, and
-it does not use this header.
+it does not use this header. `labstream_time::DriftModel` fits a 64-burst
+RTT-weighted linear model with outlier down-weighting from each burst midpoint
+`(t0 + t3) / 2`. Opt-in `flags::DRIFT` (`16`, `Post::DRIFT`,
+`LABSTREAM_POST_DRIFT`) evaluates the smooth offset for each sample timestamp
+with no 2 s step, while default `flags::CLOCKSYNC` stays bit-exact with liblsl.
+
+### Device-delay metadata
+
+**Status:** implemented on `main` (`docs/roadmap.md`, step 15).
+
+Device-delay calibration needs no wire header. The measured delay goes into
+`<desc><synchronization><offset_mean>` (with optional `<offset_rms>`,
+`<offset_median>`, `<offset_5_percentile>`, and `<offset_95_percentile>`),
+which liblsl tools and LabRecorder keep verbatim in XDF files. Opt-in
+`flags::DEVICE_DELAY` (`32`, `Post::DEVICE_DELAY`,
+`LABSTREAM_POST_DEVICE_DELAY`) reads that value and subtracts it from each
+timestamp while default timestamps stay unchanged.
 
 ## Alternatives that this proposal rejects
 

@@ -13,6 +13,7 @@
 
 #![deny(unsafe_code)]
 
+mod calibrate;
 mod play;
 mod relay;
 mod top;
@@ -32,7 +33,8 @@ Commands:
   doctor    Run network and discovery diagnostics.
   top       Monitor active LSL streams using the health API.
   play      Replay an XDF 1.0 recording as live LSL outlets.
-  relay     Relay local LSL streams with labstream extensions."
+  relay     Relay local LSL streams with labstream extensions.
+  calibrate Measure fixed device-to-LSL delay against a reference stream."
 }
 
 fn doctor_usage() -> &'static str {
@@ -148,6 +150,7 @@ fn main() -> ExitCode {
         "top" => top::run_top(&args[1..]),
         "play" => play::run_play(&args[1..]),
         "relay" => relay::run_relay(&args[1..]),
+        "calibrate" => calibrate::run_calibrate(&args[1..]),
         other => {
             eprintln!("error: unknown command '{other}'\n\n{}", usage());
             ExitCode::from(2)

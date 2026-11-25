@@ -41,6 +41,10 @@ impl Post {
     /// This is not the value of `proc_ALL` in liblsl. The note on [`Post`]
     /// gives the flag that is absent and the reason.
     pub const ALL: Post = Post(1 | 2 | 4);
+    /// Opt-in linear offset-and-drift clock model (`docs/roadmap.md`, step 17).
+    pub const DRIFT: Post = Post(16);
+    /// Opt-in device-delay correction (`docs/roadmap.md`, step 15).
+    pub const DEVICE_DELAY: Post = Post(32);
 
     /// The bits, for a call that needs the raw value.
     pub fn bits(self) -> u32 {
@@ -353,6 +357,29 @@ impl Inlet {
     /// The round-trip time of the latest clock offset estimate, in seconds.
     pub fn time_uncertainty(&self) -> Option<f64> {
         self.inner.time_uncertainty()
+    }
+
+    /// Estimated relative clock drift (`d(offset)/d(t_local)` in s/s) from the
+    /// opt-in drift clock (`docs/roadmap.md`, step 17).
+    pub fn clock_drift(&self) -> Option<f64> {
+        self.inner.clock_drift()
+    }
+
+    /// Smooth offset `local - remote` evaluated for `remote_ts` using the
+    /// opt-in drift clock (`docs/roadmap.md`, step 17).
+    pub fn smooth_time_correction(&self, remote_ts: f64) -> Option<f64> {
+        self.inner.smooth_time_correction(remote_ts)
+    }
+
+    /// Override the calibrated device delay (in seconds) subtracted when
+    /// [`Post::DEVICE_DELAY`] is enabled (`docs/roadmap.md`, step 15).
+    pub fn set_device_delay(&mut self, delay_s: f64) {
+        self.inner.set_device_delay(delay_s);
+    }
+
+    /// The device delay (in seconds) currently configured on this inlet.
+    pub fn device_delay(&self) -> f64 {
+        self.inner.device_delay()
     }
 
     /// How many times the connection has been rebuilt after a source restart

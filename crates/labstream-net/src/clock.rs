@@ -6,7 +6,7 @@
 //! can drive it with fixed numbers.
 
 use labstream_proto::timesync::{self, Burst};
-use labstream_time::OffsetSource;
+use labstream_time::{DriftFit, DriftModel, OffsetSource};
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -65,6 +65,11 @@ pub struct ClockState {
     offset_bits: AtomicU64,
     /// The round-trip time of the kept estimate, as `f64` bits.
     uncertainty_bits: AtomicU64,
+    /// Opt-in linear offset-and-drift model (`docs/roadmap.md`, step 17).
+    drift_model: Mutex<DriftModel>,
+    /// Cached latest [`DriftFit`] published alongside the raw burst offset so
+    /// hot-path smooth lookups never contend with the probe thread.
+    drift_fit: Mutex<Option<DriftFit>>,
     /// Set once when a burst first publishes a value.
     have: AtomicBool,
     /// Set when the connection reset. The post-processor clears it.
@@ -92,6 +97,8 @@ impl Default for ClockState {
         ClockState {
             offset_bits: AtomicU64::new(NO_VALUE),
             uncertainty_bits: AtomicU64::new(NO_VALUE),
+            drift_model: Mutex::new(DriftModel::new()),
+            drift_fit: Mutex::new(None),
             have: AtomicBool::new(false),
             reset: AtomicBool::new(false),
             stop: AtomicBool::new(false),
@@ -125,6 +132,27 @@ impl ClockState {
     /// How many bursts have published a value.
     pub fn updates(&self) -> u64 {
         self.updates.load(Ordering::SeqCst)
+    }
+
+    /// Estimated relative clock drift (`d(offset)/d(t_local)` in s/s) from the
+    /// opt-in drift model (`docs/roadmap.md`, step 17), or `None` before the
+    /// first burst finishes.
+    pub fn drift(&self) -> Option<f64> {
+        self.drift_fit.lock().unwrap().map(|f| f.drift)
+    }
+
+    /// Latest linear offset-and-drift fit, or `None` before the first burst.
+    pub fn drift_fit(&self) -> Option<DriftFit> {
+        *self.drift_fit.lock().unwrap()
+    }
+
+    /// Smooth offset `local - remote` for `remote_ts`, or `None` before the
+    /// first burst finishes.
+    pub fn smooth_offset_at(&self, remote_ts: f64) -> Option<f64> {
+        self.drift_fit
+            .lock()
+            .unwrap()
+            .map(|f| f.offset_for_remote(remote_ts))
     }
 
     /// True while a probe thread runs and can publish a value.
@@ -176,6 +204,8 @@ impl ClockState {
         }
         self.offset_bits.store(NO_VALUE, Ordering::SeqCst);
         self.uncertainty_bits.store(NO_VALUE, Ordering::SeqCst);
+        self.drift_model.lock().unwrap().reset();
+        *self.drift_fit.lock().unwrap() = None;
     }
 
     /// Send the next bursts to a different service port.
@@ -198,7 +228,18 @@ impl ClockState {
         self.signal.1.notify_all();
     }
 
+    #[cfg(test)]
     fn publish(&self, offset: f64, uncertainty: f64) {
+        self.publish_at(crate::clock(), offset, uncertainty);
+    }
+
+    fn publish_at(&self, local_time: f64, offset: f64, uncertainty: f64) {
+        let fit = self
+            .drift_model
+            .lock()
+            .unwrap()
+            .update(local_time, offset, uncertainty);
+        *self.drift_fit.lock().unwrap() = Some(fit);
         self.offset_bits.store(offset.to_bits(), Ordering::SeqCst);
         self.uncertainty_bits
             .store(uncertainty.to_bits(), Ordering::SeqCst);
@@ -350,8 +391,12 @@ pub fn start(target: SocketAddr, state: Arc<ClockState>, rng: Arc<Mutex<u64>>) {
             if burst.accepted() >= update_min_probes()
                 && state.epoch.load(Ordering::SeqCst) == epoch
             {
-                if let (Some(o), Some(u)) = (burst.time_offset(), burst.uncertainty()) {
-                    state.publish(o, u);
+                if let (Some(o), Some(u), Some(lt)) = (
+                    burst.time_offset(),
+                    burst.uncertainty(),
+                    burst.local_time(),
+                ) {
+                    state.publish_at(lt, o, u);
                 }
             }
 
@@ -417,6 +462,24 @@ impl OffsetSource for LiveSource {
             if std::env::var_os("LSL_TRACE_CLOCK").is_some() {
                 eprintln!("TRACE clock: no offset arrived, the timestamps stay uncorrected");
             }
+        }
+        self.last
+    }
+
+    fn smooth_correction(&mut self, remote_ts: f64) -> f64 {
+        if let Some(v) = self.state.smooth_offset_at(remote_ts) {
+            self.waited_out = false;
+            self.last = v;
+            return v;
+        }
+        if !self.waited_out {
+            if self.state.wait(FIRST_OFFSET_TIMEOUT).is_some() {
+                if let Some(v) = self.state.smooth_offset_at(remote_ts) {
+                    self.last = v;
+                    return v;
+                }
+            }
+            self.waited_out = true;
         }
         self.last
     }

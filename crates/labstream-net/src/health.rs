@@ -101,6 +101,10 @@ pub struct InletHealth {
     /// Round-trip time of the latest clock offset estimate, in seconds, or
     /// `None` before the first burst completes.
     pub clock_uncertainty: Option<f64>,
+    /// Estimated relative clock drift (`d(offset)/d(t_local)` in s/s) from the
+    /// opt-in drift model (`docs/roadmap.md`, step 17), or `None` before the
+    /// first burst completes.
+    pub clock_drift: Option<f64>,
     /// Number of times the inlet rebuilt its connection.
     pub recoveries: u64,
     /// True while the inlet reader is attached to a source.

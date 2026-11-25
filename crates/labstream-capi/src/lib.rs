@@ -3545,6 +3545,143 @@ pub unsafe extern "C" fn labstream_inlet_compression_ratio(inlet: lsl_inlet) -> 
         .unwrap_or(f64::NAN)
 }
 
+/// Opt-in post-processing flag for the linear offset-and-drift clock model
+/// (`docs/roadmap.md`, step 17). Pass to `lsl_set_postprocessing`.
+pub const LABSTREAM_POST_DRIFT: u32 = 16;
+
+/// Opt-in post-processing flag for device-delay subtraction
+/// (`docs/roadmap.md`, step 15). Pass to `lsl_set_postprocessing`.
+pub const LABSTREAM_POST_DEVICE_DELAY: u32 = 32;
+
+/// Estimated relative clock drift (`d(offset)/d(t_local)` in s/s) for `inlet`
+/// (`docs/roadmap.md`, step 17), or `NaN` before the first time-sync burst.
+///
+/// # Safety
+/// `inlet` must be null or a valid handle from this library.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_inlet_clock_drift(inlet: lsl_inlet) -> c_double {
+    let Some(b) = (inlet as *mut InletBox).as_ref() else {
+        return f64::NAN;
+    };
+    b.inlet
+        .as_ref()
+        .and_then(|i| i.clock_drift())
+        .unwrap_or(f64::NAN)
+}
+
+/// Smooth offset `local - remote` evaluated for `remote_ts` using the opt-in
+/// drift clock (`docs/roadmap.md`, step 17), or `NaN` before the first burst.
+///
+/// # Safety
+/// `inlet` must be null or a valid handle from this library.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_inlet_smooth_time_correction(
+    inlet: lsl_inlet,
+    remote_ts: c_double,
+) -> c_double {
+    let Some(b) = (inlet as *mut InletBox).as_ref() else {
+        return f64::NAN;
+    };
+    b.inlet
+        .as_ref()
+        .and_then(|i| i.smooth_time_correction(remote_ts))
+        .unwrap_or(f64::NAN)
+}
+
+/// Store a calibrated device delay (and optional RMS jitter; pass `NaN` to
+/// omit) in `<desc><synchronization><offset_mean>` (`docs/roadmap.md`,
+/// step 15).
+///
+/// # Safety
+/// `info` must be null or a valid handle from this library.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_streaminfo_set_device_delay(
+    info: lsl_streaminfo,
+    delay_s: c_double,
+    rms_s: c_double,
+) -> i32 {
+    let Some(b) = (info as *mut InfoBox).as_mut() else {
+        return LSL_ARGUMENT_ERROR;
+    };
+    if !delay_s.is_finite() {
+        return LSL_ARGUMENT_ERROR;
+    }
+    let desc = lsl_get_desc(info);
+    // Remove any existing `<synchronization>` child from the authoritative tree.
+    let sync_name = b"synchronization\0".as_ptr() as *const c_char;
+    while !lsl_child(desc, sync_name).is_null() {
+        lsl_remove_child_n(desc, sync_name);
+    }
+    let sync = lsl_append_child(desc, sync_name);
+    if let Ok(mean_c) = CString::new(format!("{delay_s:.6}")) {
+        lsl_append_child_value(
+            sync,
+            b"offset_mean\0".as_ptr() as *const c_char,
+            mean_c.as_ptr(),
+        );
+    }
+    if rms_s.is_finite() {
+        if let Ok(rms_c) = CString::new(format!("{rms_s:.6}")) {
+            lsl_append_child_value(
+                sync,
+                b"offset_rms\0".as_ptr() as *const c_char,
+                rms_c.as_ptr(),
+            );
+        }
+    }
+    b.sync();
+    LSL_NO_ERROR
+}
+
+/// Read the calibrated device delay (in seconds) from
+/// `<desc><synchronization><offset_mean>`, or `NaN` if absent.
+///
+/// # Safety
+/// `info` must be null or a valid handle from this library.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_streaminfo_device_delay(info: lsl_streaminfo) -> c_double {
+    let Some(b) = (info as *mut InfoBox).as_mut() else {
+        return f64::NAN;
+    };
+    b.sync();
+    b.info.device_delay().unwrap_or(f64::NAN)
+}
+
+/// Set an explicit calibrated device delay (in seconds) on `inlet`, subtracted
+/// when `LABSTREAM_POST_DEVICE_DELAY` is enabled (`docs/roadmap.md`, step 15).
+///
+/// # Safety
+/// `inlet` must be null or a valid handle from this library.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_inlet_set_device_delay(
+    inlet: lsl_inlet,
+    delay_s: c_double,
+) -> i32 {
+    let Some(b) = (inlet as *mut InletBox).as_mut() else {
+        return LSL_ARGUMENT_ERROR;
+    };
+    if !delay_s.is_finite() {
+        return LSL_ARGUMENT_ERROR;
+    }
+    if let Some(i) = b.inlet.as_mut() {
+        i.set_device_delay(delay_s);
+    }
+    LSL_NO_ERROR
+}
+
+/// Return the device delay (in seconds) configured on `inlet`, or `0.0` when
+/// not open or unset.
+///
+/// # Safety
+/// `inlet` must be null or a valid handle from this library.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_inlet_device_delay(inlet: lsl_inlet) -> c_double {
+    let Some(b) = (inlet as *mut InletBox).as_ref() else {
+        return 0.0;
+    };
+    b.inlet.as_ref().map_or(0.0, |i| i.device_delay())
+}
+
 /// True (`1`) when `info` describes a stream published by a `labstream` relay,
 /// or `0` otherwise (`docs/roadmap.md`, step 4).
 ///
@@ -3829,6 +3966,70 @@ mod tests {
             assert_eq!(ec, LSL_NO_ERROR);
             assert_eq!(ts, 123.5);
             assert_eq!(got, [50.0, 20.0]);
+
+            lsl_destroy_inlet(inlet);
+            lsl_destroy_streaminfo(pub_info);
+            lsl_destroy_outlet(outlet);
+            lsl_destroy_streaminfo(info);
+        }
+    }
+
+    #[test]
+    fn capi_device_delay_and_drift_clock_are_opt_in_and_accurate() {
+        unsafe {
+            let info = lsl_create_streaminfo(
+                b"CapiCalib0\0".as_ptr() as *const c_char,
+                b"EEG\0".as_ptr() as *const c_char,
+                1,
+                500.0,
+                1,
+                b"capicalib0\0".as_ptr() as *const c_char,
+            );
+            assert!(labstream_streaminfo_device_delay(info).is_nan());
+            assert_eq!(
+                labstream_streaminfo_set_device_delay(info, 0.025, 0.0003),
+                LSL_NO_ERROR
+            );
+            assert!((labstream_streaminfo_device_delay(info) - 0.025).abs() < 1e-6);
+
+            let outlet = lsl_create_outlet(info, 0, 360);
+            if outlet.is_null() {
+                eprintln!("no local network; skipping");
+                lsl_destroy_streaminfo(info);
+                return;
+            }
+            let pub_info = lsl_get_info(outlet);
+            let inlet = lsl_create_inlet(pub_info, 360, 0, 0);
+            let mut ec = 0;
+            lsl_open_stream(inlet, 5.0, &mut ec);
+            assert_eq!(ec, LSL_NO_ERROR);
+            assert_eq!(lsl_wait_for_consumers(outlet, 5.0), 1);
+
+            // Default: timestamps are unchanged (opt-in criterion).
+            let v = 1.0f32;
+            lsl_push_sample_ft(outlet, &v, 100.025);
+            let mut got = 0.0f32;
+            let ts_raw = lsl_pull_sample_f(inlet, &mut got, 1, 2.0, &mut ec);
+            assert_eq!(ec, LSL_NO_ERROR);
+            assert_eq!(ts_raw.to_bits(), 100.025f64.to_bits());
+
+            // Enable opt-in DEVICE_DELAY: reads `<desc><synchronization><offset_mean>`
+            // automatically and subtracts 0.025 s.
+            assert_eq!(
+                lsl_set_postprocessing(inlet, LABSTREAM_POST_DEVICE_DELAY),
+                LSL_NO_ERROR
+            );
+            assert!((labstream_inlet_device_delay(inlet) - 0.025).abs() < 1e-6);
+            lsl_push_sample_ft(outlet, &v, 200.025);
+            let ts_adj = lsl_pull_sample_f(inlet, &mut got, 1, 2.0, &mut ec);
+            assert_eq!(ec, LSL_NO_ERROR);
+            assert!((ts_adj - 200.0).abs() < 1e-6);
+
+            // Wait for time sync burst and check drift clock C API.
+            let _ = lsl_time_correction(inlet, 2.0, &mut ec);
+            assert_eq!(ec, LSL_NO_ERROR);
+            assert!(labstream_inlet_clock_drift(inlet).is_finite());
+            assert!(labstream_inlet_smooth_time_correction(inlet, 200.0).is_finite());
 
             lsl_destroy_inlet(inlet);
             lsl_destroy_streaminfo(pub_info);

@@ -357,6 +357,62 @@ impl StreamInfo {
         }
         out
     }
+
+    /// Store a calibrated device delay (and optional jitter RMS) in
+    /// `<desc><synchronization><offset_mean>` (`docs/roadmap.md`, step 15).
+    ///
+    /// `liblsl` tools and `LabRecorder` keep `<desc>` verbatim in XDF files.
+    pub fn set_device_delay(&mut self, delay_s: f64, rms_s: Option<f64>) {
+        self.set_device_delay_stats(delay_s, rms_s, None, None, None);
+    }
+
+    /// Store full device-delay calibration statistics in
+    /// `<desc><synchronization>` (`docs/roadmap.md`, step 15).
+    pub fn set_device_delay_stats(
+        &mut self,
+        mean_s: f64,
+        rms_s: Option<f64>,
+        median_s: Option<f64>,
+        p5_s: Option<f64>,
+        p95_s: Option<f64>,
+    ) {
+        if !mean_s.is_finite() {
+            return;
+        }
+        self.desc.children.retain(|c| c.name != "synchronization");
+        let sync = self.desc.append_child("synchronization");
+        sync.append_child_value("offset_mean", &format!("{mean_s:.6}"));
+        if let Some(v) = rms_s.filter(|x| x.is_finite()) {
+            sync.append_child_value("offset_rms", &format!("{v:.6}"));
+        }
+        if let Some(v) = median_s.filter(|x| x.is_finite()) {
+            sync.append_child_value("offset_median", &format!("{v:.6}"));
+        }
+        if let Some(v) = p5_s.filter(|x| x.is_finite()) {
+            sync.append_child_value("offset_5_percentile", &format!("{v:.6}"));
+        }
+        if let Some(v) = p95_s.filter(|x| x.is_finite()) {
+            sync.append_child_value("offset_95_percentile", &format!("{v:.6}"));
+        }
+    }
+
+    /// Read the calibrated device delay (in seconds) from
+    /// `<desc><synchronization><offset_mean>`, if present and finite.
+    pub fn device_delay(&self) -> Option<f64> {
+        let sync = self.desc.child("synchronization")?;
+        let text = sync.child_value_of("offset_mean").trim();
+        let val: f64 = text.parse().ok()?;
+        val.is_finite().then_some(val)
+    }
+
+    /// Read the calibrated device delay RMS jitter (in seconds) from
+    /// `<desc><synchronization><offset_rms>`, if present and finite.
+    pub fn device_delay_rms(&self) -> Option<f64> {
+        let sync = self.desc.child("synchronization")?;
+        let text = sync.child_value_of("offset_rms").trim();
+        let val: f64 = text.parse().ok()?;
+        val.is_finite().then_some(val)
+    }
 }
 
 /// Write a double the way liblsl writes one into a description.

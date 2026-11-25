@@ -7,6 +7,25 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Opt-in linear offset-and-drift clock model (`docs/roadmap.md`, step 17):
+  `labstream_time::DriftModel` and `DriftFit` fit a 64-burst RTT-weighted line
+  with Huber outlier down-weighting from each time-sync burst midpoint.
+  `flags::DRIFT` (`16`, `Post::DRIFT`, `LABSTREAM_POST_DRIFT`) removes the 2 s
+  burst step while default `flags::CLOCKSYNC` stays bit-exact with liblsl.
+  Adds `Inlet::clock_drift`, `Inlet::smooth_time_correction`,
+  `InletHealth::clock_drift`, `labstream_inlet_clock_drift`, and
+  `labstream_inlet_smooth_time_correction`.
+- Device-delay calibration (`docs/roadmap.md`, step 15):
+  `labstream_net::calibrate` (re-exported in `labstream::calibrate`) and
+  `labstream calibrate` (`crates/labstream-cli`) measure fixed device delay
+  against a reference marker or trigger stream via sub-sample edge
+  interpolation. `StreamInfo::set_device_delay` and `StreamInfo::device_delay`
+  store and read `<desc><synchronization><offset_mean>` (XDF-retained). Opt-in
+  `flags::DEVICE_DELAY` (`32`, `Post::DEVICE_DELAY`,
+  `LABSTREAM_POST_DEVICE_DELAY`) subtracts the delay on the inlet, with C
+  functions `labstream_streaminfo_set_device_delay`,
+  `labstream_streaminfo_device_delay`, `labstream_inlet_set_device_delay`, and
+  `labstream_inlet_device_delay`.
 - Lossless wire compression via `comp/1` (`docs/roadmap.md`, step 7,
   `docs/extensions.md`, section `comp`): `labstream_proto::comp` (`CompState`,
   `DgramCompEncoder`, `decode_dgram_payload`) applies bit-exact channel deltas
