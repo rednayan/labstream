@@ -403,6 +403,12 @@ impl Inlet {
         self.inner.is_compressed()
     }
 
+    /// True while negotiated transport encryption (`enc/1`) is active on this
+    /// connection (`docs/roadmap.md`, step 14).
+    pub fn is_encrypted(&self) -> bool {
+        self.inner.is_encrypted()
+    }
+
     /// Ratio `wire_bytes / raw_bytes` observed on this connection when
     /// `comp/1` is active, or `None` when uncompressed or before data arrives.
     pub fn compression_ratio(&self) -> Option<f64> {

@@ -1,8 +1,8 @@
 # Roadmap: features that liblsl does not have
 
-**Status:** approved by the user on 2026-11-16. The gate, steps 0 to 13
-(step 11 library and C API), step 15, step 16 (library and C API), and
-step 17 are complete. Steps 14 and 18 are not implemented.
+**Status:** approved by the user on 2026-11-16. The gate and steps 0 to 17
+(step 11 and step 16 library and C API) are complete. Step 18 is not
+implemented.
 
 This page gives the order of the labstream-only features, the success
 criterion of each feature, and the dependencies. Each feature follows the
@@ -606,6 +606,23 @@ configuration requires encryption.
 
 The spec must also decide how two peers trust each other, and what stays
 visible in discovery.
+
+**Status:** complete on 2026-11-25 (`docs/extensions.md`, section `enc`).
+`enc/1` is **off by default** and opt-in via `labstream.Features` (`enc`),
+`labstream.RequireEncryption = 1`, or `labstream_set_encryption`.
+`crates/labstream-net/src/enc.rs` uses the reviewed `ring` crate (gated
+behind Cargo feature `encryption`) for ephemeral X25519 key agreement
+(RFC 7748), HKDF-SHA256 (RFC 5869) with optional pre-shared key
+(`labstream.EncryptionKey`), and length-prefixed ChaCha20-Poly1305 AEAD
+framing (RFC 8439). `Inlet::is_encrypted`, `InletHealth::encrypted`,
+`labstream_inlet_encrypted`, and `labstream_set_encryption` expose the
+feature in Rust and C. `crates/labstream-net/tests/enc_live.rs` confirms zero
+plaintext sample bytes in a TCP capture, plain default behavior, clear
+rejection when required against a plain peer, and PSK authentication.
+`oracle/latency.py` measures +8 us p50 (+0.3 % outlet CPU, +0.2 % inlet CPU)
+at 512 Hz x 8 channels (chunk 1) and +12 us p50 (+0.1 % inlet CPU, 0 lost)
+at 4000 Hz x 64 channels (chunk 32) against plain TCP. `oracle/interop.py`
+passes (28 of 28).
 
 ### Step 15: device-delay calibration
 

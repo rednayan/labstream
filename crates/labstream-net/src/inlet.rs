@@ -691,6 +691,8 @@ struct ConnState {
     on_shm: AtomicBool,
     /// True while wire compression (`comp/1`) is active on this connection.
     compressed: AtomicBool,
+    /// True while negotiated transport encryption (`enc/1`) is active.
+    encrypted: AtomicBool,
     /// True when the current connection negotiated `meta/1` live metadata.
     meta_enabled: AtomicBool,
     /// Live metadata updates received over `meta/1`.
@@ -801,18 +803,20 @@ impl Inlet {
             None,
             requested_selection.as_ref(),
         )?;
-        let (stream, client, data_codec, active_selection, shm, buf) = (
+        let (stream, client, data_codec, active_selection, shm, enc_reader, buf) = (
             hs.stream,
             hs.client,
             hs.codec,
             hs.selection,
             hs.shm,
+            hs.enc_reader,
             hs.carry,
         );
         debug_assert_eq!(client.state(), State::Streaming);
         let numbered = uses_seq(&client);
         let meta_enabled = features::has(client.features(), features::META, 1);
         let resume = features::resume_answer(client.features());
+        let encrypted_init = enc_reader.is_some();
         let compressed = shm.is_none() && features::comp_answer(client.features());
         let dgram = if shm.is_some() {
             None
@@ -853,6 +857,7 @@ impl Inlet {
             shm_gen: AtomicU64::new(0),
             on_shm: AtomicBool::new(on_shm_init),
             compressed: AtomicBool::new(compressed),
+            encrypted: AtomicBool::new(encrypted_init),
             meta_enabled: AtomicBool::new(meta_enabled),
             metadata: Mutex::new(MetadataInbox::default()),
             wire_bytes: Arc::new(AtomicU64::new(0)),
@@ -892,6 +897,7 @@ impl Inlet {
                     resume,
                     dgram,
                     shm_bg,
+                    enc_reader,
                     compressed,
                     requested_selection,
                 );
@@ -1547,6 +1553,12 @@ impl Inlet {
         self.conn.compressed.load(Ordering::SeqCst)
     }
 
+    /// True while negotiated transport encryption (`enc/1`) is active on this
+    /// connection (`docs/roadmap.md`, step 14).
+    pub fn is_encrypted(&self) -> bool {
+        self.conn.encrypted.load(Ordering::SeqCst)
+    }
+
     /// True when the current connection negotiated `meta/1` live metadata
     /// (`docs/roadmap.md`, step 16).
     pub fn has_live_metadata(&self) -> bool {
@@ -1669,6 +1681,7 @@ impl Inlet {
             on_udp: self.on_udp(),
             on_shm: self.on_shm(),
             compressed: self.is_compressed(),
+            encrypted: self.is_encrypted(),
             compression_ratio: self.compression_ratio(),
             buffered: self.samples_available(),
             buffer_capacity: self.buffer_capacity(),
@@ -1770,6 +1783,7 @@ fn read_and_recover(
     resume: Option<features::ResumeParam>,
     dgram: Option<features::DgramParam>,
     mut shm: Option<Arc<crate::shm::ShmReader>>,
+    mut enc_reader: Option<crate::enc::EncReader>,
     initial_compressed: bool,
     requested_selection: Option<features::SelectParam>,
 ) {
@@ -1923,7 +1937,16 @@ fn read_and_recover(
             match sock.read(&mut tmp) {
                 Ok(0) => Some(Ending::Closed),
                 Ok(n) => {
-                    carry.extend_from_slice(&tmp[..n]);
+                    if let Some(ref mut er) = enc_reader {
+                        if er.decrypt_into(&tmp[..n], &mut carry).is_err() {
+                            done.store(true, Ordering::SeqCst);
+                            clock.stop();
+                            queue.close();
+                            return;
+                        }
+                    } else {
+                        carry.extend_from_slice(&tmp[..n]);
+                    }
                     last_data = Instant::now();
                     None
                 }
@@ -2026,12 +2049,13 @@ fn read_and_recover(
                     from,
                     requested_selection.as_ref(),
                 ) {
-                    let (s, c, new_codec, new_sel, new_shm, rest) = (
+                    let (s, c, new_codec, new_sel, new_shm, new_enc, rest) = (
                         hs.stream,
                         hs.client,
                         hs.codec,
                         hs.selection,
                         hs.shm,
+                        hs.enc_reader,
                         hs.carry,
                     );
                     if trace {
@@ -2042,6 +2066,9 @@ fn read_and_recover(
                     sock = s;
                     carry = rest;
                     codec = new_codec;
+                    enc_reader = new_enc;
+                    conn.encrypted
+                        .store(enc_reader.is_some(), Ordering::SeqCst);
                     let eff_srate = new_sel.as_ref().map_or(known.nominal_srate, |sel| {
                         sel.output_srate(known.nominal_srate)
                     });
@@ -2109,12 +2136,13 @@ fn read_and_recover(
                         requested_selection.as_ref(),
                     ) {
                         Ok(hs) => {
-                            let (s, c, new_codec, new_sel, new_shm, rest) = (
+                            let (s, c, new_codec, new_sel, new_shm, new_enc, rest) = (
                                 hs.stream,
                                 hs.client,
                                 hs.codec,
                                 hs.selection,
                                 hs.shm,
+                                hs.enc_reader,
                                 hs.carry,
                             );
                             // The old connection ends here. No sample of it
@@ -2128,6 +2156,9 @@ fn read_and_recover(
                             sock = s;
                             carry = rest;
                             codec = new_codec;
+                            enc_reader = new_enc;
+                            conn.encrypted
+                                .store(enc_reader.is_some(), Ordering::SeqCst);
                             let eff_srate = new_sel.as_ref().map_or(fresh.nominal_srate, |sel| {
                                 sel.output_srate(fresh.nominal_srate)
                             });
@@ -2459,6 +2490,7 @@ struct HandshakeResult {
     codec: labstream_wire::Codec,
     selection: Option<features::SelectParam>,
     shm: Option<Arc<crate::shm::ShmReader>>,
+    enc_reader: Option<crate::enc::EncReader>,
     carry: Vec<u8>,
 }
 
@@ -2484,6 +2516,12 @@ fn handshake(
     // A labstream outlet answers the offer, and any other outlet ignores it.
     // `docs/extensions.md`.
     let allowed = &crate::config::get().features;
+    let enc_policy = crate::enc::effective_policy();
+    let enc_kp = if enc_policy.enabled {
+        Some(crate::enc::EphemeralKey::generate()?)
+    } else {
+        None
+    };
     let mut offer = features::offer(allowed);
     offer.extend(features::offer_resume(allowed, resume_from));
     offer.extend(features::offer_dgram(allowed));
@@ -2492,6 +2530,9 @@ fn handshake(
         allowed,
         info.format == labstream_wire::Format::String,
     ));
+    if let Some(ref kp) = enc_kp {
+        offer.push(features::offer_enc(kp.public_bytes()));
+    }
     if crate::shm::supported()
         && info.format != labstream_wire::Format::String
         && selection.map_or(true, |s| s.decimate <= 1)
@@ -2525,6 +2566,15 @@ fn handshake(
         buf.extend_from_slice(&tmp[..n]);
     }
 
+    // Fail immediately after reading headers if encryption is required and the
+    // outlet did not negotiate `enc/1`, before waiting for any test pattern.
+    if enc_policy.required && features::enc_answer(client.features()).is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "encryption is required (labstream.RequireEncryption = 1), but the outlet did not negotiate enc/1",
+        ));
+    }
+
     // Read the two test pattern samples and compare them.
     loop {
         match client.on_test_pattern(&buf) {
@@ -2549,6 +2599,59 @@ fn handshake(
     }
 
     debug_assert_eq!(client.state(), State::Streaming);
+
+    // Derive `enc/1` session key if both sides negotiated encryption, or fail
+    // with a clear error when `labstream.RequireEncryption = 1`.
+    let mut enc_reader = match (enc_kp, features::enc_answer(client.features())) {
+        (Some(kp), Some(peer_enc)) => {
+            let key = kp.derive_feed_key(peer_enc.pubkey, false, enc_policy.psk.as_deref())?;
+            Some(crate::enc::EncReader::new(&key)?)
+        }
+        _ if enc_policy.required => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "encryption is required (labstream.RequireEncryption = 1), but the outlet did not negotiate enc/1",
+            ));
+        }
+        _ => None,
+    };
+
+    // Decrypt any post-test-pattern bytes already buffered during the handshake,
+    // and verify the outlet's initial key-confirmation frame so PSK mismatches
+    // fail immediately during `open`.
+    let carry = if let Some(ref mut er) = enc_reader {
+        let mut plain = Vec::new();
+        if !buf.is_empty() {
+            er.decrypt_into(&buf, &mut plain)?;
+            buf.clear();
+        }
+        if plain.is_empty() {
+            // Read at least the outlet's initial authenticated frame (20 bytes).
+            let mut got_confirm = false;
+            while !got_confirm {
+                let n = stream.read(&mut tmp)?;
+                if n == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "outlet closed before encrypted key confirmation",
+                    ));
+                }
+                let before = plain.len();
+                er.decrypt_into(&tmp[..n], &mut plain)?;
+                // `write_frame(&[])` produces 20 ciphertext bytes -> 0 plaintext
+                // bytes, or combined with the initial `seq` record (>0 plaintext).
+                // Once we have consumed at least 20 ciphertext bytes without
+                // error, the first Poly1305 tag succeeded.
+                if n >= 20 || plain.len() > before {
+                    got_confirm = true;
+                }
+            }
+        }
+        plain
+    } else {
+        buf
+    };
+
     let active_selection = features::select_answer(client.features());
     let out_channels = active_selection
         .as_ref()
@@ -2563,16 +2666,20 @@ fn handshake(
 
     // Steps 3-4 of `docs/extensions.md` (`shm`): open the segment, verify its
     // random token, and reply `shm-ok <token>` or `shm-no` on TCP.
-    let shm = if let Some(sp) = features::shm_answer(client.features()) {
-        match crate::shm::ShmReader::open(sp.id, info.format, out_channels) {
-            Ok(reader) => {
-                crate::shm::write_shm_ok(&mut stream, reader.token())?;
-                Some(Arc::new(reader))
+    let shm = if enc_reader.is_none() {
+        if let Some(sp) = features::shm_answer(client.features()) {
+            match crate::shm::ShmReader::open(sp.id, info.format, out_channels) {
+                Ok(reader) => {
+                    crate::shm::write_shm_ok(&mut stream, reader.token())?;
+                    Some(Arc::new(reader))
+                }
+                Err(_) => {
+                    crate::shm::write_shm_no(&mut stream)?;
+                    None
+                }
             }
-            Err(_) => {
-                crate::shm::write_shm_no(&mut stream)?;
-                None
-            }
+        } else {
+            None
         }
     } else {
         None
@@ -2584,7 +2691,8 @@ fn handshake(
         codec: data_codec,
         selection: active_selection,
         shm,
-        carry: buf,
+        enc_reader,
+        carry,
     })
 }
 

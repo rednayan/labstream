@@ -57,6 +57,13 @@ pub const COMP: &str = "comp";
 /// section `meta`, `docs/roadmap.md`, step 16).
 pub const META: &str = "meta";
 
+/// The name of the negotiated encryption feature (`docs/extensions.md`,
+/// section `enc`, `docs/roadmap.md`, step 14).
+///
+/// Off by default. Carries a 64-hex-digit (32-byte) ephemeral X25519 public
+/// key in both the inlet offer and the outlet answer.
+pub const ENC: &str = "enc";
+
 /// The features with no parameter that this library implements, each with
 /// its versions.
 pub const SUPPORTED: &[(&str, &[u32])] = &[(SEQ, &[1]), (META, &[1])];
@@ -661,6 +668,74 @@ pub fn comp_answer(agreed: &[Token]) -> bool {
     agreed
         .iter()
         .any(|t| t.name == COMP && t.version == 1 && t.param.is_none())
+}
+
+/// The parameter of an `enc/1` offer or answer: a 32-byte X25519 ephemeral
+/// public key encoded as 64 lowercase hexadecimal digits (`docs/extensions.md`,
+/// section `enc`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncParam {
+    /// 32-byte X25519 public key.
+    pub pubkey: [u8; 32],
+}
+
+impl EncParam {
+    /// Parse 64 lowercase hexadecimal digits into a 32-byte public key.
+    pub fn parse(param: &str) -> Option<EncParam> {
+        if param.len() != 64
+            || !param
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return None;
+        }
+        let mut pubkey = [0u8; 32];
+        for (i, slot) in pubkey.iter_mut().enumerate() {
+            *slot = u8::from_str_radix(&param[i * 2..i * 2 + 2], 16).ok()?;
+        }
+        Some(EncParam { pubkey })
+    }
+
+    /// Encode this public key as 64 lowercase hexadecimal digits.
+    pub fn to_param(&self) -> String {
+        let mut out = String::with_capacity(64);
+        for b in self.pubkey {
+            out.push_str(&format!("{b:02x}"));
+        }
+        out
+    }
+
+    /// Build the `enc/1=<64-hex>` wire token.
+    pub fn token(&self) -> Token {
+        Token {
+            name: ENC.to_string(),
+            version: 1,
+            param: Some(self.to_param()),
+        }
+    }
+}
+
+/// Build the `enc/1=<pubkey>` offer token for an inlet.
+pub fn offer_enc(pubkey: [u8; 32]) -> Token {
+    EncParam { pubkey }.token()
+}
+
+/// Extract the inlet's `enc/1=<pubkey>` offer on the outlet side.
+pub fn enc_request(offered: &[Token]) -> Option<EncParam> {
+    let mut tokens = offered
+        .iter()
+        .filter(|t| t.name == ENC && t.version == 1);
+    let token = tokens.next()?;
+    if tokens.next().is_some() {
+        return None;
+    }
+    EncParam::parse(token.param.as_deref()?)
+}
+
+/// Extract the outlet's `enc/1=<pubkey>` answer on the inlet side.
+pub fn enc_answer(agreed: &[Token]) -> Option<EncParam> {
+    let token = agreed.iter().find(|t| t.name == ENC && t.version == 1)?;
+    EncParam::parse(token.param.as_deref()?)
 }
 
 #[cfg(test)]

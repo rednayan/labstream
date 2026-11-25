@@ -246,6 +246,12 @@ pub struct Config {
     /// When fallback discovery runs. `labstream.FallbackDiscovery`.
     /// `docs/discovery.md`.
     pub fallback_discovery: FallbackDiscovery,
+    /// When true, refuse any feed connection that does not negotiate `enc/1`
+    /// (`labstream.RequireEncryption`, off by default, `docs/roadmap.md`, step 14).
+    pub require_encryption: bool,
+    /// Optional pre-shared key mixed into the `enc/1` key derivation for mutual
+    /// peer authentication (`labstream.EncryptionKey`, empty by default).
+    pub encryption_key: Option<String>,
     /// Where the values came from, for a report.
     pub source: String,
 }
@@ -364,6 +370,14 @@ impl Config {
                 ini.float("labstream.ResumeSeconds", 30.0).max(0.0)
             };
 
+        let encryption_key_raw = ini.text("labstream.EncryptionKey", "");
+        let encryption_key = if encryption_key_raw.is_empty() {
+            None
+        } else {
+            Some(encryption_key_raw)
+        };
+        let require_encryption = ini.flag("labstream.RequireEncryption", false);
+
         Config {
             multicast_port: ini.int("ports.MulticastPort", 16571) as u16,
             base_port: ini.int("ports.BasePort", 16572) as u16,
@@ -381,6 +395,8 @@ impl Config {
             fallback_discovery: FallbackDiscovery::parse(
                 &ini.text("labstream.FallbackDiscovery", "auto"),
             ),
+            require_encryption,
+            encryption_key,
             multicast_addresses: addresses,
             multicast_ttl: ttl,
             watchdog_time_threshold: ini.float("tuning.WatchdogTimeThreshold", 15.0),

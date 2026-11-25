@@ -3886,6 +3886,58 @@ pub unsafe extern "C" fn labstream_ws_bridge_stop(bridge: labstream_ws_bridge) {
     }
 }
 
+/// Configure process-wide opt-in transport encryption (`enc/1`,
+/// `docs/roadmap.md`, step 14).
+///
+/// - `enabled < 0`: clear runtime override and revert to `lsl_api.cfg`.
+/// - `enabled == 0`: disable encryption (default).
+/// - `enabled > 0`: enable `enc/1` negotiation.
+/// - `required != 0`: refuse any plaintext peer with an error.
+/// - `psk`: optional null-terminated UTF-8 pre-shared key (null or empty for
+///   ephemeral key exchange only).
+///
+/// # Safety
+/// If `psk` is non-null, it must be a valid null-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_set_encryption(
+    enabled: i32,
+    required: i32,
+    psk: *const c_char,
+) -> i32 {
+    if enabled < 0 {
+        labstream_net::enc::set_runtime_policy(None);
+        return LSL_NO_ERROR;
+    }
+    let key = if psk.is_null() {
+        None
+    } else {
+        match CStr::from_ptr(psk).to_str() {
+            Ok(s) if !s.is_empty() => Some(s.to_string()),
+            Ok(_) => None,
+            Err(_) => return LSL_ARGUMENT_ERROR,
+        }
+    };
+    labstream_net::enc::set_runtime_policy(Some(labstream_net::enc::EncryptionPolicy {
+        enabled: enabled > 0 || required != 0,
+        required: required != 0,
+        psk: key,
+    }));
+    LSL_NO_ERROR
+}
+
+/// Return `1` when `inlet` is using `enc/1` transport encryption, or `0`
+/// otherwise.
+///
+/// # Safety
+/// `inlet` must be null or a valid handle from this library.
+#[no_mangle]
+pub unsafe extern "C" fn labstream_inlet_encrypted(inlet: lsl_inlet) -> i32 {
+    let Some(b) = (inlet as *mut InletBox).as_ref() else {
+        return 0;
+    };
+    i32::from(b.inlet.as_ref().is_some_and(|i| i.is_encrypted()))
+}
+
 /// Run network and discovery diagnostics and return the report as JSON.
 ///
 /// Pass null or an empty string for `peers` to skip remote peer checks, or a

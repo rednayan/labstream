@@ -82,6 +82,9 @@ pub use labstream_net::relay;
 /// Opt-in WebSocket bridge for browser reach (`docs/roadmap.md`, step 13).
 pub use labstream_net::ws;
 
+/// Opt-in negotiated transport encryption (`enc/1`, `docs/roadmap.md`, step 14).
+pub use labstream_net::enc;
+
 /// Stream health snapshots, gap descriptors, and live metadata (`docs/health.md`, `docs/extensions.md`).
 pub use labstream_net::{
     ConsumerHealth, Gap, GapKind, InletHealth, MetadataUpdate, OutletHealth, SelectParam,

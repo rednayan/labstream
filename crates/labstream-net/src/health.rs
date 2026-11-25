@@ -115,6 +115,8 @@ pub struct InletHealth {
     pub on_shm: bool,
     /// True while wire compression (`comp/1`) is active on this connection.
     pub compressed: bool,
+    /// True while negotiated encryption (`enc/1`) is active on this connection.
+    pub encrypted: bool,
     /// Ratio `wire_bytes / raw_bytes` observed on this connection when
     /// `comp/1` is active, or `None` when uncompressed or before data arrives.
     pub compression_ratio: Option<f64>,

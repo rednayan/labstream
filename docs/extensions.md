@@ -1276,6 +1276,50 @@ LSL wire samples (`TAG_TRANSMITTED_TIMESTAMP = 2`) for decoding by
 `crates/labstream-wasm` (`wasm32-unknown-unknown`). Text JSON frames handle
 `list`, `subscribe`, `unsubscribe`, `marker`, and forwarded `meta/1` updates.
 
+### `enc`: opt-in negotiated transport encryption
+
+**Status:** implemented on `main` (`docs/roadmap.md`, step 14). The token is
+`enc/1=<64-hex-pubkey>`. It is **off by default**.
+
+#### Configuration and trust model
+
+1. By default, `enc` is not in `labstream.Features` and
+   `labstream.RequireEncryption` is `0`. Every connection uses plain LSL.
+2. When the user adds `enc` to `labstream.Features` (or calls
+   `labstream_set_encryption`), two labstream peers negotiate `enc/1` and
+   encrypt all post-test-pattern feed traffic. A liblsl peer ignores
+   `Labstream-Features` and gets plain LSL.
+3. When `labstream.RequireEncryption = 1`, the outlet refuses a plain inlet
+   with `LSL/110 403 Encryption required`, and the inlet refuses a plain
+   outlet with a clear permission error.
+4. When `labstream.EncryptionKey` is empty, the handshake uses ephemeral
+   X25519 key exchange (RFC 7748) to stop passive network eavesdropping. When
+   `labstream.EncryptionKey` is set, the pre-shared key mixes into the
+   HKDF-SHA256 salt for mutual peer authentication.
+5. Discovery (`LSL:shortinfo`) stays plain LSL so liblsl peers on the same
+   network keep working unchanged.
+
+#### Wire format
+
+Both the inlet offer and the outlet answer carry `enc/1=<64-hex-pubkey>`
+(32-byte ephemeral X25519 public key). Both sides derive one 32-byte
+ChaCha20-Poly1305 (RFC 8439) key via HKDF-SHA256 (RFC 5869) over
+`SHA-256("labstream-enc-v1" || inlet_pk || outlet_pk [|| "|psk|" || psk])`
+using the reviewed `ring` crate.
+
+From the first byte after the two plain test-pattern samples, the outlet wraps
+the feed in length-prefixed AEAD frames:
+
+```text
+u32  ct_len        little-endian length of ciphertext plus 16-byte tag
+[u8; ct_len]       ChaCha20-Poly1305(key, nonce = [0,0,0,0 || seq_le], aad = ct_len_le)
+```
+
+The outlet writes an empty authenticated frame at once so a mismatched
+pre-shared key fails during `open`. `seq/1`, `resume/1`, `select/1`, `comp/1`,
+and `meta/1` run inside the encrypted TCP stream. `shm/1` and `dgram/1` stay
+off while `enc/1` is active so every sample stays encrypted on the wire.
+
 ## Alternatives that this proposal rejects
 
 **A higher `Data-Protocol-Version`, for example 120.** liblsl uses the lower

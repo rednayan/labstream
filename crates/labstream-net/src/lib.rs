@@ -21,6 +21,7 @@ pub mod desc;
 mod dgram_in;
 mod dgram_out;
 pub mod doctor;
+pub mod enc;
 pub mod health;
 pub mod history;
 pub mod info;

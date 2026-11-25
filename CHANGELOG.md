@@ -7,6 +7,16 @@ and [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Opt-in negotiated transport encryption via `enc/1` (`docs/roadmap.md`, step
+  14, `docs/extensions.md`, section `enc`): off by default, enabled via
+  `labstream.Features` (`enc`), `labstream.RequireEncryption = 1`, or
+  `labstream::enc::set_runtime_policy` / `labstream_set_encryption`. Uses the
+  reviewed `ring` crate (gated behind Cargo feature `encryption`) for
+  ephemeral X25519 key exchange (RFC 7748), HKDF-SHA256 (RFC 5869) with
+  optional pre-shared key (`labstream.EncryptionKey`), and length-prefixed
+  ChaCha20-Poly1305 AEAD framing (RFC 8439). Adds `Inlet::is_encrypted`,
+  `InletHealth::encrypted`, `labstream_inlet_encrypted`, and
+  `labstream_set_encryption`, verified by `crates/labstream-net/tests/enc_live.rs`.
 - Browser reach via opt-in WebSocket bridge and WebAssembly decoder
   (`docs/roadmap.md`, step 13): `labstream_net::ws::WsBridge` (re-exported in
   `labstream::ws`) and `labstream relay` (`--ws-port`, `--ws-bind`,

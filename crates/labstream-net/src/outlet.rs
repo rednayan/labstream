@@ -778,6 +778,32 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
         .as_deref()
         .is_some_and(|a| features::has(a, features::SEQ, 1));
 
+    // Negotiate `enc/1` (off by default, `docs/roadmap.md`, step 14).
+    let enc_policy = crate::enc::effective_policy();
+    let enc_key: Option<[u8; 32]> = if enc_policy.enabled {
+        let offered_enc = offered.as_deref().and_then(features::enc_request);
+        match (offered_enc, answered.as_mut()) {
+            (Some(peer_enc), Some(a)) => {
+                let kp = crate::enc::EphemeralKey::generate()?;
+                let pub_bytes = kp.public_bytes();
+                let key = kp.derive_feed_key(peer_enc.pubkey, true, enc_policy.psk.as_deref())?;
+                a.push(features::EncParam { pubkey: pub_bytes }.token());
+                if trace {
+                    eprintln!("TRACE enc: enabled (X25519 + ChaCha20-Poly1305)");
+                }
+                Some(key)
+            }
+            _ if enc_policy.required => {
+                let _ = stream.write_all(b"LSL/110 403 Encryption required\r\n\r\n");
+                let _ = stream.flush();
+                return Ok(());
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     // Negotiate `select/1` before `resume/1` and `dgram/1` because decimation
     // changes the sample timeline and channel projection shrinks datagrams.
     let selected: Option<features::SelectParam> = if let (false, Some(o), Some(a)) =
@@ -826,7 +852,9 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
 
     // Check `shm/1` eligibility up front so fresh connections can negotiate
     // `shm/1` cleanly alongside `resume/1` without allocating a redundant queue.
+    // When `enc/1` is active, keep samples on the authenticated encrypted TCP stream.
     let wants_shm = queue_follows
+        && enc_key.is_none()
         && info.format != labstream_wire::Format::String
         && !decimating
         && crate::shm::supported()
@@ -920,8 +948,9 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
     // When `shm/1` is offered on loopback, skip `dgram/1` so a container
     // fallback uses pure TCP (`docs/roadmap.md`, step 9, criterion 3).
     let peer_is_loopback = stream.peer_addr().is_ok_and(|p| p.ip().is_loopback());
-    let can_dgram =
-        (resumed.is_some() || resume_fresh_for_shm) && !(shm_writer.is_some() && peer_is_loopback);
+    let can_dgram = enc_key.is_none()
+        && (resumed.is_some() || resume_fresh_for_shm)
+        && !(shm_writer.is_some() && peer_is_loopback);
     let mut dgram_socket: Option<(std::net::UdpSocket, u64, std::net::IpAddr)> = None;
     if let (true, Some(o), Some(a)) = (can_dgram, offered.as_deref(), answered.as_mut()) {
         let fits = crate::dgram_out::sample_fits(info.format, out_channels);
@@ -1173,20 +1202,42 @@ fn serve_client(mut stream: TcpStream, shared: Arc<Shared>) -> std::io::Result<(
     });
 
     let stop = || *shared.stop.lock().unwrap();
-    let sent = feed_with(
-        &consumer.queue,
-        &data_codec,
-        &mut stream,
-        max_chunk,
-        numbered,
-        compressed,
-        meta_enabled.then_some(&shared.fanout),
-        resend.as_ref().map(|r| (&shared.fanout, r)),
-        dgram,
-        selector,
-        &stop,
-        trace,
-    );
+    let sent = if let Some(key) = enc_key {
+        let mut enc_stream = crate::enc::EncWriter::new(&mut stream, &key)?;
+        // Send an empty authenticated frame immediately so mismatched PSKs are
+        // caught at connect time even on a quiet stream.
+        enc_stream.write_frame(&[])?;
+        enc_stream.flush()?;
+        feed_with(
+            &consumer.queue,
+            &data_codec,
+            &mut enc_stream,
+            max_chunk,
+            numbered,
+            compressed,
+            meta_enabled.then_some(&shared.fanout),
+            resend.as_ref().map(|r| (&shared.fanout, r)),
+            dgram,
+            selector,
+            &stop,
+            trace,
+        )
+    } else {
+        feed_with(
+            &consumer.queue,
+            &data_codec,
+            &mut stream,
+            max_chunk,
+            numbered,
+            compressed,
+            meta_enabled.then_some(&shared.fanout),
+            resend.as_ref().map(|r| (&shared.fanout, r)),
+            dgram,
+            selector,
+            &stop,
+            trace,
+        )
+    };
     // Shut down the shared TCP socket so the `dgram` request reader exits
     // immediately and the peer receives FIN without waiting for a watchdog.
     let _ = stream.shutdown(std::net::Shutdown::Both);

@@ -11,10 +11,17 @@ authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = ["encryption"]
+encryption = ["dep:ring"]
+
 [dependencies]
 labstream-wire.workspace = true
 labstream-proto.workspace = true
 labstream-time.workspace = true
+# Reviewed BoringSSL-derived cryptography (X25519, HKDF-SHA256, ChaCha20-Poly1305)
+# for opt-in negotiated encryption (`docs/roadmap.md`, step 14).
+ring = { version = "0.17", optional = true }
 # Only for the socket options that the standard library does not expose.
 # `src/udp_server.cpp:60` sets one, and a second outlet needs it. The `all`
 # feature gives the keepalive probe count and the TCP user timeout
