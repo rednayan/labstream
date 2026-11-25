@@ -10,7 +10,7 @@
 
 use labstream_net::{resolve, Inlet};
 use labstream_wire::Value;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
@@ -42,6 +42,19 @@ struct MarkerEvent {
     id: u64,
     text: String,
     approx_seq: u64,
+    /// 0 = normal/pending, 1 = CRC32 verified (✓), 2 = CRC32 mismatch (✗), 3 = user offline event (★)
+    kind: u8,
+}
+
+fn crc32_update(mut crc: u32, bytes: &[u8]) -> u32 {
+    for &b in bytes {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    crc
 }
 
 #[derive(Default)]
@@ -54,15 +67,58 @@ struct LaneState {
     recoveries: u64,
     markers_received: u64,
     markers_lost: u64,
+    crc_verified: u64,
+    crc_failed: u64,
+    user_events: u64,
     last_marker_id: Option<u64>,
     last_seq: u64,
     last_rx_at: Option<Instant>,
     points: VecDeque<PlotPoint>,
     gaps: VecDeque<GapSpan>,
     markers: VecDeque<MarkerEvent>,
+    /// Per-block CRC32 accumulator (`block_id = seq / 512` -> `(count, running_crc)`).
+    block_acc: HashMap<u64, (u32, u32)>,
+    /// Finalized 512-sample block CRCs (`block_id -> final_crc32`).
+    completed_blocks: HashMap<u64, u32>,
+    /// Expected CRCs received from `STIM_xxxx|<crc>` markers awaiting block completion.
+    pending_crc_markers: HashMap<u64, u32>,
 }
 
 impl LaneState {
+    fn feed_sample_crc(&mut self, seq: u64, val: f32) {
+        let block_id = seq / 512;
+        let entry = self.block_acc.entry(block_id).or_insert((0, 0xFFFF_FFFF));
+        entry.0 += 1;
+        entry.1 = crc32_update(entry.1, &val.to_le_bytes());
+        if entry.0 == 512 {
+            let final_crc = !entry.1;
+            self.block_acc.remove(&block_id);
+            self.completed_blocks.insert(block_id, final_crc);
+            if self.completed_blocks.len() > 128 {
+                if let Some(&min_k) = self.completed_blocks.keys().min() {
+                    self.completed_blocks.remove(&min_k);
+                }
+            }
+            if let Some(expected) = self.pending_crc_markers.remove(&block_id) {
+                self.record_crc_outcome(block_id + 1, final_crc == expected);
+            }
+        }
+    }
+
+    fn record_crc_outcome(&mut self, stim_id: u64, ok: bool) {
+        if ok {
+            self.crc_verified += 1;
+        } else {
+            self.crc_failed += 1;
+        }
+        for m in self.markers.iter_mut().rev() {
+            if m.id == stim_id && m.kind == 0 {
+                m.kind = if ok { 1 } else { 2 };
+                break;
+            }
+        }
+    }
+
     fn push_point(&mut self, seq: u64, val: f32, resent: bool) {
         if self.points.len() >= MAX_POINTS {
             self.points.pop_front();
@@ -83,7 +139,31 @@ impl LaneState {
     }
 
     fn push_marker(&mut self, text: String) {
-        let id = text
+        // Handle user-triggered offline events: `EVENT_<label>@<seq>`
+        if let Some(rest) = text.strip_prefix("EVENT_") {
+            let (label, ev_seq) = match rest.rsplit_once('@') {
+                Some((l, s)) => (l.to_string(), s.parse::<u64>().unwrap_or(self.last_seq)),
+                None => (rest.to_string(), self.last_seq),
+            };
+            self.user_events += 1;
+            if self.markers.len() >= MAX_MARKERS {
+                self.markers.pop_front();
+            }
+            self.markers.push_back(MarkerEvent {
+                id: 0,
+                text: format!("★ {label}"),
+                approx_seq: ev_seq,
+                kind: 3,
+            });
+            return;
+        }
+
+        // Handle 1 Hz CRC-signed markers: `STIM_0042|9f4a2c11`
+        let (base, expected_crc) = match text.split_once('|') {
+            Some((b, hex)) => (b, u32::from_str_radix(hex.trim(), 16).ok()),
+            None => (text.as_str(), None),
+        };
+        let id = base
             .strip_prefix("STIM_")
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
@@ -97,13 +177,30 @@ impl LaneState {
         }
         self.markers_received += 1;
         let approx_seq = if id > 0 { id * 512 } else { self.last_seq };
+        let mut kind = 0u8;
+        if let (true, Some(exp_crc)) = (id > 0, expected_crc) {
+            let block_id = id - 1;
+            if let Some(&got_crc) = self.completed_blocks.get(&block_id) {
+                let ok = got_crc == exp_crc;
+                if ok {
+                    self.crc_verified += 1;
+                    kind = 1;
+                } else {
+                    self.crc_failed += 1;
+                    kind = 2;
+                }
+            } else {
+                self.pending_crc_markers.insert(block_id, exp_crc);
+            }
+        }
         if self.markers.len() >= MAX_MARKERS {
             self.markers.pop_front();
         }
         self.markers.push_back(MarkerEvent {
             id,
-            text,
+            text: base.to_string(),
             approx_seq,
+            kind,
         });
     }
 
@@ -119,10 +216,16 @@ impl LaneState {
         self.recoveries = 0;
         self.markers_received = 0;
         self.markers_lost = 0;
+        self.crc_verified = 0;
+        self.crc_failed = 0;
+        self.user_events = 0;
         self.last_marker_id = None;
         self.points.clear();
         self.gaps.clear();
         self.markers.clear();
+        self.block_acc.clear();
+        self.completed_blocks.clear();
+        self.pending_crc_markers.clear();
     }
 }
 
@@ -363,6 +466,7 @@ fn run_labstream_eeg(shared: Arc<Mutex<SharedState>>) {
             }
             expected_seq = Some(seq + 1);
             l.received += 1;
+            l.feed_sample_crc(seq, val);
             let is_resent = (i as u64) < resent_delta;
             if (seq & 3) == 0 {
                 l.push_point(seq, val, is_resent);
@@ -454,7 +558,7 @@ fn respond(stream: &mut TcpStream, status: &str, ct: &str, body: &str) -> std::i
 
 fn lane_json(l: &LaneState) -> String {
     let mut out = format!(
-        "{{\"live\":{},\"connected\":{},\"transport\":\"{}\",\"received\":{},\"lost\":{},\"resent\":{},\"recoveries\":{},\"markers_received\":{},\"markers_lost\":{},\"last_seq\":{},\"points\":[",
+        "{{\"live\":{},\"connected\":{},\"transport\":\"{}\",\"received\":{},\"lost\":{},\"resent\":{},\"recoveries\":{},\"markers_received\":{},\"markers_lost\":{},\"crc_verified\":{},\"crc_failed\":{},\"user_events\":{},\"last_seq\":{},\"points\":[",
         l.is_live(),
         l.connected,
         l.transport,
@@ -464,6 +568,9 @@ fn lane_json(l: &LaneState) -> String {
         l.recoveries,
         l.markers_received,
         l.markers_lost,
+        l.crc_verified,
+        l.crc_failed,
+        l.user_events,
         l.last_seq,
     );
     for (i, p) in l.points.iter().enumerate() {
@@ -489,7 +596,10 @@ fn lane_json(l: &LaneState) -> String {
         if i > 0 {
             out.push(',');
         }
-        out.push_str(&format!("[{},\"{}\",{}]", m.id, m.text, m.approx_seq));
+        out.push_str(&format!(
+            "[{},\"{}\",{},{}]",
+            m.id, m.text, m.approx_seq, m.kind
+        ));
     }
     out.push_str("]}");
     out
@@ -743,18 +853,37 @@ function drawLane(canvas, lane, minSeq, maxSeq, liveColor, markerColor) {
     ctx.fillText(`PERMANENT LOSS: ${lost.toLocaleString()} samples`, (x1 + x2) / 2, H * 0.48);
   }
 
-  // Event markers
-  ctx.strokeStyle = markerColor;
-  ctx.fillStyle = markerColor;
+  // Event markers (including CRC32 ✓ checkmarks and ★ offline user events)
   ctx.font = '11px ui-monospace, monospace';
   ctx.textAlign = 'left';
-  for (const [id, text, seq] of lane.markers) {
+  for (const [id, text, seq, kind] of lane.markers) {
     if (seq < minSeq || seq > maxSeq) continue;
     const x = xOf(seq);
-    ctx.globalAlpha = 0.55;
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
-    ctx.globalAlpha = 0.9;
-    ctx.fillText(text, x + 3, 14);
+    if (kind === 3) {
+      // Unpredictable user-injected event (press Enter while offline!)
+      ctx.fillStyle = 'rgba(244, 114, 182, 0.16)';
+      ctx.fillRect(x - 3, 0, 14, H);
+      ctx.strokeStyle = '#f472b6';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      ctx.lineWidth = 1;
+      ctx.font = 'bold 12px system-ui, sans-serif';
+      const tw = ctx.measureText(text).width + 10;
+      ctx.fillStyle = '#db2777';
+      ctx.beginPath(); ctx.roundRect(x + 4, 22, tw, 20, 4); ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.fillText(text, x + 9, 36);
+      ctx.font = '11px ui-monospace, monospace';
+    } else {
+      const label = kind === 1 ? `${text} ✓` : (kind === 2 ? `${text} ✗` : text);
+      const col = kind === 1 ? '#3fb950' : (kind === 2 ? '#f85149' : markerColor);
+      ctx.strokeStyle = col;
+      ctx.fillStyle = col;
+      ctx.globalAlpha = 0.45;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      ctx.globalAlpha = 0.95;
+      ctx.fillText(label, x + 3, 14);
+    }
   }
   ctx.globalAlpha = 1.0;
 
@@ -807,12 +936,14 @@ async function poll() {
       `<div class="stat"><span>LOST:</span> <b class="${o.lost > 0 ? 'bad' : ''}">${o.lost.toLocaleString()}</b></div>` +
       `<div class="stat"><span>MARKERS:</span> ${o.markers_received} (<b class="${o.markers_lost > 0 ? 'bad' : ''}">${o.markers_lost} lost</b>)</div>`;
 
+    const crcTotal = l.crc_verified + l.crc_failed;
+    const crcTxt = crcTotal > 0 ? `${l.crc_verified}/${crcTotal} (100% BIT-EXACT)` : 'waiting...';
     document.getElementById('lStats').innerHTML =
       `<div class="stat"><span>RX:</span> ${l.received.toLocaleString()}</div>` +
       `<div class="stat"><span>LOST:</span> <b class="${l.lost > 0 ? 'bad' : 'good'}">${l.lost.toLocaleString()}</b></div>` +
       `<div class="stat"><span>BACKFILLED:</span> <b class="${l.resent > 0 ? 'gold' : ''}">${l.resent.toLocaleString()}</b></div>` +
-      `<div class="stat"><span>MARKERS:</span> ${l.markers_received} (<b class="${l.markers_lost > 0 ? 'bad' : 'good'}">${l.markers_lost} lost</b>)</div>` +
-      `<div class="stat"><span>RECOVERIES:</span> ${l.recoveries}</div>`;
+      `<div class="stat"><span>CRC32:</span> <b class="${l.crc_failed > 0 ? 'bad' : 'good'}">${l.crc_failed > 0 ? l.crc_verified + '/' + crcTotal + ' FAIL' : crcTxt}</b></div>` +
+      `<div class="stat"><span>MARKERS:</span> ${l.markers_received} (<b class="${l.markers_lost > 0 ? 'bad' : 'good'}">${l.markers_lost} lost</b>)</div>`;
 
     drawLane(oCanvas, o, minSeq, maxSeq, '#38bdf8', '#f85149');
     drawLane(lCanvas, l, minSeq, maxSeq, '#3fb950', '#a371f7');
@@ -864,6 +995,10 @@ document.getElementById('exportPng').onclick = () => {
     bx = drawBadge(bx, 321, `RX: ${l.received.toLocaleString()}`, '#e6edf3', '#21262d', '#30363d');
     bx = drawBadge(bx, 321, `LOST: ${l.lost.toLocaleString()}`, l.lost === 0 ? '#3fb950' : '#f85149', l.lost === 0 ? 'rgba(63,185,80,0.18)' : 'rgba(248,81,73,0.18)', l.lost === 0 ? '#3fb950' : '#f85149');
     bx = drawBadge(bx, 321, `BACKFILLED: ${l.resent.toLocaleString()}`, '#f59e0b', 'rgba(245,158,11,0.18)', '#f59e0b');
+    const crcTot = l.crc_verified + l.crc_failed;
+    if (crcTot > 0) {
+      bx = drawBadge(bx, 321, l.crc_failed === 0 ? `CRC32: ${l.crc_verified}/${crcTot} BIT-EXACT ✓` : `CRC32 FAIL`, l.crc_failed === 0 ? '#3fb950' : '#f85149', l.crc_failed === 0 ? 'rgba(63,185,80,0.18)' : 'rgba(248,81,73,0.18)', l.crc_failed === 0 ? '#3fb950' : '#f85149');
+    }
     drawBadge(bx, 321, `MARKERS: ${l.markers_received} (${l.markers_lost} lost)`, '#3fb950', '#21262d', '#30363d');
   }
   c.drawImage(lCanvas, 20, 352);

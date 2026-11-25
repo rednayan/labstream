@@ -30,15 +30,18 @@ cargo run --release --manifest-path demos/demo1_dropout/Cargo.toml --bin demo1-s
 ## Run the Demo
 
 1. Wait until both **liblsl (top)** and **labstream (bottom)** show **LIVE**
-   and smooth green/cyan EEG waveforms + event markers (`STIM_0001`, ...).
+   and smooth waveforms + green `STIM_xxxx ✓` CRC32-verified markers.
 2. On **Machine A (Windows)**, turn Wi-Fi **OFF** (or unplug the Ethernet cable)
    for **5 to 10 seconds**.
-3. Turn Wi-Fi back **ON** (or plug the cable back in) and watch the screen:
-   - **liblsl (top):** permanently loses **~2,500–5,000 samples** and every
-     event marker pushed during the dropout (shown as a **red permanent-loss
-     hole**).
-   - **labstream (bottom):** reconnects, triggers `resume/1`, and backfills
-     **100 % of samples and markers** (highlighted in **gold/amber** as
-     recovered, with **0 lost**).
-4. Click **Export SVG** (or **Export PNG**) in the top bar to save a
-   presentation-ready comparison chart of the dropout you just recorded.
+3. **While Machine A is completely offline**, press **Enter** (or type a word
+   like `OFFLINE_PROOF` and press **Enter**) in the Windows terminal to inject
+   an unpredictable sharp EEG spike and custom marker.
+4. Turn Wi-Fi back **ON** (or plug the cable back in) and watch the screen:
+   - **liblsl (top):** freezes / permanently loses **~2,500–5,000 samples**,
+     misses every marker, and never sees your offline event.
+   - **labstream (bottom):** reconnects, triggers `resume/1`, backfills
+     **100 % of samples in gold/amber**, verifies every 1-second block with
+     **`CRC32: 100% BIT-EXACT` (`✓`)**, and displays your exact **`★ EVENT`**
+     marker + sharp EEG spike right inside the gold recovered window!
+5. Click **Export PNG** or **Export SVG** in the top bar to save a
+   presentation-ready comparison chart with all live counter and CRC32 badges.
