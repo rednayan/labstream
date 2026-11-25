@@ -1,0 +1,142 @@
+name: Nightly Oracle & Network Chaos
+
+on:
+  schedule:
+    # Run every night at 03:00 UTC.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  oracle-interop:
+    name: C++ liblsl Oracle Interop & pylsl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools and pylsl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build
+          pip install --no-cache-dir pylsl
+
+      - name: Cache pinned C++ liblsl oracle build
+        id: oracle-cache
+        uses: actions/cache@v4
+        with:
+          path: conformance/.build/install
+          key: liblsl-oracle-${{ runner.os }}-${{ hashFiles('conformance/oracle/PINS') }}
+
+      - name: Build pinned C++ liblsl oracle
+        if: steps.oracle-cache.outputs.cache-hit != 'true'
+        run: |
+          cmake -S conformance/liblsl -B conformance/.build/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/conformance/.build/install" \
+            -DLSL_UNITTESTS=OFF \
+            -DLSL_BENCHMARKS=OFF
+          cmake --build conformance/.build/build -j"$(nproc)"
+          cmake --install conformance/.build/build
+
+      - name: Build labstream C ABI, CLI, and interop peer
+        run: cargo build --release -p labstream-capi -p labstream-cli -p lsl-peer
+
+      - name: Run pylsl drop-in check against labstream liblsl.so
+        run: |
+          mkdir -p conformance/.build/rustlib
+          cp target/release/liblsl.so conformance/.build/rustlib/liblsl.so
+          python3 conformance/oracle/pylsl_check.py --lib "$PWD/target/release/liblsl.so"
+
+      - name: Run official liblsl C/C++ examples against both libraries
+        run: python3 conformance/oracle/examples.py
+
+      - name: Write oracle summary
+        if: always()
+        run: |
+          {
+            echo "## Nightly Oracle Interop"
+            echo ""
+            echo "| Check | Status |"
+            echo "|---|---|"
+            echo "| pylsl drop-in (\`liblsl.so\`) + 21 official liblsl examples | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  network-chaos:
+    name: Network Chaos (tc netem, firewalls, /dev/shm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Enable unprivileged user namespaces and install iproute2
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build iproute2
+
+      - name: Cache pinned C++ liblsl oracle build
+        id: oracle-cache
+        uses: actions/cache@v4
+        with:
+          path: conformance/.build/install
+          key: liblsl-oracle-${{ runner.os }}-${{ hashFiles('conformance/oracle/PINS') }}
+
+      - name: Build pinned C++ liblsl oracle
+        if: steps.oracle-cache.outputs.cache-hit != 'true'
+        run: |
+          cmake -S conformance/liblsl -B conformance/.build/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/conformance/.build/install" \
+            -DLSL_UNITTESTS=OFF \
+            -DLSL_BENCHMARKS=OFF
+          cmake --build conformance/.build/build -j"$(nproc)"
+          cmake --install conformance/.build/build
+
+      - name: Build labstream C ABI and CLI
+        run: cargo build --release -p labstream-capi -p labstream-cli
+
+      - name: Run network-chaos and container fallback suite
+        run: |
+          set +e
+          FAILED=0
+          {
+            echo "## Nightly Network Chaos Scorecard"
+            echo ""
+            echo "| Scenario | Script | Result |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          run_case() {
+            local label="$1"
+            local script="$2"
+            echo "=== $label ($script) ==="
+            if python3 "$script"; then
+              echo "| $label | \`$script\` | PASS |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| $label | \`$script\` | FAIL |" >> "$GITHUB_STEP_SUMMARY"
+              FAILED=1
+            fi
+          }
+
+          run_case "Legacy liblsl + labstream relay (3 s 100% cut)" "conformance/oracle/relay_test.py"
+          run_case "Lossless comp/1 over 1 Mbit/s link + 4000 Hz CPU" "conformance/oracle/comp_test.py"
+          run_case "select/1 FIR decimation over 1 Mbit/s link" "conformance/oracle/select_test.py"
+          run_case "Blocked multicast/broadcast/UDP + doctor" "conformance/oracle/doctor_net.py"
+          run_case "Isolated /dev/shm container TCP fallback" "conformance/oracle/shm_container_test.py"
+
+          exit "$FAILED"
