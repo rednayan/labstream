@@ -1,0 +1,15 @@
+[workspace]
+
+[package]
+name = "demo4-shm-ipc"
+version = "0.2.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+labstream = { path = "../../crates/labstream" }
+labstream-net = { path = "../../crates/labstream-net" }
+
+[[bin]]
+name = "demo4-ipc"
+path = "src/bin/demo4_ipc.rs"
