@@ -1,0 +1,15 @@
+[workspace]
+
+[package]
+name = "demo6-encryption"
+version = "0.2.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+labstream-net = { path = "../../crates/labstream-net" }
+labstream-wire = { path = "../../crates/labstream-wire" }
+
+[[bin]]
+name = "demo6-encryption"
+path = "src/bin/demo6_encryption.rs"
