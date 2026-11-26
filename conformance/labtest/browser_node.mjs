@@ -13,7 +13,7 @@ async function main() {
   const wasmBytes = fs.readFileSync("/opt/labstream/labstream_wasm.wasm");
   const wasm = await loadLabstreamWasm(wasmBytes);
 
-  const client = new LabstreamBrowserClient("ws://172.29.0.11:8765/", wasm);
+  const client = new LabstreamBrowserClient("ws://172.29.0.11:8765/ws", wasm);
   let samples = 0;
   let metaFrames = 0;
   let markerAck = false;

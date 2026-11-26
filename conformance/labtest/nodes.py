@@ -141,15 +141,35 @@ def run_vendor_amp():
         relay.wait(timeout=5)
 
 
+def run_enc_outlet():
+    """Child process on hd-eeg-node with process-global mandatory enc/1 enabled."""
+    cfg = write_cfg("[labstream]\nFeatures = {seq, resume, enc}\n")
+    os.environ["LSLAPICFG"] = cfg
+    lib = load_lsl(LABSTREAM_LIB)
+    bind_labstream_ext(lib)
+    lib.labstream_set_encryption(1, 1, b"labtest-psk-2026")
+    info_enc = lib.lsl_create_streaminfo(b"LabTest_Encrypted", b"Markers", 1, 0.0, 3, b"hd-enc-markers")
+    out_enc = lib.lsl_create_outlet(info_enc, 0, 360)
+    print("[enc-outlet] mandatory enc/1 clinical marker outlet ready")
+    end = time.monotonic() + DURATION + 20.0
+    mk_idx = 0
+    while time.monotonic() < end:
+        msg = f"PATIENT=LABTEST|MRN=100{mk_idx:03d}|SECRET".encode()
+        arr = (ctypes.c_char_p * 1)(msg)
+        lib.lsl_push_sample_strtp(out_enc, arr, 0.0, 1)
+        mk_idx += 1
+        time.sleep(1.0)
+
+
 def run_hd_eeg_node():
-    print("[hd-eeg-node] starting labstream HD EEG (comp/1 + meta/1) + enc/1 markers + WsBridge")
+    print("[hd-eeg-node] starting labstream HD EEG (comp/1 + meta/1) + enc/1 subprocess + WsBridge")
     cfg = write_cfg("[labstream]\nFeatures = {seq, resume, dgram, select, comp, meta}\n")
     os.environ["LSLAPICFG"] = cfg
 
     lib = load_lsl(LABSTREAM_LIB)
     bind_labstream_ext(lib)
 
-    # 1. Start HD EEG outlet (32 ch @ 250 Hz, comp/1 + meta/1, no encryption)
+    # 1. Start HD EEG outlet (32 ch @ 250 Hz, comp/1 + meta/1, plaintext so WsBridge & recorder connect)
     channels = 32
     srate = 250.0
     info_eeg = lib.lsl_create_streaminfo(b"LabTest_HDEEG", b"EEG", channels, srate, 1, b"hd-eeg-32")
@@ -170,15 +190,12 @@ def run_hd_eeg_node():
         stderr=sys.stderr,
     )
 
-    # 3. Enable mandatory enc/1 for the clinical marker outlet
-    lib.labstream_set_encryption(1, 1, b"labtest-psk-2026")
-    info_enc = lib.lsl_create_streaminfo(b"LabTest_Encrypted", b"Markers", 1, 0.0, 3, b"hd-enc-markers")
-    out_enc = lib.lsl_create_outlet(info_enc, 0, 360)
-
-    # Publish the encrypted outlet's UID so recorder-node can run a rogue plaintext probe.
-    enc_uid = lib.lsl_get_uid(info_enc).decode()
-    (SHARED / "enc_uid.txt").write_text(enc_uid)
-    print(f"[hd-eeg-node] encrypted marker outlet ready (uid={enc_uid})")
+    # 3. Start mandatory enc/1 marker outlet in its own process (encryption policy is per-process)
+    enc_proc = subprocess.Popen(
+        ["python3", "-u", "/labtest/nodes.py", "enc-outlet"],
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+    )
 
     buf = (ctypes.c_float * channels)()
     t0 = time.monotonic()
@@ -199,9 +216,6 @@ def run_hd_eeg_node():
                 last_meta = now
                 imp = f"{3.5 + (mk_idx % 5) * 0.4:.1f} kOhm".encode()
                 lib.labstream_outlet_push_metadata(out_eeg, b"imp.Cz", imp, 0.0)
-                msg = f"PATIENT=LABTEST|MRN=100{mk_idx:03d}|SECRET".encode()
-                arr = (ctypes.c_char_p * 1)(msg)
-                lib.lsl_push_sample_strtp(out_enc, arr, 0.0, 1)
                 mk_idx += 1
 
             nxt = t0 + seq / srate
@@ -210,7 +224,9 @@ def run_hd_eeg_node():
                 time.sleep(rem)
     finally:
         ws_proc.terminate()
+        enc_proc.terminate()
         ws_proc.wait(timeout=5)
+        enc_proc.wait(timeout=5)
 
 
 def sh(cmd: str):
@@ -268,8 +284,9 @@ def run_recorder_node():
     lib.lsl_open_stream(in_hd, 5.0, ctypes.byref(ec))
     assert ec.value == 0, f"open LabTest_HDEEG failed: {ec.value}"
 
-    # 3. Connect to encrypted clinical marker stream with PSK
-    lib.labstream_set_encryption(1, 1, b"labtest-psk-2026")
+    # 3. Connect to encrypted clinical marker stream with opportunistic PSK
+    #    (so plaintext VendorEEG-relayed can still reconnect after chaos blackout).
+    lib.labstream_set_encryption(1, 0, b"labtest-psk-2026")
     info_enc = resolve_one(lib, b"LabTest_Encrypted", 15.0)
     assert info_enc, "failed to resolve LabTest_Encrypted"
     in_enc = lib.lsl_create_inlet(info_enc, 360, 0, 1)
@@ -434,6 +451,8 @@ if __name__ == "__main__":
         run_vendor_amp()
     elif role == "hd-eeg-node":
         run_hd_eeg_node()
+    elif role == "enc-outlet":
+        run_enc_outlet()
     elif role == "recorder-node":
         run_recorder_node()
     else:
