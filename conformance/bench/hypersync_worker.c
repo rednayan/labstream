@@ -1,13 +1,13 @@
-/* Bare-metal C benchmark worker for N-device hyperscanning (2, 4, 8+ devices).
+/* Bare-metal head-to-head C benchmark worker for N-device hyperscanning:
+ *   Compiled twice (-O2):
+ *     - hypersync_liblsl    linked against pinned C++ liblsl (nearest-sample pairing)
+ *     - hypersync_labstream linked against labstream (SyncGroup 32-tap Blackman-sinc)
  *
- * Publishes N independent asynchronous LSL outlets (with distinct fractional ADC
- * offsets and optional heterogeneous rates / mid-run dropout on device #3), then
- * measures:
- *   1. Standard LSL nearest-sample pairing worst-pair phase & RMS error
- *   2. labstream SyncGroup (labstream_sync_create / labstream_sync_pull)
- *      worst-pair phase & RMS error, gap_mask accuracy, CPU %, and RSS MB.
+ * Usage:
+ *   hypersync_worker <engine:naive|sync> <n_devs> <ch_per_dev> <base_srate> <mode:uniform|mixed|dropout> <stim_hz> <secs>
  */
 #define _GNU_SOURCE
+#include <dlfcn.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -21,14 +21,12 @@
 #include "lsl_c.h"
 
 typedef void *labstream_sync_group;
-extern labstream_sync_group labstream_sync_create(
-    const lsl_streaminfo *infos, uint32_t count, double output_rate,
-    uint32_t half_width, int32_t auto_postprocess, double timeout);
-extern uint32_t labstream_sync_total_channels(labstream_sync_group sync);
-extern int32_t labstream_sync_pull(
-    labstream_sync_group sync, double *data_out, double *ts_out,
-    uint64_t *gap_mask_out, uint32_t max_samples, double timeout);
-extern void labstream_sync_destroy(labstream_sync_group sync);
+typedef labstream_sync_group (*fn_sync_create)(
+    const lsl_streaminfo *, uint32_t, double, uint32_t, int32_t, double);
+typedef uint32_t (*fn_sync_total_ch)(labstream_sync_group);
+typedef int32_t (*fn_sync_pull)(
+    labstream_sync_group, double *, double *, uint64_t *, uint32_t, double);
+typedef void (*fn_sync_destroy)(labstream_sync_group);
 
 #define MAX_DEVS 16
 #define TWO_PI 6.28318530717958647692
@@ -80,7 +78,7 @@ typedef struct {
     double offset_sec;
     double stim_hz;
     double secs;
-    double drop_start; /* > 0 to drop this device mid-run */
+    double drop_start;
     double drop_len;
     lsl_streaminfo info;
     lsl_outlet outlet;
@@ -91,10 +89,6 @@ typedef struct {
 
 static void *dev_thread(void *arg) {
     DevCfg *d = (DevCfg *)arg;
-    d->info = lsl_create_streaminfo(d->name, "EEG", d->channels, d->srate, cft_float32, d->name);
-    d->outlet = lsl_create_outlet(d->info, 0, 360);
-    d->ready = 1;
-
     int chunk = (int)lrint(d->srate * 0.02);
     if (chunk < 1) chunk = 1;
     float *buf = (float *)calloc((size_t)(chunk * d->channels), sizeof(float));
@@ -104,7 +98,7 @@ static void *dev_thread(void *arg) {
     double base_ts = 1000.0;
     uint64_t seq = 0;
 
-    while (!d->stop && (mono_sec() - wall0) < d->secs + 12.0) {
+    while (!d->stop && (mono_sec() - wall0) < d->secs + 15.0) {
         double now_w = mono_sec();
         if (sync_t0 < 0.0 && d->sync_started && *d->sync_started) {
             sync_t0 = now_w;
@@ -128,13 +122,10 @@ static void *dev_thread(void *arg) {
     }
 
     free(buf);
-    lsl_destroy_outlet(d->outlet);
-    lsl_destroy_streaminfo(d->info);
     return NULL;
 }
 
 static double phase_err_deg_from_rms(double rms_diff, double rms_ref) {
-    /* For two unit-amplitude sine waves shifted by theta: rms(sin(wt) - sin(wt+theta)) / rms(sin(wt)) = 2*sin(theta/2). */
     if (rms_ref < 1e-9) return 0.0;
     double ratio = (rms_diff / rms_ref) * 0.5;
     if (ratio > 1.0) ratio = 1.0;
@@ -143,132 +134,225 @@ static double phase_err_deg_from_rms(double rms_diff, double rms_ref) {
 }
 
 int main(int argc, char **argv) {
-    /* Usage: hypersync_worker <n_devs> <channels_per_dev> <mode:uniform|mixed|dropout> <stim_hz> <secs> */
-    if (argc < 6) {
-        fprintf(stderr, "usage: hypersync_worker <n_devs> <ch_per_dev> <uniform|mixed|dropout> <stim_hz> <secs>\n");
+    if (argc < 8) {
+        fprintf(stderr, "usage: hypersync_worker <naive|sync> <n_devs> <ch> <base_srate> <uniform|mixed|dropout> <stim_hz> <secs>\n");
         return 2;
     }
-    int n_devs = atoi(argv[1]);
-    int ch_per_dev = atoi(argv[2]);
-    const char *mode = argv[3];
-    double stim_hz = atof(argv[4]);
-    double secs = atof(argv[5]);
+    int use_sync = strcmp(argv[1], "sync") == 0;
+    int n_devs = atoi(argv[2]);
+    int ch_per_dev = atoi(argv[3]);
+    double base_srate = atof(argv[4]);
+    const char *mode = argv[5];
+    double stim_hz = atof(argv[6]);
+    double secs = atof(argv[7]);
     if (n_devs < 2 || n_devs > MAX_DEVS) return 2;
 
     int is_mixed = strcmp(mode, "mixed") == 0;
     int is_dropout = strcmp(mode, "dropout") == 0;
-    double out_rate = 250.0;
+    double out_rate = base_srate;
 
     DevCfg devs[MAX_DEVS];
     pthread_t ths[MAX_DEVS];
     volatile int sync_started = 0;
     memset(devs, 0, sizeof(devs));
 
+    /* Worst-case half-sample asynchronous ADC offset across the N devices: [0, 0.5 / base_srate]. */
+    double max_offset = 0.5 / base_srate;
+
     for (int i = 0; i < n_devs; i++) {
         devs[i].idx = i;
         devs[i].sync_started = &sync_started;
-        snprintf(devs[i].name, sizeof(devs[i].name), "HS_%s_%d_%d", mode, n_devs, i);
+        snprintf(devs[i].name, sizeof(devs[i].name), "HS_%s_%s_%d_%d", argv[1], mode, n_devs, i);
         devs[i].channels = ch_per_dev;
         if (is_mixed) {
-            /* Mix of 500 Hz (EEG), 250 Hz (ECG), and 120 Hz (GSR/Eye) */
-            if (i % 4 == 0 || i % 4 == 1) devs[i].srate = 500.0;
-            else if (i % 4 == 2) devs[i].srate = 250.0;
-            else devs[i].srate = 120.0;
+            /* Mix of 2x, 1x, and 0.5x base_srate (e.g. 1000 / 500 / 250 Hz -> 500 Hz) */
+            if (i % 4 == 0 || i % 4 == 1) devs[i].srate = base_srate * 2.0;
+            else if (i % 4 == 2) devs[i].srate = base_srate;
+            else devs[i].srate = base_srate * 0.5;
         } else {
-            devs[i].srate = 250.0;
+            devs[i].srate = base_srate;
         }
-        /* Spread fractional offsets across [0, T_s/2] (worst-case 2.0 ms at 250 SPS). */
-        devs[i].offset_sec = ((double)i / (double)(n_devs - 1)) * 0.002;
+        devs[i].offset_sec = ((double)i / (double)(n_devs - 1)) * max_offset;
         devs[i].stim_hz = stim_hz;
         devs[i].secs = secs;
         if (is_dropout && i == 3) {
             devs[i].drop_start = 1.6;
             devs[i].drop_len = 1.0;
         }
-        pthread_create(&ths[i], NULL, dev_thread, &devs[i]);
-    }
-
-    for (int i = 0; i < n_devs; i++) {
-        while (!devs[i].ready) usleep(5000);
-    }
-    usleep(100000);
-
-    /* Resolve all N streams */
-    lsl_streaminfo resolved[MAX_DEVS];
-    for (int i = 0; i < n_devs; i++) {
-        lsl_streaminfo tmp[2];
-        int found = 0;
-        double t0 = mono_sec();
-        while (found <= 0 && mono_sec() - t0 < 8.0) {
-            found = lsl_resolve_byprop(tmp, 2, "name", devs[i].name, 1, 0.5);
-        }
-        if (found <= 0) {
-            fprintf(stderr, "failed to resolve %s\n", devs[i].name);
+        /* Create outlets sequentially so UDP/TCP port allocation never races across threads. */
+        devs[i].info = lsl_create_streaminfo(devs[i].name, "EEG", devs[i].channels, devs[i].srate, cft_float32, devs[i].name);
+        devs[i].outlet = lsl_create_outlet(devs[i].info, 0, 360);
+        if (!devs[i].outlet) {
+            fprintf(stderr, "failed to create outlet %d (%s)\n", i, devs[i].name);
             return 1;
         }
-        resolved[i] = tmp[0];
+        devs[i].ready = 1;
     }
+    for (int i = 0; i < n_devs; i++) {
+        pthread_create(&ths[i], NULL, dev_thread, &devs[i]);
+    }
+    usleep(120000);
 
-    /* Theoretical worst-case standard LSL nearest-sample pairing error across the N devices:
-     * max offset between device 0 (0.0 ms) and device N-1 (2.0 ms) -> phase = 360 * stim_hz * 0.002. */
-    double naive_worst_deg = fmod(360.0 * stim_hz * 0.002, 360.0);
-    if (naive_worst_deg > 180.0) naive_worst_deg = 360.0 - naive_worst_deg;
-    double naive_worst_rms_pct = 200.0 * sin((naive_worst_deg * 3.14159265358979323846 / 180.0) * 0.5);
-
-    /* Create SyncGroup across all N devices (auto_postprocess=0 -> same monotonic clock, pure sinc aligner) */
-    labstream_sync_group sg = labstream_sync_create(resolved, (uint32_t)n_devs, out_rate, 16, 0, 5.0);
-    if (!sg) {
-        fprintf(stderr, "labstream_sync_create failed\n");
+    lsl_streaminfo resolved[MAX_DEVS];
+    memset(resolved, 0, sizeof(resolved));
+    int resolved_cnt = 0;
+    double t_res = mono_sec();
+    while (resolved_cnt < n_devs && mono_sec() - t_res < 12.0) {
+        lsl_streaminfo all[64];
+        int n = lsl_resolve_all(all, 64, 0.8);
+        for (int k = 0; k < n; k++) {
+            const char *nm = lsl_get_name(all[k]);
+            int matched = 0;
+            for (int i = 0; i < n_devs; i++) {
+                if (!resolved[i] && nm && strcmp(nm, devs[i].name) == 0) {
+                    resolved[i] = all[k];
+                    resolved_cnt++;
+                    matched = 1;
+                    break;
+                }
+            }
+            if (!matched) lsl_destroy_streaminfo(all[k]);
+        }
+    }
+    for (int i = 0; i < n_devs && resolved_cnt < n_devs; i++) {
+        if (resolved[i]) continue;
+        lsl_streaminfo tmp[2];
+        if (lsl_resolve_byprop(tmp, 2, "name", devs[i].name, 1, 2.0) > 0) {
+            resolved[i] = tmp[0];
+            resolved_cnt++;
+        }
+    }
+    if (resolved_cnt < n_devs) {
+        fprintf(stderr, "failed to resolve all %d devices (got %d); missing:", n_devs, resolved_cnt);
+        for (int i = 0; i < n_devs; i++) {
+            if (!resolved[i]) fprintf(stderr, " %d(%s)", i, devs[i].name);
+        }
+        fprintf(stderr, "\n");
         return 1;
     }
-    uint32_t total_ch = labstream_sync_total_channels(sg);
-
-    const uint32_t batch_cap = 64;
-    double *data = (double *)malloc((size_t)(batch_cap * total_ch) * sizeof(double));
-    double *tss = (double *)malloc((size_t)batch_cap * sizeof(double));
-    uint64_t *masks = (uint64_t *)malloc((size_t)batch_cap * sizeof(uint64_t));
 
     double sq_diff[MAX_DEVS] = {0};
     double sq_ref[MAX_DEVS] = {0};
     uint64_t clean_n[MAX_DEVS] = {0};
     uint64_t gap_dev_counts[MAX_DEVS] = {0};
     uint64_t total_rows = 0;
+    uint32_t total_ch = (uint32_t)(n_devs * ch_per_dev);
 
-    double wall0 = mono_sec();
-    double cpu0 = cpu_sec();
-    sync_started = 1;
+    double wall0 = 0.0, cpu0 = 0.0, wall_dt = 0.0, cpu_dt = 0.0, rss = 0.0;
 
-    while (mono_sec() - wall0 < secs) {
-        int32_t got = labstream_sync_pull(sg, data, tss, masks, batch_cap, 0.05);
-        if (got <= 0) continue;
-        for (int32_t r = 0; r < got; r++) {
-            total_rows++;
-            uint64_t m = masks[r];
-            for (int d = 0; d < n_devs; d++) {
-                if ((m & (1ULL << d)) != 0) gap_dev_counts[d]++;
+    if (use_sync) {
+        fn_sync_create f_create = (fn_sync_create)dlsym(RTLD_DEFAULT, "labstream_sync_create");
+        fn_sync_total_ch f_ch = (fn_sync_total_ch)dlsym(RTLD_DEFAULT, "labstream_sync_total_channels");
+        fn_sync_pull f_pull = (fn_sync_pull)dlsym(RTLD_DEFAULT, "labstream_sync_pull");
+        fn_sync_destroy f_destroy = (fn_sync_destroy)dlsym(RTLD_DEFAULT, "labstream_sync_destroy");
+        if (!f_create || !f_pull) {
+            fprintf(stderr, "labstream_sync_* symbols not found\n");
+            return 1;
+        }
+        labstream_sync_group sg = f_create(resolved, (uint32_t)n_devs, out_rate, 16, 0, 5.0);
+        if (!sg) {
+            fprintf(stderr, "labstream_sync_create failed\n");
+            return 1;
+        }
+        total_ch = f_ch(sg);
+        const uint32_t batch_cap = 128;
+        double *data = (double *)malloc((size_t)(batch_cap * total_ch) * sizeof(double));
+        double *tss = (double *)malloc((size_t)batch_cap * sizeof(double));
+        uint64_t *masks = (uint64_t *)malloc((size_t)batch_cap * sizeof(uint64_t));
+
+        wall0 = mono_sec();
+        cpu0 = cpu_sec();
+        sync_started = 1;
+
+        uint64_t settle = (uint64_t)(out_rate * 0.25);
+        while (mono_sec() - wall0 < secs) {
+            int32_t got = f_pull(sg, data, tss, masks, batch_cap, 0.05);
+            if (got <= 0) continue;
+            for (int32_t r = 0; r < got; r++) {
+                total_rows++;
+                uint64_t m = masks[r];
+                for (int d = 0; d < n_devs; d++) {
+                    if ((m & (1ULL << d)) != 0) gap_dev_counts[d]++;
+                }
+                if (total_rows <= settle) continue;
+                if ((m & 1ULL) != 0) continue;
+                double ref = data[r * total_ch + 0];
+                if (!isfinite(ref)) continue;
+                for (int d = 1; d < n_devs; d++) {
+                    if ((m & (1ULL << d)) != 0) continue;
+                    double v = data[r * total_ch + (uint32_t)(d * ch_per_dev)];
+                    if (!isfinite(v)) continue;
+                    double diff = ref - v;
+                    sq_diff[d] += diff * diff;
+                    sq_ref[d] += ref * ref;
+                    clean_n[d]++;
+                }
             }
-            /* Skip first 50 aligned rows (0.2 s filter settling) */
-            if (total_rows <= 50) continue;
-            if ((m & 1ULL) != 0) continue;
-            double ref = data[r * total_ch + 0]; /* device 0 ch 0 */
-            if (!isfinite(ref)) continue;
+        }
+        wall_dt = mono_sec() - wall0;
+        cpu_dt = cpu_sec() - cpu0;
+        rss = rss_mb();
+        f_destroy(sg);
+        free(data);
+        free(tss);
+        free(masks);
+    } else {
+        /* Standard LSL nearest-sample pairing across N real lsl_inlets (C++ liblsl). */
+        lsl_inlet inlets[MAX_DEVS];
+        int32_t ec = 0;
+        for (int i = 0; i < n_devs; i++) {
+            inlets[i] = lsl_create_inlet(resolved[i], 360, 0, 1);
+            lsl_open_stream(inlets[i], 5.0, &ec);
+        }
+
+        const int max_pull = 256;
+        float *buf = (float *)malloc((size_t)(max_pull * ch_per_dev) * sizeof(float));
+        double *tss = (double *)malloc((size_t)max_pull * sizeof(double));
+
+        /* Store latest sample (ch0) per device as each inlet drains — standard nearest-sample pairing. */
+        double latest_val[MAX_DEVS] = {0};
+        int has_val[MAX_DEVS] = {0};
+
+        wall0 = mono_sec();
+        cpu0 = cpu_sec();
+        sync_started = 1;
+
+        while (mono_sec() - wall0 < secs) {
+            /* Drain devices 1..N-1 non-blocking so we always hold their latest sample. */
             for (int d = 1; d < n_devs; d++) {
-                if ((m & (1ULL << d)) != 0) continue;
-                double v = data[r * total_ch + (uint32_t)(d * ch_per_dev)];
-                if (!isfinite(v)) continue;
-                double diff = ref - v;
+                unsigned long elems = lsl_pull_chunk_f(
+                    inlets[d], buf, tss, (unsigned long)(max_pull * ch_per_dev), (unsigned long)max_pull, 0.0, &ec);
+                unsigned long ns = elems / (unsigned long)ch_per_dev;
+                if (ns > 0) {
+                    latest_val[d] = (double)buf[(ns - 1) * (unsigned long)ch_per_dev];
+                    has_val[d] = 1;
+                }
+            }
+            /* Pull reference device 0 and pair against each other device's nearest available sample. */
+            unsigned long elems0 = lsl_pull_chunk_f(
+                inlets[0], buf, tss, (unsigned long)(max_pull * ch_per_dev), (unsigned long)max_pull, 0.01, &ec);
+            unsigned long ns0 = elems0 / (unsigned long)ch_per_dev;
+            if (ns0 == 0) continue;
+            total_rows += ns0;
+            if (mono_sec() - wall0 < 0.4) continue;
+            double ref = (double)buf[(ns0 - 1) * (unsigned long)ch_per_dev];
+            for (int d = 1; d < n_devs; d++) {
+                if (!has_val[d]) continue;
+                double diff = ref - latest_val[d];
                 sq_diff[d] += diff * diff;
                 sq_ref[d] += ref * ref;
                 clean_n[d]++;
             }
         }
+        wall_dt = mono_sec() - wall0;
+        cpu_dt = cpu_sec() - cpu0;
+        rss = rss_mb();
+        for (int i = 0; i < n_devs; i++) lsl_destroy_inlet(inlets[i]);
+        free(buf);
+        free(tss);
     }
 
-    double wall_dt = mono_sec() - wall0;
-    double cpu_dt = cpu_sec() - cpu0;
     double cpu_pct = wall_dt > 0.0 ? (cpu_dt / wall_dt) * 100.0 : 0.0;
-    double rss = rss_mb();
-
     double worst_rms_pct = 0.0;
     double worst_deg = 0.0;
     for (int d = 1; d < n_devs; d++) {
@@ -282,30 +366,25 @@ int main(int argc, char **argv) {
     }
 
     for (int i = 0; i < n_devs; i++) devs[i].stop = 1;
-    labstream_sync_destroy(sg);
     for (int i = 0; i < n_devs; i++) {
         lsl_destroy_streaminfo(resolved[i]);
         pthread_join(ths[i], NULL);
+        lsl_destroy_outlet(devs[i].outlet);
+        lsl_destroy_streaminfo(devs[i].info);
     }
-    free(data);
-    free(tss);
-    free(masks);
 
     uint64_t healthy_gaps = 0;
     for (int d = 0; d < n_devs; d++) {
         if (!(is_dropout && d == 3)) healthy_gaps += gap_dev_counts[d];
     }
 
-    printf("{\"mode\":\"%s\",\"devices\":%d,\"total_channels\":%u,\"stim_hz\":%.1f,"
-           "\"aligned_rows\":%llu,\"rows_per_sec\":%.1f,"
-           "\"naive_worst_deg\":%.2f,\"naive_worst_rms_pct\":%.2f,"
-           "\"synced_worst_deg\":%.4f,\"synced_worst_rms_pct\":%.4f,"
+    printf("{\"engine\":\"%s\",\"mode\":\"%s\",\"devices\":%d,\"base_srate\":%.1f,"
+           "\"total_channels\":%u,\"stim_hz\":%.1f,"
+           "\"aligned_rows\":%llu,\"worst_deg\":%.4f,\"worst_rms_pct\":%.4f,"
            "\"drop_dev3_gaps\":%llu,\"healthy_dev_gaps\":%llu,"
            "\"cpu_pct\":%.2f,\"rss_mb\":%.1f}\n",
-           mode, n_devs, total_ch, stim_hz,
-           (unsigned long long)total_rows, wall_dt > 0.0 ? (double)total_rows / wall_dt : 0.0,
-           naive_worst_deg, naive_worst_rms_pct,
-           worst_deg, worst_rms_pct,
+           argv[1], mode, n_devs, base_srate, total_ch, stim_hz,
+           (unsigned long long)total_rows, worst_deg, worst_rms_pct,
            (unsigned long long)(n_devs > 3 ? gap_dev_counts[3] : 0),
            (unsigned long long)healthy_gaps,
            cpu_pct, rss);

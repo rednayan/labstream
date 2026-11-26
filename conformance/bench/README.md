@@ -15,7 +15,7 @@ Linux network namespaces (`unshare -Urn` + `veth` + `tc netem`).
 - **B3 (Lossy Wi-Fi):** 8 ch @ 512 Hz, chunk 16, `tc netem delay 20ms 5ms loss 1%` — C++ `liblsl` vs `labstream dgram/1`
 - **B4 (`comp/1` & `enc/1` overhead):** 32 ch @ 500 Hz, chunk 16 — plain TCP vs `comp/1` vs `enc/1`
 - **B5 (3 s hard blackout):** 8 ch @ 512 Hz, `tc netem loss 100%` for 3.0 s — C++ `liblsl` vs `labstream resume/1`
-- **H1–H3 (Multi-device hyperscanning, `hypersync_bench.py`):** 2, 4, and 8 simultaneous asynchronous devices (up to 64 ch), 8-device heterogeneous rates (`500 / 250 / 120 Hz -> 250 Hz`), and 8-device single-headset 1.0 s dropout (`gap_mask` isolation)
+- **H1–H5 (Head-to-head hyperscanning, `hypersync_bench.py`):** C++ `liblsl` nearest-sample pairing vs `labstream SyncGroup` across 2, 4, and 8 asynchronous devices at `250 Hz`, `1000 Hz`, and `2000 Hz` (up to 64 ch), 8-device mixed rates (`1000 / 500 / 250 Hz -> 500 Hz`), and 8-device `500 Hz` single-headset `1.0 s` dropout (`gap_mask` isolation)
 
 ## Run
 
@@ -30,6 +30,6 @@ python3 conformance/bench/hypersync_bench.py
 
 Outputs are written to `conformance/bench/results/`:
 
-- `bench-results.json` — machine metadata and all metrics
-- `bench-summary.md` — Markdown comparison table
-- `bench-latency.svg` and `bench-cpu.svg` — zero-dependency SVG charts
+- `bench-results.json` and `hypersync-results.json` — machine metadata and all metrics
+- `bench-summary.md` and `hypersync-summary.md` — Markdown comparison tables
+- `bench-latency.svg`, `bench-cpu.svg`, and `hypersync-scaling.svg` — zero-dependency SVG charts
