@@ -25,3 +25,7 @@ __pycache__/
 # MkDocs build output and generated root-doc mirror.
 /site
 /docs/_ref
+
+# Local bare-metal benchmark build artifacts and results.
+/conformance/bench/.build
+/conformance/bench/results
