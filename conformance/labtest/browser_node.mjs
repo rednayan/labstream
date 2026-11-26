@@ -4,7 +4,7 @@
 // confirms live meta/1 updates, and sends a browser marker back to LSL.
 
 import fs from "node:fs";
-import { loadLabstreamWasm, LabstreamBrowserClient } from "/opt/labstream/labstream.js";
+import { loadLabstreamWasm, LabstreamBrowserClient } from "/opt/labstream/labstream.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -50,11 +50,13 @@ async function main() {
   };
   fs.writeFileSync("/shared/browser_result.json", JSON.stringify(result, null, 2));
   console.log("[browser-node] result:", JSON.stringify(result));
+  // Stay alive until recorder-node finishes and compose tears down the stack.
+  await new Promise(() => {});
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   const result = { ok: false, error: String(err) };
   fs.writeFileSync("/shared/browser_result.json", JSON.stringify(result, null, 2));
   console.error("[browser-node] error:", err);
-  process.exit(1);
+  await new Promise(() => {});
 });
