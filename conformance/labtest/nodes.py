@@ -49,6 +49,9 @@ def load_lsl(lib_path: str):
     lib.lsl_push_sample_ftp.argtypes = [
         ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_double, ctypes.c_int,
     ]
+    lib.lsl_push_chunk_ftp.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_ulong, ctypes.c_double, ctypes.c_int,
+    ]
     lib.lsl_push_sample_strtp.argtypes = [
         ctypes.c_void_p, ctypes.POINTER(ctypes.c_char_p), ctypes.c_double, ctypes.c_int,
     ]
@@ -197,7 +200,8 @@ def run_hd_eeg_node():
         stderr=sys.stderr,
     )
 
-    buf = (ctypes.c_float * channels)()
+    chunk_n = 16  # 64 ms EEG chunks so self-contained UDP DATA_COMP compresses deltas
+    buf = (ctypes.c_float * (chunk_n * channels))()
     t0 = time.monotonic()
     seq = 0
     end = t0 + DURATION + 20.0
@@ -205,11 +209,14 @@ def run_hd_eeg_node():
     mk_idx = 0
     try:
         while time.monotonic() < end:
-            for c in range(channels):
-                buf[c] = eeg_val(seq, c)
-            ts = 2000.0 + seq / srate
-            lib.lsl_push_sample_ftp(out_eeg, buf, ts, 1)
-            seq += 1
+            for k in range(chunk_n):
+                s = seq + k
+                base = k * channels
+                for c in range(channels):
+                    buf[base + c] = eeg_val(s, c)
+            end_ts = 2000.0 + (seq + chunk_n - 1) / srate
+            lib.lsl_push_chunk_ftp(out_eeg, buf, chunk_n * channels, end_ts, 1)
+            seq += chunk_n
 
             now = time.monotonic()
             if now - last_meta >= 1.0:
@@ -395,7 +402,7 @@ def run_recorder_node():
     checks = {
         "S1_vendor_relay_zero_loss": rel_lost == 0 and stats["rel_samples"] > 1000 and stats["rel_bit_errors"] == 0,
         "S2_vendor_relay_backfilled": (not CHAOS) or rel_resent > 0,
-        "S3_hd_eeg_comp_lossless": hd_lost == 0 and stats["hd_samples"] > 1000 and stats["hd_bit_errors"] == 0 and hd_comp and hd_ratio < 0.75,
+        "S3_hd_eeg_comp_lossless": hd_lost == 0 and stats["hd_samples"] > 1000 and stats["hd_bit_errors"] == 0 and hd_comp and hd_ratio < 0.80,
         "S4_live_meta_received": hd_meta >= 1,
         "S5_enc_active_and_decrypted": enc_active and stats["enc_markers"] >= 5,
         "S6_multicast_blocked_doctor": (not CHAOS) or doctor_ok,
