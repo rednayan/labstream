@@ -50,13 +50,13 @@ async function main() {
   };
   fs.writeFileSync("/shared/browser_result.json", JSON.stringify(result, null, 2));
   console.log("[browser-node] result:", JSON.stringify(result));
-  // Stay alive until recorder-node finishes and compose tears down the stack.
-  await new Promise(() => {});
+  // Keep an active event-loop handle until recorder-node finishes and compose tears down.
+  setInterval(() => {}, 60_000);
 }
 
-main().catch(async (err) => {
+main().catch((err) => {
   const result = { ok: false, error: String(err) };
   fs.writeFileSync("/shared/browser_result.json", JSON.stringify(result, null, 2));
   console.error("[browser-node] error:", err);
-  await new Promise(() => {});
+  setInterval(() => {}, 60_000);
 });
