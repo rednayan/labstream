@@ -184,6 +184,13 @@ int main(int argc, char **argv) {
     double *step_err_ms = (double *)malloc(cap_step * sizeof(double));
     size_t n_step_err = 0;
 
+    /* Capture up to 500 raw sample timestamps (2 s @ 250 Hz) for staircase SVG. */
+    const size_t trace_cap = 500;
+    double *raw_trace_ms = (double *)malloc(trace_cap * sizeof(double));
+    size_t n_raw_trace = 0;
+    double *sync_trace_ms = (double *)malloc(trace_cap * sizeof(double));
+    size_t n_sync_trace = 0;
+
     uint64_t total_samples = 0;
     uint64_t total_chunks = 0;
     uint64_t finite_vals = 0;
@@ -220,6 +227,9 @@ int main(int argc, char **argv) {
             double ts = tbuf[s];
             if (first_ts < 0.0) first_ts = ts;
             last_ts = ts;
+            if (n_raw_trace < trace_cap) {
+                raw_trace_ms[n_raw_trace++] = (ts - first_ts) * 1000.0;
+            }
             if (prev_ts >= 0.0) {
                 double dt = ts - prev_ts;
                 if (dt > expected_dt * 2.5) ts_gaps++;
@@ -310,11 +320,16 @@ int main(int argc, char **argv) {
             uint64_t *smasks = (uint64_t *)malloc((size_t)bcap * sizeof(uint64_t));
             double st0 = mono_sec();
             double sc0 = cpu_sec();
+            double sync_first_ts = -1.0;
             while (mono_sec() - st0 < sg_secs) {
                 int32_t got = f_sg_pull(sg, sdata, stss, smasks, bcap, 0.1);
                 if (got <= 0) continue;
                 for (int32_t r = 0; r < got; r++) {
                     sync_rows++;
+                    if (sync_first_ts < 0.0) sync_first_ts = stss[r];
+                    if (n_sync_trace < trace_cap) {
+                        sync_trace_ms[n_sync_trace++] = (stss[r] - sync_first_ts) * 1000.0;
+                    }
                     if ((smasks[r] & 1ULL) != 0) sync_hw_gaps++;
                 }
             }
@@ -361,8 +376,8 @@ int main(int argc, char **argv) {
            "\"sync_rows\":%llu,"
            "\"sync_hw_gaps\":%llu,"
            "\"sync_cpu_pct\":%.2f,"
-           "\"rss_mb\":%.1f"
-           "}\n",
+           "\"rss_mb\":%.1f,"
+           "\"raw_trace_ms\":[",
            n_found, ptype, ch, fmt_name(fmt), srate, eff_hz, wall_dt,
            (unsigned long long)total_samples, (unsigned long long)total_chunks,
            (long long)samples_lost, (unsigned long long)ts_gaps,
@@ -376,8 +391,18 @@ int main(int argc, char **argv) {
            sync_streams, sync_real_pair,
            (unsigned long long)sync_rows, (unsigned long long)sync_hw_gaps,
            sync_cpu, sync_rss);
+    for (size_t i = 0; i < n_raw_trace; i++) {
+        printf("%s%.3f", i ? "," : "", raw_trace_ms[i]);
+    }
+    printf("],\"sync_trace_ms\":[");
+    for (size_t i = 0; i < n_sync_trace; i++) {
+        printf("%s%.3f", i ? "," : "", sync_trace_ms[i]);
+    }
+    printf("]}\n");
     fflush(stdout);
     free(chunk_dt_ms);
     free(step_err_ms);
+    free(raw_trace_ms);
+    free(sync_trace_ms);
     return 0;
 }
