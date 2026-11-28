@@ -71,6 +71,7 @@ nav:
       - Feature Roadmap: roadmap.md
   - Verification & Benchmarks:
       - Conformance Results: conformance.md
+      - Benchmarks & Hardware: benchmarks.md
       - Transport Latency: latency.md
   - Internals & Release:
       - Rust API Design: _ref/design.md

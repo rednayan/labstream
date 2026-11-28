@@ -268,6 +268,21 @@ rules for each feature.
 | `ws` + `labstream-wasm` | opt-in RFC 6455 WebSocket bridge and 27 KB WebAssembly browser decoder |
 | `labstream-cli` | `doctor`, `top`, `play`, `relay`, and `calibrate` tools |
 
+## Benchmarks and hardware validation
+
+Bare-metal head-to-head benchmarks against pinned C++ `sccn/liblsl`
+(`e651023c`) and live validation with a commercial wireless Bluetooth EEG
+amplifier over a real LAN are in [`docs/benchmarks.md`](docs/benchmarks.md):
+
+- **Local IPC (`shm/1`):** `2.0 us` p50 vs `592.0 us` on C++ `liblsl` TCP (`64 ch @ 1000 Hz`).
+- **Lossy Wi-Fi (`dgram/1`, 1% loss):** `20.1 ms` p50 / `40.3 ms` p99 vs `36.9 ms` / `74.3 ms` on TCP.
+- **8-device hyperscanning (`2000 Hz`, 64 ch):** `0.0004 deg` worst-pair phase error and `18.9 MB` RSS vs `22.0 deg` and `200.0 MB` RSS on C++ `liblsl`.
+- **Live wireless EEG over LAN (`1000 Hz` + `20 Hz`):** `0.665x` lossless `comp/1` wire ratio on un-railed saline electrodes (`33.5%` saved), `0` false gaps across 50:1 dual-stream `SyncGroup`, and exact `8.775 s` (`8,775` rows) `gap_mask` isolation across a physical power-off and reconnect.
+
+![Transport Latency: Local IPC and Lossy Wi-Fi](docs/assets/benchmarks/fig1_transport_benchmarks.svg)
+
+![Multi-Device Hyperscanning: Phase Accuracy and Memory Scaling](docs/assets/benchmarks/fig2_hypersync_scaling.svg)
+
 ## Interactive demos
 
 `demos/README.md` holds seven standalone demos with browser dashboards and PNG
@@ -283,6 +298,7 @@ bandwidth compression, local shared-memory IPC, browser WebAssembly + live
 | `docs/extensions.md` | wire format and rules for every `labstream` extension |
 | `docs/tools.md` | CLI tools (`top`, `play`, `relay`, `calibrate`) |
 | `docs/health.md` | stream health snapshots and gap descriptors |
+| `docs/benchmarks.md` | bare-metal C++ liblsl benchmarks and live hardware validation |
 | `docs/latency.md` | latency measurements across transports |
 | `docs/discovery.md` | cross-machine discovery and `labstream doctor` |
 | `docs/roadmap.md` | the full feature roadmap (steps 0 to 18) |
