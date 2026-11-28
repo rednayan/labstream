@@ -28,7 +28,8 @@ impl SyncGroup {
     /// Build a [`SyncGroup`] from opened numeric [`Inlet`]s and `cfg`.
     ///
     /// When `cfg.auto_postprocess` is true (the default), enables
-    /// `CLOCKSYNC | DRIFT | DEVICE_DELAY` on each inlet so clock drift and
+    /// `CLOCKSYNC | DEJITTER | MONOTONIZE | DRIFT | DEVICE_DELAY` on each
+    /// inlet so bursty wireless/USB arrival timestamps, clock drift, and
     /// calibrated device delays are corrected before resampling.
     pub fn new(mut inlets: Vec<Inlet>, cfg: SyncConfig) -> io::Result<Self> {
         if inlets.is_empty() {
@@ -56,7 +57,13 @@ impl SyncGroup {
                 ));
             }
             if cfg.auto_postprocess {
-                inlet.set_postprocessing(flags::CLOCKSYNC | flags::DRIFT | flags::DEVICE_DELAY);
+                inlet.set_postprocessing(
+                    flags::CLOCKSYNC
+                        | flags::DEJITTER
+                        | flags::MONOTONIZE
+                        | flags::DRIFT
+                        | flags::DEVICE_DELAY,
+                );
             }
             specs.push(StreamSpec {
                 channels,
